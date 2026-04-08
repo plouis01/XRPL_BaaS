@@ -1,0 +1,32 @@
+{
+  "name": "railforge",
+  "version": "0.0.0",
+  "private": true,
+  "description": "RailForge — XRPL Banking-as-a-Service platform. See ARCHITECTURE.md, PLAN.md, SETUP.md.",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "turbo dev",
+    "build": "turbo build",
+    "test": "turbo test",
+    "test:integration": "turbo test:integration",
+    "typecheck": "turbo typecheck",
+    "lint": "biome check .",
+    "format": "biome check --write .",
+    "db:generate": "bunx drizzle-kit generate --config=packages/db/drizzle.config.ts",
+    "db:migrate": "bunx drizzle-kit migrate --config=packages/db/drizzle.config.ts",
+    "db:studio": "bunx drizzle-kit studio --config=packages/db/drizzle.config.ts"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^1.9.4",
+    "turbo": "^2.3.0",
+    "typescript": "^5.6.3",
+    "@types/node": "^22.9.0"
+  },
+  "packageManager": "bun@1.1.38",
+  "engines": {
+    "node": ">=22"
+  }
+}

@@ -1,0 +1,38 @@
+{
+  "$schema": "https://turbo.build/schema.json",
+  "globalDependencies": [".env", "tsconfig.base.json", "biome.json"],
+  "globalEnv": [
+    "NODE_ENV",
+    "XRPL_NETWORK",
+    "XRPL_WS_URL",
+    "DATABASE_URL",
+    "REDIS_URL",
+    "RAILFORGE_ALLOW_MAINNET"
+  ],
+  "tasks": {
+    "build": {
+      "dependsOn": ["^build"],
+      "outputs": ["dist/**", ".next/**", "!.next/cache/**"]
+    },
+    "dev": {
+      "cache": false,
+      "persistent": true
+    },
+    "test": {
+      "dependsOn": ["^build"],
+      "outputs": ["coverage/**"]
+    },
+    "test:integration": {
+      "dependsOn": ["^build"],
+      "cache": false,
+      "env": ["XRPL_NETWORK", "XRPL_WS_URL", "DATABASE_URL", "REDIS_URL"]
+    },
+    "typecheck": {
+      "dependsOn": ["^build"],
+      "outputs": []
+    },
+    "lint": {
+      "outputs": []
+    }
+  }
+}

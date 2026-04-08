@@ -1,0 +1,12 @@
+{
+  "name": "@railforge/dashboard",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Developer dashboard — Phase 1 stretch. Scaffold only; implementation deferred to Sprint 4.",
+  "scripts": {
+    "dev": "echo 'dashboard not yet implemented'",
+    "build": "echo 'dashboard not yet implemented'",
+    "test": "echo 'no tests yet'",
+    "typecheck": "echo 'no types yet'"
+  }
+}

@@ -1,0 +1,28 @@
+{
+  "name": "@railforge/worker",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "src/index.ts",
+  "scripts": {
+    "dev": "bun run --hot src/index.ts",
+    "build": "tsc",
+    "start": "bun run dist/index.js",
+    "test": "vitest run",
+    "test:integration": "vitest run --config vitest.integration.config.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@railforge/db": "workspace:*",
+    "@railforge/xrpl-core": "workspace:*",
+    "bullmq": "^5.34.0",
+    "ioredis": "^5.4.1",
+    "pino": "^9.5.0",
+    "xrpl": "^4.6.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.9.0",
+    "typescript": "^5.6.3",
+    "vitest": "^2.1.5"
+  }
+}
