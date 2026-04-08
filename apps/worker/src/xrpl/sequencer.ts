@@ -12,8 +12,8 @@
 // CRITICAL (CLAUDE.md): never bypass this. Direct client.submit() calls in
 // route handlers will collide on the same Sequence under load.
 
-import type { Redis } from "ioredis";
-import type { XrplClientPool } from "./client.ts";
+import type { Redis } from 'ioredis';
+import type { XrplClientPool } from './client.ts';
 
 const LOCK_TTL_SECONDS = 5;
 const CACHE_TTL_SECONDS = 30;
@@ -23,7 +23,7 @@ const LOCK_MAX_RETRIES = 40; // ~2s total wait
 export class SequenceLockTimeout extends Error {
   constructor(address: string) {
     super(`Timed out acquiring sequence lock for ${address}`);
-    this.name = "SequenceLockTimeout";
+    this.name = 'SequenceLockTimeout';
   }
 }
 
@@ -45,14 +45,8 @@ export class TxSequencer {
     // Acquire lock with bounded retry. Lock contention is expected under load
     // and should not throw immediately — but it must not loop forever.
     for (let attempt = 0; attempt < LOCK_MAX_RETRIES; attempt++) {
-      const acquired = await this.redis.set(
-        lockKey,
-        lockToken,
-        "EX",
-        LOCK_TTL_SECONDS,
-        "NX",
-      );
-      if (acquired === "OK") {
+      const acquired = await this.redis.set(lockKey, lockToken, 'EX', LOCK_TTL_SECONDS, 'NX');
+      if (acquired === 'OK') {
         try {
           return await this.computeAndAdvance(address, cacheKey);
         } finally {
@@ -77,10 +71,7 @@ export class TxSequencer {
   // internals
   // ─────────────────────────────────────────────────────────────────────────
 
-  private async computeAndAdvance(
-    address: string,
-    cacheKey: string,
-  ): Promise<number> {
+  private async computeAndAdvance(address: string, cacheKey: string): Promise<number> {
     const cached = await this.redis.get(cacheKey);
     let next: number;
 
@@ -94,19 +85,19 @@ export class TxSequencer {
       next = await this.fetchSequenceFromLedger(address);
     }
 
-    await this.redis.set(cacheKey, String(next + 1), "EX", CACHE_TTL_SECONDS);
+    await this.redis.set(cacheKey, String(next + 1), 'EX', CACHE_TTL_SECONDS);
     return next;
   }
 
   private async fetchSequenceFromLedger(address: string): Promise<number> {
     const client = this.xrplPool.getClient();
     const info = await client.request({
-      command: "account_info",
+      command: 'account_info',
       account: address,
-      ledger_index: "current",
+      ledger_index: 'current',
     });
     const seq = info.result.account_data.Sequence;
-    if (typeof seq !== "number") {
+    if (typeof seq !== 'number') {
       throw new Error(`account_info returned no Sequence for ${address}`);
     }
     return seq;

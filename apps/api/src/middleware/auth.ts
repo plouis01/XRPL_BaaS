@@ -6,20 +6,20 @@
 //
 // On success, stashes clientId, apiKeyId, and environment on the Hono context.
 
-import { createHash } from "node:crypto";
-import { and, db, eq, isNull, schema } from "@railforge/db";
-import type { MiddlewareHandler } from "hono";
-import type { AppEnv } from "../types.ts";
+import { createHash } from 'node:crypto';
+import { and, db, eq, isNull, schema } from '@railforge/db';
+import type { MiddlewareHandler } from 'hono';
+import type { AppEnv } from '../types.ts';
 
 const KEY_PREFIX_LENGTH = 8;
 
 export const auth: MiddlewareHandler<AppEnv> = async (c, next) => {
-  const apiKey = c.req.header("x-api-key");
+  const apiKey = c.req.header('x-api-key');
   if (!apiKey) {
-    return c.json({ error: "Missing API key" }, 401);
+    return c.json({ error: 'Missing API key' }, 401);
   }
 
-  const keyHash = createHash("sha256").update(apiKey).digest("hex");
+  const keyHash = createHash('sha256').update(apiKey).digest('hex');
 
   const rows = await db
     .select({
@@ -30,30 +30,25 @@ export const auth: MiddlewareHandler<AppEnv> = async (c, next) => {
       isActive: schema.apiKeys.isActive,
     })
     .from(schema.apiKeys)
-    .where(
-      and(
-        eq(schema.apiKeys.keyHash, keyHash),
-        isNull(schema.apiKeys.revokedAt),
-      ),
-    )
+    .where(and(eq(schema.apiKeys.keyHash, keyHash), isNull(schema.apiKeys.revokedAt)))
     .limit(1);
 
   const row = rows[0];
   if (!row || !row.isActive) {
     // Intentionally generic — never reveal whether the key was found, revoked,
     // or just inactive. Brute-force pattern detection is the rate limiter's job.
-    return c.json({ error: "Invalid API key" }, 401);
+    return c.json({ error: 'Invalid API key' }, 401);
   }
 
-  const env = row.environment === "mainnet" ? "mainnet" : "testnet";
+  const env = row.environment === 'mainnet' ? 'mainnet' : 'testnet';
 
-  c.set("clientId", row.clientId);
-  c.set("apiKeyId", row.id);
-  c.set("rateLimit", row.rateLimit);
-  c.set("environment", env);
+  c.set('clientId', row.clientId);
+  c.set('apiKeyId', row.id);
+  c.set('rateLimit', row.rateLimit);
+  c.set('environment', env);
 
   // Make the prefix available to logs without exposing the full key.
-  c.header("X-RailForge-Key-Prefix", apiKey.slice(0, KEY_PREFIX_LENGTH));
+  c.header('X-RailForge-Key-Prefix', apiKey.slice(0, KEY_PREFIX_LENGTH));
 
   await next();
   return;

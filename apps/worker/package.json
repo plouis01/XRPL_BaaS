@@ -8,7 +8,7 @@
     "dev": "bun run --hot src/index.ts",
     "build": "echo 'no build step (Bun runs .ts directly)'",
     "start": "bun run src/index.ts",
-    "test": "vitest run",
+    "test": "vitest run --passWithNoTests",
     "test:integration": "vitest run --config vitest.integration.config.ts",
     "typecheck": "tsc"
   },
@@ -21,7 +21,9 @@
     "xrpl": "^4.6.0"
   },
   "devDependencies": {
+    "@types/ioredis-mock": "^8.2.7",
     "@types/node": "^22.9.0",
+    "ioredis-mock": "^8.13.1",
     "typescript": "^5.6.3",
     "vitest": "^2.1.5"
   }

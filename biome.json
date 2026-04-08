@@ -12,7 +12,9 @@
       ".turbo",
       "node_modules",
       "coverage",
-      "**/migrations/*.sql"
+      "**/migrations/*.sql",
+      "**/vitest.config.ts.timestamp-*.mjs",
+      "**/.tsbuildinfo"
     ]
   },
   "formatter": {

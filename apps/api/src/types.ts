@@ -9,7 +9,7 @@ export type AppVariables = {
   /** Per-key request budget (requests per minute). Set by auth middleware. */
   rateLimit: number;
   /** 'testnet' | 'mainnet' — drives which XRPL pool the request hits. */
-  environment: "testnet" | "mainnet";
+  environment: 'testnet' | 'mainnet';
 };
 
 export type AppEnv = {

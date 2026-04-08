@@ -12,8 +12,8 @@
 // AWS CloudHSM (or YubiHSM). Same contract, real key isolation.
 // TODO Sprint 1+: HsmSigner backend.
 
-import { Wallet, encode } from "xrpl";
-import type { Transaction } from "xrpl";
+import { Wallet, encode } from 'xrpl';
+import type { Transaction } from 'xrpl';
 
 export interface SignedTransaction {
   tx_blob: string;
@@ -83,7 +83,7 @@ export class DevSigner implements Signer {
     // xrpl.js Wallet.sign returns { tx_blob, hash } and never exposes the
     // private key in either field. We re-wrap to satisfy our SignedTransaction
     // type and to make this the single chokepoint for any future audit logging.
-    const result = wallet.sign(tx as Parameters<Wallet["sign"]>[0]);
+    const result = wallet.sign(tx as Parameters<Wallet['sign']>[0]);
     return {
       tx_blob: result.tx_blob,
       hash: result.hash,

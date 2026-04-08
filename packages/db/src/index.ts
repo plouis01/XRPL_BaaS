@@ -1,5 +1,5 @@
-export * from "./client.ts";
-export * as schema from "./schema.ts";
+export * from './client.ts';
+export * as schema from './schema.ts';
 
 // Re-export common Drizzle query helpers so consumer apps don't need
 // drizzle-orm as a direct dependency. The @railforge/db package is the
@@ -20,4 +20,4 @@ export {
   not,
   or,
   sql,
-} from "drizzle-orm";
+} from 'drizzle-orm';

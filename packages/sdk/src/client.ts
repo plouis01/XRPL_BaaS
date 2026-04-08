@@ -4,7 +4,7 @@
 
 export interface RailForgeOptions {
   apiKey: string;
-  network: "mainnet" | "testnet";
+  network: 'mainnet' | 'testnet';
   baseUrl?: string;
 }
 

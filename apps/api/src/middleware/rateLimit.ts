@@ -11,20 +11,20 @@
 // All four ops run in a single MULTI pipeline so the count is consistent.
 // The per-key limit comes from auth middleware (api_keys.rate_limit).
 
-import type { MiddlewareHandler } from "hono";
-import { getRedis } from "../redis.ts";
-import type { AppEnv } from "../types.ts";
+import type { MiddlewareHandler } from 'hono';
+import { getRedis } from '../redis.ts';
+import type { AppEnv } from '../types.ts';
 
 const WINDOW_MS = 60_000; // 1 minute
 const WINDOW_SECONDS = Math.ceil(WINDOW_MS / 1000);
 
 export const rateLimit: MiddlewareHandler<AppEnv> = async (c, next) => {
-  const apiKeyId = c.get("apiKeyId");
-  const limit = c.get("rateLimit");
+  const apiKeyId = c.get('apiKeyId');
+  const limit = c.get('rateLimit');
 
   // If auth didn't run for some reason, fail closed.
   if (!apiKeyId || !limit) {
-    return c.json({ error: "Rate limit context missing" }, 500);
+    return c.json({ error: 'Rate limit context missing' }, 500);
   }
 
   const redis = getRedis();
@@ -49,18 +49,14 @@ export const rateLimit: MiddlewareHandler<AppEnv> = async (c, next) => {
 
   // result is [[err, value], ...]. Index 2 is the ZCARD reply.
   const cardResult = result[2];
-  const count =
-    cardResult && typeof cardResult[1] === "number" ? cardResult[1] : 0;
+  const count = cardResult && typeof cardResult[1] === 'number' ? cardResult[1] : 0;
 
-  c.header("X-RateLimit-Limit", String(limit));
-  c.header("X-RateLimit-Remaining", String(Math.max(0, limit - count)));
-  c.header("X-RateLimit-Reset", String(Math.ceil((now + WINDOW_MS) / 1000)));
+  c.header('X-RateLimit-Limit', String(limit));
+  c.header('X-RateLimit-Remaining', String(Math.max(0, limit - count)));
+  c.header('X-RateLimit-Reset', String(Math.ceil((now + WINDOW_MS) / 1000)));
 
   if (count > limit) {
-    return c.json(
-      { error: "Rate limit exceeded", retry_after_seconds: WINDOW_SECONDS },
-      429,
-    );
+    return c.json({ error: 'Rate limit exceeded', retry_after_seconds: WINDOW_SECONDS }, 429);
   }
 
   await next();
