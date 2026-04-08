@@ -10,9 +10,9 @@
     "./schema": "./src/schema.ts"
   },
   "scripts": {
-    "build": "tsc",
+    "build": "echo 'no build step (Bun runs .ts directly)'",
     "test": "vitest run",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc",
     "generate": "drizzle-kit generate",
     "migrate": "drizzle-kit migrate",
     "studio": "drizzle-kit studio"

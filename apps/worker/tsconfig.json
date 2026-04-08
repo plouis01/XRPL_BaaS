@@ -1,14 +1,4 @@
 {
   "extends": "../../tsconfig.base.json",
-  "compilerOptions": {
-    "outDir": "dist",
-    "rootDir": "src",
-    "composite": true,
-    "tsBuildInfoFile": "dist/.tsbuildinfo"
-  },
-  "include": ["src/**/*"],
-  "references": [
-    { "path": "../../packages/db" },
-    { "path": "../../packages/xrpl-core" }
-  ]
+  "include": ["src/**/*"]
 }

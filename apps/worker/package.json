@@ -6,11 +6,11 @@
   "main": "src/index.ts",
   "scripts": {
     "dev": "bun run --hot src/index.ts",
-    "build": "tsc",
-    "start": "bun run dist/index.js",
+    "build": "echo 'no build step (Bun runs .ts directly)'",
+    "start": "bun run src/index.ts",
     "test": "vitest run",
     "test:integration": "vitest run --config vitest.integration.config.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc"
   },
   "dependencies": {
     "@railforge/db": "workspace:*",

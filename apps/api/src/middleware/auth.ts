@@ -10,4 +10,5 @@ export const auth: MiddlewareHandler = async (c, next) => {
   }
   // c.set('clientId', clientId);
   await next();
+  return;
 };

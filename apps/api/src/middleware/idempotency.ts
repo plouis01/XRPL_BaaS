@@ -14,4 +14,5 @@ export const idempotency: MiddlewareHandler = async (c, next) => {
     }
   }
   await next();
+  return;
 };
