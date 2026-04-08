@@ -12,8 +12,9 @@ import domainsRoute from "./routes/domains.ts";
 import paymentsRoute from "./routes/payments.ts";
 import dexRoute from "./routes/dex.ts";
 import webhooksRoute from "./routes/webhooks.ts";
+import type { AppEnv } from "./types.ts";
 
-const app = new Hono();
+const app = new Hono<AppEnv>();
 
 app.onError(errorHandler);
 
@@ -21,7 +22,7 @@ app.onError(errorHandler);
 app.get("/health", (c) => c.json({ status: "ok" }));
 
 // All /v1/* routes are authenticated, rate-limited, and idempotency-aware.
-const v1 = new Hono();
+const v1 = new Hono<AppEnv>();
 v1.use("*", auth);
 v1.use("*", rateLimit);
 v1.use("*", idempotency);

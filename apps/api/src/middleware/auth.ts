@@ -26,6 +26,7 @@ export const auth: MiddlewareHandler<AppEnv> = async (c, next) => {
       id: schema.apiKeys.id,
       clientId: schema.apiKeys.clientId,
       environment: schema.apiKeys.environment,
+      rateLimit: schema.apiKeys.rateLimit,
       isActive: schema.apiKeys.isActive,
     })
     .from(schema.apiKeys)
@@ -48,6 +49,7 @@ export const auth: MiddlewareHandler<AppEnv> = async (c, next) => {
 
   c.set("clientId", row.clientId);
   c.set("apiKeyId", row.id);
+  c.set("rateLimit", row.rateLimit);
   c.set("environment", env);
 
   // Make the prefix available to logs without exposing the full key.
