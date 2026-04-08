@@ -40,7 +40,7 @@ hsm-*
 .DS_Store
 
 # Claude Code
-.claude/settings.local.json
+.claude/
 
 # Database
 *.sqlite
