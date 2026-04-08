@@ -7,16 +7,16 @@
 
 import { sql } from "drizzle-orm";
 import {
+  bigint,
+  boolean,
+  index,
+  integer,
+  jsonb,
   pgTable,
-  uuid,
   text,
   timestamp,
-  integer,
-  boolean,
-  jsonb,
-  bigint,
   unique,
-  index,
+  uuid,
 } from "drizzle-orm/pg-core";
 
 // ── Platform ─────────────────────────────────────────────────────────────────
@@ -90,6 +90,126 @@ export const accounts = pgTable(
   }),
 );
 
+export const signerLists = pgTable("signer_lists", {
+  id: uuid("id")
+    .primaryKey()
+    .default(sql`gen_random_uuid()`),
+  accountId: uuid("account_id")
+    .notNull()
+    .references(() => accounts.id),
+  quorum: integer("quorum").notNull(),
+  // Array of {address, weight}. See PLAN.md §3.2.
+  signers: jsonb("signers").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow(),
+});
+
+// ── Tokens ───────────────────────────────────────────────────────────────────
+
+export const tokens = pgTable("tokens", {
+  id: uuid("id")
+    .primaryKey()
+    .default(sql`gen_random_uuid()`),
+  clientId: uuid("client_id")
+    .notNull()
+    .references(() => clients.id),
+  issuerAccount: uuid("issuer_account")
+    .notNull()
+    .references(() => accounts.id),
+  // 'mpt' (default) or 'trustline'. CLAUDE.md design rule: MPT by default.
+  tokenType: text("token_type").notNull().default("mpt"),
+  currencyCode: text("currency_code").notNull(),
+  mptIssuanceId: text("mpt_issuance_id"),
+  // Basis points (0-50000)
+  transferFee: integer("transfer_fee").default(0),
+  clawback: boolean("clawback").default(true),
+  freezeEnabled: boolean("freeze_enabled").default(true),
+  maxSupply: text("max_supply"),
+  metadata: jsonb("metadata").default({}),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
+});
+
+// ── Credentials (XLS-70) ─────────────────────────────────────────────────────
+// CLAUDE.md design rule: RailForge is NEVER the credential issuer — only a
+// marketplace broker. issuer_address comes from credential_issuers.
+
+export const credentials = pgTable(
+  "credentials",
+  {
+    id: uuid("id")
+      .primaryKey()
+      .default(sql`gen_random_uuid()`),
+    clientId: uuid("client_id")
+      .notNull()
+      .references(() => clients.id),
+    subjectAddress: text("subject_address").notNull(),
+    issuerAddress: text("issuer_address").notNull(),
+    // Hex-encoded credential type (up to 64 bytes per XLS-70)
+    credentialType: text("credential_type").notNull(),
+    status: text("status").notNull().default("pending"),
+    expiresAt: timestamp("expires_at", { withTimezone: true }),
+    acceptedAt: timestamp("accepted_at", { withTimezone: true }),
+    ledgerIndex: text("ledger_index"),
+    metadata: jsonb("metadata").default({}),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
+  },
+  (t) => ({
+    subjectIdx: index("idx_credentials_subject").on(t.subjectAddress),
+    issuerIdx: index("idx_credentials_issuer").on(t.issuerAddress),
+  }),
+);
+
+export const credentialIssuers = pgTable("credential_issuers", {
+  id: uuid("id")
+    .primaryKey()
+    .default(sql`gen_random_uuid()`),
+  name: text("name").notNull(),
+  address: text("address").notNull(),
+  // 'sumsub' | 'veriff' | 'synaps' | etc.
+  provider: text("provider").notNull(),
+  // Credential types this issuer supports (hex-encoded)
+  types: text("types").array().notNull(),
+  isActive: boolean("is_active").default(true),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
+});
+
+// ── Permission delegations (XLS-75 V1.1 pending) ─────────────────────────────
+
+export const delegations = pgTable("delegations", {
+  id: uuid("id")
+    .primaryKey()
+    .default(sql`gen_random_uuid()`),
+  clientId: uuid("client_id")
+    .notNull()
+    .references(() => clients.id),
+  delegatorAddress: text("delegator_address").notNull(),
+  delegateAddress: text("delegate_address").notNull(),
+  // Array of XLS-75 permission strings
+  permissions: text("permissions").array().notNull(),
+  status: text("status").notNull().default("active"),
+  ledgerIndex: text("ledger_index"),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
+  revokedAt: timestamp("revoked_at", { withTimezone: true }),
+});
+
+// ── Permissioned Domains (XLS-80) ────────────────────────────────────────────
+
+export const domains = pgTable("domains", {
+  id: uuid("id")
+    .primaryKey()
+    .default(sql`gen_random_uuid()`),
+  clientId: uuid("client_id")
+    .notNull()
+    .references(() => clients.id),
+  ownerAddress: text("owner_address").notNull(),
+  domainId: text("domain_id").notNull().unique(),
+  // [{issuer, credential_type}] — up to 10 per domain (protocol limit)
+  acceptedCredentials: jsonb("accepted_credentials").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow(),
+  deletedAt: timestamp("deleted_at", { withTimezone: true }),
+});
+
 // ── Transactions ─────────────────────────────────────────────────────────────
 // Per PLAN.md §3.7: idempotency is enforced via UNIQUE(client_id, idempotency_key).
 
@@ -131,5 +251,26 @@ export const transactions = pgTable(
   }),
 );
 
-// TODO Sprint 1+: signer_lists, tokens, credentials, credential_issuers,
-// delegations, domains, webhook_deliveries. See PLAN.md §3 for the full schema.
+// ── Webhook deliveries ───────────────────────────────────────────────────────
+
+export const webhookDeliveries = pgTable(
+  "webhook_deliveries",
+  {
+    id: uuid("id")
+      .primaryKey()
+      .default(sql`gen_random_uuid()`),
+    endpointId: uuid("endpoint_id")
+      .notNull()
+      .references(() => webhookEndpoints.id),
+    eventType: text("event_type").notNull(),
+    payload: jsonb("payload").notNull(),
+    status: text("status").notNull().default("pending"),
+    attempts: integer("attempts").default(0),
+    lastAttemptAt: timestamp("last_attempt_at", { withTimezone: true }),
+    responseCode: integer("response_code"),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
+  },
+  (t) => ({
+    statusIdx: index("idx_webhook_deliveries_status").on(t.status, t.createdAt),
+  }),
+);

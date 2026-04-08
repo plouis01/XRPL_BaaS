@@ -1,8 +1,12 @@
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import type { Config } from "drizzle-kit";
 
+const here = path.dirname(fileURLToPath(import.meta.url));
+
 export default {
-  schema: "./src/schema.ts",
-  out: "./src/migrations",
+  schema: path.join(here, "src/schema.ts"),
+  out: path.join(here, "src/migrations"),
   dialect: "postgresql",
   dbCredentials: {
     url:

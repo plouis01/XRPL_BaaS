@@ -15,9 +15,9 @@
     "typecheck": "turbo typecheck",
     "lint": "biome check .",
     "format": "biome check --write .",
-    "db:generate": "bunx drizzle-kit generate --config=packages/db/drizzle.config.ts",
-    "db:migrate": "bunx drizzle-kit migrate --config=packages/db/drizzle.config.ts",
-    "db:studio": "bunx drizzle-kit studio --config=packages/db/drizzle.config.ts"
+    "db:generate": "cd packages/db && bunx drizzle-kit generate",
+    "db:migrate": "cd packages/db && bunx drizzle-kit migrate",
+    "db:studio": "cd packages/db && bunx drizzle-kit studio"
   },
   "devDependencies": {
     "@biomejs/biome": "^1.9.4",
