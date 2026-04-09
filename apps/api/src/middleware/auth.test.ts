@@ -3,10 +3,21 @@
 //
 // Strategy: mock @railforge/db so we don't need a live Postgres. The query
 // builder chain returns a fake `limit()` whose result we control per test.
+//
+// API_KEY_SALT is set in beforeAll because the auth middleware HMACs the raw
+// key with the salt as the pepper. A missing salt makes hashApiKey throw —
+// covered as its own test below.
 
-import type { MiddlewareHandler } from "hono";
 import { Hono } from "hono";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vitest";
 import type { AppEnv } from "../types.ts";
 
 // ── Mock the DB module BEFORE importing auth.ts ─────────────────────────────
@@ -38,8 +49,12 @@ vi.mock("@railforge/db", () => {
   };
 });
 
-// Import auth AFTER the mock is registered.
-const { auth } = await import("./auth.ts");
+// Set the salt BEFORE importing auth.ts — hashApiKey reads it lazily on each
+// call but tests still want a deterministic value.
+process.env.API_KEY_SALT = "test-salt-do-not-use-in-production";
+
+// Import auth AFTER the mock and env var are set.
+const { auth, hashApiKey } = await import("./auth.ts");
 
 function makeApp(): Hono<AppEnv> {
   const app = new Hono<AppEnv>();
@@ -55,7 +70,26 @@ function makeApp(): Hono<AppEnv> {
   return app;
 }
 
+// Active row template — note `isActive` is intentionally NOT in the result
+// because the WHERE clause filters it. The query only selects id/clientId/
+// environment/rateLimit.
+function activeRow(overrides: Partial<Record<string, unknown>> = {}) {
+  return {
+    id: "key-id-1",
+    clientId: "client-id-1",
+    environment: "testnet",
+    rateLimit: 100,
+    ...overrides,
+  };
+}
+
 describe("auth middleware", () => {
+  beforeAll(() => {
+    if (!process.env.API_KEY_SALT) {
+      throw new Error("test setup error: API_KEY_SALT not set");
+    }
+  });
+
   beforeEach(() => {
     limitMock.mockReset();
   });
@@ -73,49 +107,49 @@ describe("auth middleware", () => {
     expect(limitMock).not.toHaveBeenCalled();
   });
 
-  it("rejects unknown API keys with the same response shape as inactive keys (no enumeration oracle)", async () => {
+  it("returns identical 401 for unknown, inactive, and revoked keys (no enumeration oracle)", async () => {
+    // After moving isActive into SQL WHERE, all three rejection classes
+    // collapse into "no matching row" — there is now exactly ONE rejection
+    // code path. We verify that property here.
     const app = makeApp();
 
-    limitMock.mockResolvedValueOnce([]); // no row → "unknown key"
-    const unknownRes = await app.request("/protected", {
+    limitMock.mockResolvedValueOnce([]); // case A: hash doesn't match anything
+    const a = await app.request("/protected", {
       headers: { "x-api-key": "rf_test_unknown" },
     });
-    const unknownBody = await unknownRes.json();
-    const unknownStatus = unknownRes.status;
 
-    limitMock.mockResolvedValueOnce([
-      {
-        id: "k1",
-        clientId: "c1",
-        environment: "testnet",
-        rateLimit: 100,
-        isActive: false, // inactive
-      },
-    ]);
-    const inactiveRes = await app.request("/protected", {
+    limitMock.mockResolvedValueOnce([]); // case B: row exists but isActive=false → SQL excludes it
+    const b = await app.request("/protected", {
       headers: { "x-api-key": "rf_test_inactive" },
     });
-    const inactiveBody = await inactiveRes.json();
-    const inactiveStatus = inactiveRes.status;
 
-    // Bodies and statuses MUST be identical — leaking which one matched would
-    // tell an attacker that "rf_test_inactive" exists in the database.
-    expect(unknownStatus).toBe(401);
-    expect(inactiveStatus).toBe(401);
-    expect(unknownBody).toEqual(inactiveBody);
-    expect(unknownBody).toEqual({ error: "Invalid API key" });
+    limitMock.mockResolvedValueOnce([]); // case C: row exists but revokedAt set → SQL excludes it
+    const c = await app.request("/protected", {
+      headers: { "x-api-key": "rf_test_revoked" },
+    });
+
+    expect(a.status).toBe(401);
+    expect(b.status).toBe(401);
+    expect(c.status).toBe(401);
+    const [bodyA, bodyB, bodyC] = await Promise.all([
+      a.json(),
+      b.json(),
+      c.json(),
+    ]);
+    expect(bodyA).toEqual({ error: "Invalid API key" });
+    expect(bodyA).toEqual(bodyB);
+    expect(bodyB).toEqual(bodyC);
   });
 
   it("passes through and stashes context for an active testnet key", async () => {
     const app = makeApp();
     limitMock.mockResolvedValueOnce([
-      {
+      activeRow({
         id: "key-id-1",
         clientId: "client-id-1",
         environment: "testnet",
         rateLimit: 250,
-        isActive: true,
-      },
+      }),
     ]);
 
     const res = await app.request("/protected", {
@@ -134,15 +168,7 @@ describe("auth middleware", () => {
 
   it("coerces an unknown environment string to testnet (mainnet must be exact)", async () => {
     const app = makeApp();
-    limitMock.mockResolvedValueOnce([
-      {
-        id: "k",
-        clientId: "c",
-        environment: "devnet", // not 'mainnet'
-        rateLimit: 100,
-        isActive: true,
-      },
-    ]);
+    limitMock.mockResolvedValueOnce([activeRow({ environment: "devnet" })]);
 
     const res = await app.request("/protected", {
       headers: { "x-api-key": "rf_d_x" },
@@ -153,15 +179,7 @@ describe("auth middleware", () => {
 
   it('routes a row with environment="mainnet" to mainnet', async () => {
     const app = makeApp();
-    limitMock.mockResolvedValueOnce([
-      {
-        id: "k",
-        clientId: "c",
-        environment: "mainnet",
-        rateLimit: 100,
-        isActive: true,
-      },
-    ]);
+    limitMock.mockResolvedValueOnce([activeRow({ environment: "mainnet" })]);
 
     const res = await app.request("/protected", {
       headers: { "x-api-key": "rf_live_x" },
@@ -172,15 +190,7 @@ describe("auth middleware", () => {
 
   it("exposes the X-RailForge-Key-Prefix header on success but never the full key", async () => {
     const app = makeApp();
-    limitMock.mockResolvedValueOnce([
-      {
-        id: "k",
-        clientId: "c",
-        environment: "testnet",
-        rateLimit: 100,
-        isActive: true,
-      },
-    ]);
+    limitMock.mockResolvedValueOnce([activeRow()]);
 
     const apiKey = "rf_test_abcdefghijklmnop";
     const res = await app.request("/protected", {
@@ -201,12 +211,7 @@ describe("auth middleware", () => {
     expect(res.headers.get("x-railforge-key-prefix")).toBeNull();
   });
 
-  it("hashes the API key with SHA-256 before lookup (verified via input to where())", async () => {
-    // This test verifies the hash is being computed correctly. We can't easily
-    // assert on the WHERE clause directly because we mocked drizzle's query
-    // builder, but we CAN verify behavior end-to-end: two different keys must
-    // produce two distinct lookups, and the same key twice produces the same
-    // lookup (no salt).
+  it("issues a database query for every distinct key (no in-process key cache)", async () => {
     const app = makeApp();
     limitMock.mockResolvedValue([]);
 
@@ -214,6 +219,40 @@ describe("auth middleware", () => {
     await app.request("/protected", { headers: { "x-api-key": "b" } });
     await app.request("/protected", { headers: { "x-api-key": "a" } });
 
+    // No caching — three lookups for three requests, even though 'a' was
+    // seen twice. Caching would mean a revoked key keeps working until the
+    // cache TTL expires.
     expect(limitMock).toHaveBeenCalledTimes(3);
+  });
+});
+
+describe("hashApiKey (HMAC pepper)", () => {
+  it("produces a 64-char hex string", () => {
+    const hash = hashApiKey("rf_test_anything");
+    expect(hash).toMatch(/^[a-f0-9]{64}$/);
+  });
+
+  it("is deterministic for the same input under the same salt", () => {
+    expect(hashApiKey("rf_test_xyz")).toBe(hashApiKey("rf_test_xyz"));
+  });
+
+  it("produces different hashes for different inputs", () => {
+    expect(hashApiKey("rf_test_a")).not.toBe(hashApiKey("rf_test_b"));
+  });
+
+  it("produces different hashes when the salt changes (pepper actually applied)", () => {
+    const original = process.env.API_KEY_SALT;
+    const h1 = hashApiKey("rf_test_same");
+    process.env.API_KEY_SALT = "a-different-salt";
+    const h2 = hashApiKey("rf_test_same");
+    process.env.API_KEY_SALT = original;
+    expect(h1).not.toBe(h2);
+  });
+
+  it("throws if API_KEY_SALT is unset (fail-fast at first auth call)", () => {
+    const original = process.env.API_KEY_SALT;
+    delete process.env.API_KEY_SALT;
+    expect(() => hashApiKey("rf_test_anything")).toThrow(/API_KEY_SALT/);
+    process.env.API_KEY_SALT = original;
   });
 });
