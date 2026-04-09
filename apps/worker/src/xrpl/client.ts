@@ -1,8 +1,17 @@
 // Shared XRPL client pool. Reused across worker jobs.
 // See PLAN.md §4.1 — round-robin connections, exponential-backoff reconnect.
+//
+// All logging goes through the shared @railforge/logger so redact paths apply.
+// NEVER use console.* here — a future change that logs the underlying error
+// could leak request/response payloads from the XRPL client.
 
-import { MAINNET_WS_URLS, TESTNET_WS_URL, type XrplNetwork } from '@railforge/xrpl-core';
-import { Client } from 'xrpl';
+import {
+  MAINNET_WS_URLS,
+  TESTNET_WS_URL,
+  type XrplNetwork,
+} from "@railforge/xrpl-core";
+import { Client } from "xrpl";
+import { logger } from "../logger.ts";
 
 const MAX_BACKOFF_MS = 30_000;
 const INITIAL_BACKOFF_MS = 500;
@@ -16,11 +25,12 @@ interface PoolEntry {
 export class XrplClientPool {
   private entries: PoolEntry[] = [];
   private index = 0;
-  private network: XrplNetwork = 'testnet';
+  private network: XrplNetwork = "testnet";
 
   async initialize(network: XrplNetwork, poolSize = 3): Promise<void> {
     this.network = network;
-    const urls = network === 'mainnet' ? Array.from(MAINNET_WS_URLS) : [TESTNET_WS_URL];
+    const urls =
+      network === "mainnet" ? Array.from(MAINNET_WS_URLS) : [TESTNET_WS_URL];
 
     if (urls.length === 0) {
       throw new Error(`No URLs configured for network ${network}`);
@@ -41,7 +51,9 @@ export class XrplClientPool {
   getClient(): Client {
     const first = this.entries[0];
     if (!first) {
-      throw new Error('XrplClientPool not initialized — call initialize() first');
+      throw new Error(
+        "XrplClientPool not initialized — call initialize() first",
+      );
     }
     // Find the next connected client; if all are reconnecting, return the
     // first one and let the caller's request fail/retry.
@@ -70,11 +82,11 @@ export class XrplClientPool {
   }
 
   private attachLifecycleHandlers(entry: PoolEntry): void {
-    entry.client.on('connected', () => {
+    entry.client.on("connected", () => {
       entry.reconnectAttempts = 0;
     });
 
-    entry.client.on('disconnected', (code) => {
+    entry.client.on("disconnected", (code) => {
       // xrpl.js Client emits 'disconnected' on both clean and unclean exits.
       // Code 1000 is a normal close (e.g. shutdown). Anything else triggers
       // exponential-backoff reconnect.
@@ -84,20 +96,22 @@ export class XrplClientPool {
       void this.reconnect(entry);
     });
 
-    entry.client.on('error', (err) => {
-      // Surface errors via stderr; the worker process should pipe these to Pino.
-      console.error(`[xrpl-pool] ${entry.url} error:`, err);
+    entry.client.on("error", (err) => {
+      logger.error({ err, url: entry.url }, "xrpl client error");
     });
   }
 
   private async reconnect(entry: PoolEntry): Promise<void> {
-    const backoff = Math.min(INITIAL_BACKOFF_MS * 2 ** entry.reconnectAttempts, MAX_BACKOFF_MS);
+    const backoff = Math.min(
+      INITIAL_BACKOFF_MS * 2 ** entry.reconnectAttempts,
+      MAX_BACKOFF_MS,
+    );
     entry.reconnectAttempts += 1;
     await new Promise((resolve) => setTimeout(resolve, backoff));
     try {
       await entry.client.connect();
     } catch (err) {
-      console.error(`[xrpl-pool] reconnect to ${entry.url} failed:`, err);
+      logger.error({ err, url: entry.url }, "xrpl reconnect failed");
       void this.reconnect(entry);
     }
   }
