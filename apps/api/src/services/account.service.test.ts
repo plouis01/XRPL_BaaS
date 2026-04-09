@@ -158,6 +158,63 @@ describe('createAccount', () => {
     expect(dbInsertCalls).toHaveLength(0);
   });
 
+  it('throws "faucet_zero_balance" when faucet returns 200 with balance=0 (task 52)', async () => {
+    fetchMock.mockImplementationOnce(async (_url, init) => {
+      const body = JSON.parse((init as RequestInit).body as string);
+      return makeFaucetResponse(body.destination, 0);
+    });
+
+    const err = await createAccount({ clientId: 'client-1' }).catch((e) => e);
+    expect(err).toBeInstanceOf(AccountServiceError);
+    expect((err as InstanceType<typeof AccountServiceError>).code).toBe('faucet_zero_balance');
+
+    // CRITICAL: no DB insert. We must NOT persist isFunded=true for an
+    // account the faucet didn't actually fund.
+    expect(dbInsertCalls).toHaveLength(0);
+  });
+
+  it('throws "faucet_zero_balance" when faucet returns 200 with no balance field (task 52)', async () => {
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      // biome-ignore lint/suspicious/noExplicitAny: faucet response shape varies
+      json: async () => ({ account: { address: 'placeholder' } }) as any,
+      text: async () => '',
+    } as unknown as Response);
+    // The address-match check will fail before we even reach the balance
+    // check unless we echo. Use mockImplementation instead.
+    fetchMock.mockReset();
+    fetchMock.mockImplementationOnce(async (_url, init) => {
+      const body = JSON.parse((init as RequestInit).body as string);
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ account: { address: body.destination } }),
+        text: async () => '',
+      } as unknown as Response;
+    });
+
+    const err = await createAccount({ clientId: 'client-1' }).catch((e) => e);
+    expect(err).toBeInstanceOf(AccountServiceError);
+    expect((err as InstanceType<typeof AccountServiceError>).code).toBe('faucet_zero_balance');
+    expect(dbInsertCalls).toHaveLength(0);
+  });
+
+  it('does NOT include the response body in error logs when faucet returns non-200 (task 53)', async () => {
+    // We can't intercept the logger directly here, but we can prove that
+    // the service doesn't read the body field into the thrown error. The
+    // error message must contain the status only — no body text.
+    fetchMock.mockResolvedValueOnce(
+      makeFaucetError(500, 'destination=rSensitiveAddrLeaked0000000000000'),
+    );
+
+    const err = await createAccount({ clientId: 'client-1' }).catch((e) => e);
+    expect(err).toBeInstanceOf(AccountServiceError);
+    const message = (err as Error).message;
+    expect(message).not.toMatch(/rSensitiveAddrLeaked/);
+    expect(message).toMatch(/500/);
+  });
+
   it('throws AccountServiceError with code "faucet_failed" when fetch rejects', async () => {
     fetchMock.mockRejectedValueOnce(new Error('ECONNREFUSED'));
 

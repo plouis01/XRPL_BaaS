@@ -8,10 +8,13 @@
 // Coverage (the 5 most important behaviors):
 //   1. Happy path: sequence fetched → LastLedgerSequence set → signed →
 //      submitted → DB updated → confirmation enqueued
-//   2. Signer has no key → row marked failed, sequencer NOT touched
+//   2. Signer has no key (and no DB ref) → row marked failed, sequencer NOT touched
 //   3. tesSUCCESS → isSequenceError NOT triggered
 //   4. tefPAST_SEQ → sequencer.invalidate() called, row marked failed
 //   5. Network error → sequencer.invalidate() called, error rethrown for retry
+//   6. Cold-start lazy-load: signer hasKey=false but DB has master_key_ref →
+//      loadKey is called and the job continues
+//   7. ledger_current failure → sequencer.invalidate() called + retry
 
 import type { Job } from 'bullmq';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -19,8 +22,12 @@ import type { TxSubmitJobData } from '../queues.ts';
 
 // ── Mocks ───────────────────────────────────────────────────────────────────
 
-// DB mock — chain ends in .where() which records the update payload.
+// DB mock — chain ends in .where() which records the update payload. The
+// select() chain is for the cold-start seed lookup added in task 50.
 const dbUpdateCalls: Array<{ table: unknown; set: unknown; where: unknown }> = [];
+const dbSelectResult = {
+  current: [] as Array<{ masterKeyRef: string }>,
+};
 vi.mock('@railforge/db', () => {
   const update = vi.fn((table: unknown) => ({
     set: vi.fn((payload: unknown) => ({
@@ -30,9 +37,19 @@ vi.mock('@railforge/db', () => {
       }),
     })),
   }));
+  const select = vi.fn(() => ({
+    from: vi.fn(() => ({
+      where: vi.fn(() => ({
+        limit: vi.fn(async () => dbSelectResult.current),
+      })),
+    })),
+  }));
   return {
-    db: { update },
-    schema: { transactions: { id: 'id' } },
+    db: { update, select },
+    schema: {
+      transactions: { id: 'id' },
+      accounts: { address: 'address', masterKeyRef: 'masterKeyRef' },
+    },
     eq: vi.fn((col: unknown, val: unknown) => ({ col, val })),
   };
 });
@@ -43,6 +60,7 @@ const stubs = {
   sequencerNext: vi.fn(),
   sequencerInvalidate: vi.fn(),
   signerHasKey: vi.fn(),
+  signerLoadKey: vi.fn(),
   signerSign: vi.fn(),
   clientRequest: vi.fn(),
   confirmQueueAdd: vi.fn(),
@@ -56,6 +74,7 @@ vi.mock('../queues.ts', () => ({
   }),
   getSigner: () => ({
     hasKey: stubs.signerHasKey,
+    loadKey: stubs.signerLoadKey,
     sign: stubs.signerSign,
   }),
   getXrplPool: async () => ({
@@ -93,10 +112,12 @@ function baseJobData(): TxSubmitJobData {
 describe('processTxSubmitJob', () => {
   beforeEach(() => {
     dbUpdateCalls.length = 0;
+    dbSelectResult.current = [];
     // Default stub behavior — each test overrides as needed.
     stubs.sequencerNext.mockResolvedValue(42);
     stubs.sequencerInvalidate.mockResolvedValue(undefined);
     stubs.signerHasKey.mockResolvedValue(true);
+    stubs.signerLoadKey.mockResolvedValue(undefined);
     stubs.signerSign.mockResolvedValue({
       tx_blob: 'DEADBEEF',
       hash: 'ABC123',
@@ -140,12 +161,14 @@ describe('processTxSubmitJob', () => {
     const submitCall = stubs.clientRequest.mock.calls.find((c) => c[0].command === 'submit');
     expect(submitCall?.[0]).toEqual({ command: 'submit', tx_blob: 'DEADBEEF' });
 
-    // DB updated with submitted status + hash + blob.
+    // DB updated with submitted status + hash. The signed blob is
+    // INTENTIONALLY not persisted — the hash alone is enough to look up
+    // the tx on-ledger and the blob is signature material we don't keep.
     expect(dbUpdateCalls).toHaveLength(1);
     const update = dbUpdateCalls[0]!.set as Record<string, unknown>;
     expect(update.status).toBe('submitted');
     expect(update.txHash).toBe('ABC123');
-    expect(update.txBlob).toBe('DEADBEEF');
+    expect(update.txBlob).toBeUndefined();
     expect(update.resultCode).toBe('tesSUCCESS');
     expect(update.feeDrops).toBe('12');
     expect(update.submittedAt).toBeInstanceOf(Date);
@@ -162,8 +185,9 @@ describe('processTxSubmitJob', () => {
     });
   });
 
-  it('signer missing key: marks failed pre-submit, does NOT touch sequencer', async () => {
+  it('signer missing key AND no master_key_ref in DB: marks failed pre-submit, does NOT touch sequencer', async () => {
     stubs.signerHasKey.mockResolvedValue(false);
+    dbSelectResult.current = []; // no row in accounts for this address
 
     await processTxSubmitJob(makeJob(baseJobData()));
 
@@ -171,11 +195,60 @@ describe('processTxSubmitJob', () => {
     // consume a Sequence number.
     expect(stubs.sequencerNext).not.toHaveBeenCalled();
     expect(stubs.sequencerInvalidate).not.toHaveBeenCalled();
+    expect(stubs.signerLoadKey).not.toHaveBeenCalled();
     expect(stubs.signerSign).not.toHaveBeenCalled();
     expect(stubs.clientRequest).not.toHaveBeenCalled();
 
     // DB updated with failed status and a generic error code.
     expect(dbUpdateCalls).toHaveLength(1);
+    const update = dbUpdateCalls[0]!.set as Record<string, unknown>;
+    expect(update.status).toBe('failed');
+    expect(update.resultCode).toBe('SIGNER_NO_KEY');
+  });
+
+  it('cold-start lazy load: signer hasKey=false but DB has master_key_ref → loadKey called and pipeline continues', async () => {
+    // Simulate a worker process that just booted: the in-memory signer
+    // has no wallets, but the DB has the seed from when the API created
+    // the account. Without task 50's fix, every first submission for an
+    // address would fail with SIGNER_NO_KEY — the bug that motivated this
+    // test.
+    let loaded = false;
+    stubs.signerHasKey.mockImplementation(async () => loaded);
+    stubs.signerLoadKey.mockImplementation(async () => {
+      loaded = true;
+    });
+    dbSelectResult.current = [{ masterKeyRef: 'sFAKE_SEED_PLACEHOLDER' }];
+
+    await processTxSubmitJob(makeJob(baseJobData()));
+
+    // loadKey was called with the address + the persisted ref.
+    expect(stubs.signerLoadKey).toHaveBeenCalledWith(
+      'rSource00000000000000000000000000',
+      'sFAKE_SEED_PLACEHOLDER',
+    );
+
+    // Pipeline proceeded all the way to sign + submit + DB update.
+    expect(stubs.signerSign).toHaveBeenCalledTimes(1);
+    expect(stubs.confirmQueueAdd).toHaveBeenCalledTimes(1);
+    const update = dbUpdateCalls[0]!.set as Record<string, unknown>;
+    expect(update.status).toBe('submitted');
+  });
+
+  it('loadKey throws but signer still has no key: marks failed without consuming sequence', async () => {
+    stubs.signerHasKey.mockResolvedValue(false);
+    stubs.signerLoadKey.mockRejectedValue(
+      new Error('master_key_ref does not derive to the requested address'),
+    );
+    dbSelectResult.current = [{ masterKeyRef: 'sCORRUPTED' }];
+
+    await processTxSubmitJob(makeJob(baseJobData()));
+
+    // loadKey was attempted, but failed.
+    expect(stubs.signerLoadKey).toHaveBeenCalledTimes(1);
+    // Sequence cache untouched.
+    expect(stubs.sequencerNext).not.toHaveBeenCalled();
+    expect(stubs.sequencerInvalidate).not.toHaveBeenCalled();
+    // Row marked failed.
     const update = dbUpdateCalls[0]!.set as Record<string, unknown>;
     expect(update.status).toBe('failed');
     expect(update.resultCode).toBe('SIGNER_NO_KEY');
@@ -231,6 +304,64 @@ describe('processTxSubmitJob', () => {
     const update = dbUpdateCalls[0]!.set as Record<string, unknown>;
     expect(update.status).toBe('failed');
     expect(update.resultCode).toBe('tecUNFUNDED_PAYMENT');
+  });
+
+  it('ledger_current failure: invalidates sequencer (rolls back consumed seq) and rethrows', async () => {
+    // ledger_current is fetched AFTER getNextSequence, so a failure here
+    // means the cache has been advanced but no tx will be sent. Without
+    // task 54's fix the cache would stay advanced and the next submission
+    // for this address would fail with terPRE_SEQ.
+    stubs.clientRequest.mockImplementation(async (req: { command: string }) => {
+      if (req.command === 'ledger_current') throw new Error('ECONNREFUSED');
+      throw new Error(`unexpected command ${req.command}`);
+    });
+
+    await expect(processTxSubmitJob(makeJob(baseJobData()))).rejects.toThrow(/ECONNREFUSED/);
+
+    // Sequencer was consulted (the cache advanced), then invalidated.
+    expect(stubs.sequencerNext).toHaveBeenCalledTimes(1);
+    expect(stubs.sequencerInvalidate).toHaveBeenCalledTimes(1);
+
+    // Sign was never reached.
+    expect(stubs.signerSign).not.toHaveBeenCalled();
+
+    // DB row marked failed with NETWORK_ERROR.
+    const update = dbUpdateCalls[0]!.set as Record<string, unknown>;
+    expect(update.status).toBe('failed');
+    expect(update.resultCode).toBe('NETWORK_ERROR');
+  });
+
+  it('sign failure: invalidates sequencer (rolls back consumed seq) and rethrows', async () => {
+    // sign() is called AFTER getNextSequence + ledger_current, so a sign
+    // failure also means the cache has been advanced but no tx will be sent.
+    stubs.signerSign.mockRejectedValue(new Error('invalid_tx'));
+
+    await expect(processTxSubmitJob(makeJob(baseJobData()))).rejects.toThrow(/invalid_tx/);
+
+    expect(stubs.sequencerNext).toHaveBeenCalledTimes(1);
+    expect(stubs.sequencerInvalidate).toHaveBeenCalledTimes(1);
+
+    // submit was never reached.
+    const submitCall = stubs.clientRequest.mock.calls.find((c) => c[0].command === 'submit');
+    expect(submitCall).toBeUndefined();
+
+    const update = dbUpdateCalls[0]!.set as Record<string, unknown>;
+    expect(update.status).toBe('failed');
+    expect(update.resultCode).toBe('SIGN_FAILED');
+  });
+
+  it('terQUEUED is NOT a sequence error: cache stays warm', async () => {
+    // terQUEUED means rippled accepted the tx into its own queue for a
+    // future ledger — Sequence is correct, no invalidation needed. Task 55.
+    stubs.clientRequest.mockImplementation(async (req: { command: string }) => {
+      if (req.command === 'ledger_current') return { result: { ledger_current_index: 100 } };
+      if (req.command === 'submit') return { result: { engine_result: 'terQUEUED' } };
+      throw new Error('unexpected');
+    });
+
+    await processTxSubmitJob(makeJob(baseJobData()));
+
+    expect(stubs.sequencerInvalidate).not.toHaveBeenCalled();
   });
 
   it('network failure during submit: invalidates sequencer and rethrows for BullMQ retry', async () => {

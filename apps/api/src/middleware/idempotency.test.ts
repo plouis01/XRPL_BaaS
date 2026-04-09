@@ -251,6 +251,44 @@ describe('idempotency middleware', () => {
     expect(r2.headers.get('x-idempotent-replay')).toBeNull();
   });
 
+  it('handler throws: middleware re-throws without caching (task 56)', async () => {
+    const calls = vi.fn();
+    const app = new Hono<AppEnv>();
+    app.use('*', async (c, next) => {
+      c.set('clientId', 'c1');
+      c.set('apiKeyId', 'k');
+      c.set('rateLimit', 100);
+      c.set('environment', 'testnet');
+      await next();
+    });
+    // Hono onError converts the throw into a 500 at the app level so the
+    // request still completes — but the idempotency middleware should NOT
+    // have cached anything for this request.
+    app.onError((_err, c) => c.json({ error: 'boom' }, 500));
+    app.use('*', idempotency);
+    app.post('/v1/things', () => {
+      calls();
+      throw new Error('handler exploded');
+    });
+
+    // First request → 500 from onError, NOT cached.
+    const r1 = await app.request('/v1/things', {
+      method: 'POST',
+      headers: { 'idempotency-key': 'k1' },
+    });
+    expect(r1.status).toBe(500);
+
+    // Second request with the same key → handler runs again because the
+    // first attempt was a thrown error, not a deterministic 4xx.
+    const r2 = await app.request('/v1/things', {
+      method: 'POST',
+      headers: { 'idempotency-key': 'k1' },
+    });
+    expect(r2.status).toBe(500);
+    expect(calls).toHaveBeenCalledTimes(2);
+    expect(r2.headers.get('x-idempotent-replay')).toBeNull();
+  });
+
   it('4xx responses ARE cached (validation failures are deterministic)', async () => {
     const calls = vi.fn();
     const app = new Hono<AppEnv>();
