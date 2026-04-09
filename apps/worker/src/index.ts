@@ -10,6 +10,7 @@
 import { Redis } from 'ioredis';
 import { startTxConfirmWorker } from './jobs/txConfirmer.ts';
 import { startTxSubmitWorker } from './jobs/txSubmitter.ts';
+import { startWebhookDeliveryWorker } from './jobs/webhookDelivery.ts';
 import { logger } from './logger.ts';
 import { disconnectWorker, getSigner } from './queues.ts';
 
@@ -74,10 +75,11 @@ if (treasurySeed) {
 
 const txSubmitWorker = startTxSubmitWorker(workerRedis);
 const txConfirmWorker = startTxConfirmWorker(workerRedis);
+const webhookDeliveryWorker = startWebhookDeliveryWorker(workerRedis);
 
 logger.info(
   {
-    queues: ['tx-submit', 'tx-confirm'],
+    queues: ['tx-submit', 'tx-confirm', 'webhook-delivery'],
     redis: redisUrl,
     network: process.env.XRPL_NETWORK ?? 'testnet',
     treasuryLoaded: !!treasurySeed,
@@ -87,7 +89,11 @@ logger.info(
 
 async function shutdown(signal: string): Promise<void> {
   logger.info({ signal }, 'railforge-worker shutting down');
-  await Promise.all([txSubmitWorker.close(), txConfirmWorker.close()]);
+  await Promise.all([
+    txSubmitWorker.close(),
+    txConfirmWorker.close(),
+    webhookDeliveryWorker.close(),
+  ]);
   await disconnectWorker();
   await workerRedis.quit();
   process.exit(0);
