@@ -72,7 +72,7 @@ const stubs = {
 };
 
 vi.mock("../queues.ts", () => ({
-  TX_CONFIRM_QUEUE: "railforge:tx-confirm",
+  TX_CONFIRM_QUEUE: "railforge-tx-confirm",
   getXrplPool: async () => ({
     getClient: () => ({ request: stubs.clientRequest }),
   }),
