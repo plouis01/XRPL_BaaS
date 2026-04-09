@@ -250,7 +250,31 @@ describe("getAccount", () => {
     expect(result).toBeNull();
   });
 
-  it("returns the account view when the row exists and belongs to the client", async () => {
+  it('scopes the SELECT by clientId (cross-tenant isolation, structural)', async () => {
+    // The mock doesn't actually filter — it just returns whatever's in
+    // dbSelectResult.current. To prove cross-tenant isolation we instead
+    // verify the WHERE clause passes both the clientId AND the address
+    // through to drizzle's eq() at query-build time. If a future refactor
+    // drops the clientId predicate, this test fails before any real query
+    // runs.
+    const { eq: eqMock } = (await import('@railforge/db')) as unknown as {
+      eq: ReturnType<typeof vi.fn>;
+    };
+    eqMock.mockClear();
+    dbSelectResult.current = [];
+
+    await getAccount('client-1', 'rAddress');
+
+    // eq should have been called with both clientId and address. We accept
+    // any order — drizzle does too.
+    const calls = eqMock.mock.calls;
+    const clientIdCall = calls.find((args: unknown[]) => args[1] === 'client-1');
+    const addressCall = calls.find((args: unknown[]) => args[1] === 'rAddress');
+    expect(clientIdCall, 'WHERE missing clientId predicate').toBeDefined();
+    expect(addressCall, 'WHERE missing address predicate').toBeDefined();
+  });
+
+  it('returns the account view when the row exists and belongs to the client', async () => {
     dbSelectResult.current = [
       {
         id: "acct-1",
