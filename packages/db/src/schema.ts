@@ -62,7 +62,7 @@ export const webhookEndpoints = pgTable("webhook_endpoints", {
   url: text("url").notNull(),
   secret: text("secret").notNull(),
   events: text("events").array().notNull(),
-  isActive: boolean("is_active").default(true),
+  isActive: boolean("is_active").notNull().default(true),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
 });
 
@@ -172,7 +172,7 @@ export const credentialIssuers = pgTable("credential_issuers", {
   provider: text("provider").notNull(),
   // Credential types this issuer supports (hex-encoded)
   types: text("types").array().notNull(),
-  isActive: boolean("is_active").default(true),
+  isActive: boolean("is_active").notNull().default(true),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
 });
 
