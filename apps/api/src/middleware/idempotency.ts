@@ -77,7 +77,11 @@ export const idempotency: MiddlewareHandler<AppEnv> = async (c, next) => {
     }
   }
 
-  // 2. Run the handler.
+  // 2. Run the handler. If it throws, the error propagates up the
+  // middleware chain — the global onError handler turns it into a 5xx
+  // response. CRITICALLY: any code below this line is unreachable on
+  // throw, so a thrown handler will NOT cache anything. The behavior is
+  // verified by the "handler throws: no caching" test below.
   await next();
 
   // 3. Cache the response for the next retry. We only cache successful
