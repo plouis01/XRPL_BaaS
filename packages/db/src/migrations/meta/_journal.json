@@ -29,6 +29,13 @@
       "when": 1775725649569,
       "tag": "0003_damp_zombie",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1775759757204,
+      "tag": "0004_freezing_winter_soldier",
+      "breakpoints": true
     }
   ]
 }
