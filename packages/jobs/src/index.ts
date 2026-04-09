@@ -90,7 +90,7 @@ export function getJobsRedis(): Redis {
 
 let txSubmitQueue: Queue<TxSubmitJobData> | null = null;
 let txConfirmQueue: Queue<TxConfirmJobData> | null = null;
-const webhookDeliveryQueue: Queue<WebhookDeliveryJobData> | null = null;
+let webhookDeliveryQueue: Queue<WebhookDeliveryJobData> | null = null;
 
 export function getTxSubmitQueue(): Queue<TxSubmitJobData> {
   if (txSubmitQueue) return txSubmitQueue;
@@ -126,18 +126,15 @@ export function getWebhookDeliveryQueue(): Queue<WebhookDeliveryJobData> {
   // exponential backoff doubles `delay` for each attempt — starting at
   // 5000ms gives the documented schedule (5s, 10s, 20s, 40s, 80s).
   // Total budget: ~155s before a delivery is marked permanently failed.
-  webhookDeliveryQueue = new Queue<WebhookDeliveryJobData>(
-    WEBHOOK_DELIVERY_QUEUE,
-    {
-      connection: getJobsRedis(),
-      defaultJobOptions: {
-        attempts: 5,
-        backoff: { type: "exponential", delay: 5000 },
-        removeOnComplete: { count: 1000 },
-        removeOnFail: { count: 1000 },
-      },
+  webhookDeliveryQueue = new Queue<WebhookDeliveryJobData>(WEBHOOK_DELIVERY_QUEUE, {
+    connection: getJobsRedis(),
+    defaultJobOptions: {
+      attempts: 5,
+      backoff: { type: 'exponential', delay: 5000 },
+      removeOnComplete: { count: 1000 },
+      removeOnFail: { count: 1000 },
     },
-  );
+  });
   return webhookDeliveryQueue;
 }
 
@@ -162,11 +159,9 @@ export async function enqueueTxSubmit(data: TxSubmitJobData): Promise<void> {
  * row (so the worker can fetch the payload by id). The caller is usually
  * the txConfirmer fan-out path that runs after a tx validates on-ledger.
  */
-export async function enqueueWebhookDelivery(
-  data: WebhookDeliveryJobData,
-): Promise<void> {
+export async function enqueueWebhookDelivery(data: WebhookDeliveryJobData): Promise<void> {
   const queue = getWebhookDeliveryQueue();
-  await queue.add("deliver", data);
+  await queue.add('deliver', data);
 }
 
 // ── Teardown ────────────────────────────────────────────────────────────────

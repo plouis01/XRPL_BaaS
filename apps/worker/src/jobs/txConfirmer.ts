@@ -3,7 +3,7 @@
 // After txSubmitter sends a tx to rippled, the tx is "submitted" but not
 // yet validated (it hasn't made it into a closed ledger). This job polls
 // the `tx` command until the tx is either:
-//   (a) validated on-ledger → update row, enqueue webhook
+//   (a) validated on-ledger → update row, fan out webhook events
 //   (b) LastLedgerSequence expired without a result → mark failed, invalidate sequencer
 //
 // The job lives on TX_CONFIRM_QUEUE and uses BullMQ's retry with fixed
@@ -11,12 +11,24 @@
 // `attempts` count gives us a natural upper bound on poll attempts; once
 // attempts are exhausted the job fails and the row is left in 'submitted'
 // state. A separate reconciliation job (deferred) would catch orphans.
+//
+// Sprint 3 webhook fan-out: when a tx validates (success OR failure), we
+// look up every active webhook_endpoints row for the client that
+// subscribes to the matching event type, INSERT a webhook_deliveries row
+// per subscriber, and enqueue them on the webhook-delivery queue. The
+// delivery worker handles retries independently from this job.
 
-import { db, eq, schema } from '@railforge/db';
+import { and, db, eq, schema, sql } from '@railforge/db';
 import { type Job, Worker } from 'bullmq';
 import type { Redis } from 'ioredis';
 import { logger } from '../logger.ts';
-import { TX_CONFIRM_QUEUE, type TxConfirmJobData, getSequencer, getXrplPool } from '../queues.ts';
+import {
+  TX_CONFIRM_QUEUE,
+  type TxConfirmJobData,
+  enqueueWebhookDelivery,
+  getSequencer,
+  getXrplPool,
+} from '../queues.ts';
 
 /**
  * Thrown when we've polled and the tx isn't validated yet, but the
@@ -152,7 +164,104 @@ export async function processTxConfirmJob(job: Job<TxConfirmJobData>): Promise<v
     }
   }
 
-  // TODO Sprint 3: enqueue webhook delivery via WEBHOOK_DELIVERY_QUEUE.
+  // 5. Webhook fan-out (Sprint 3).
+  //
+  // Look up every active webhook_endpoints subscription for this client
+  // whose `events` array contains the matching event type, INSERT a
+  // webhook_deliveries row for each, then enqueue them on the delivery
+  // queue. The delivery worker handles retries.
+  //
+  // We MUST do this AFTER the transactions UPDATE so subscribers can
+  // immediately query GET /v1/payments/:id and see the validated state.
+  //
+  // The events array overlap is checked with Postgres `&&` (array
+  // overlap operator). Drizzle doesn't ship a typed helper for it, so
+  // we use sql template raw — still parameterized via `${...}`.
+  //
+  // Failure isolation: webhook fan-out is best-effort. If the SELECT or
+  // INSERT throws, we LOG and continue rather than throwing — the tx is
+  // already validated and the row is updated, retrying the whole
+  // confirmation job over a webhook glitch would re-fire any successful
+  // deliveries from earlier attempts. A future reconciler can sweep
+  // webhook_deliveries that never made it onto the queue.
+  try {
+    await fanOutWebhooks(txId, isSuccess ? 'transaction.validated' : 'transaction.failed', {
+      transaction_id: txId,
+      tx_hash: txHash,
+      ledger_index: ledgerIndex ?? null,
+      result_code: resultCode,
+      status: isSuccess ? 'validated' : 'failed',
+    });
+  } catch (err) {
+    log.error({ err }, 'webhook fan-out failed (non-fatal)');
+  }
+}
+
+/**
+ * Look up subscribers + create webhook_deliveries rows + enqueue jobs.
+ *
+ * Resolves the client by joining transactions → webhook_endpoints on
+ * client_id. We do NOT pass clientId in via job data because doing so
+ * would require backfilling every existing TxConfirmJobData on rolling
+ * deploys — joining via the transactions row keeps the job payload
+ * minimal and the source-of-truth in Postgres.
+ */
+async function fanOutWebhooks(
+  txId: string,
+  eventType: 'transaction.validated' | 'transaction.failed',
+  // biome-ignore lint/suspicious/noExplicitAny: webhook payload is a free-form JSON shape
+  payload: Record<string, any>,
+): Promise<void> {
+  // Look up subscribers via a single SELECT JOINed through the
+  // transactions row. The events array overlap (`&&`) is the standard
+  // Postgres way to ask "any element matches".
+  const subscribers = await db
+    .select({
+      endpointId: schema.webhookEndpoints.id,
+    })
+    .from(schema.webhookEndpoints)
+    .innerJoin(
+      schema.transactions,
+      eq(schema.webhookEndpoints.clientId, schema.transactions.clientId),
+    )
+    .where(
+      and(
+        eq(schema.transactions.id, txId),
+        eq(schema.webhookEndpoints.isActive, true),
+        sql`${schema.webhookEndpoints.events} && ARRAY[${eventType}]::text[]`,
+      ),
+    );
+
+  if (subscribers.length === 0) return;
+
+  // Insert one delivery row per subscriber, returning the new ids so we
+  // can enqueue corresponding jobs. Single INSERT for all rows so the
+  // round-trip cost stays O(1) per fan-out, not O(N).
+  const inserted = await db
+    .insert(schema.webhookDeliveries)
+    .values(
+      subscribers.map((s) => ({
+        endpointId: s.endpointId,
+        eventType,
+        payload,
+        status: 'pending',
+      })),
+    )
+    .returning({
+      id: schema.webhookDeliveries.id,
+      endpointId: schema.webhookDeliveries.endpointId,
+    });
+
+  // Enqueue all delivery jobs in parallel — Redis enqueue is cheap and
+  // BullMQ doesn't care about ordering across deliveries.
+  await Promise.all(
+    inserted.map((row) =>
+      enqueueWebhookDelivery({
+        deliveryId: row.id,
+        endpointId: row.endpointId,
+      }),
+    ),
+  );
 }
 
 /**
