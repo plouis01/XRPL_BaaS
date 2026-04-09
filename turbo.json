@@ -7,28 +7,27 @@
     "XRPL_WS_URL",
     "DATABASE_URL",
     "REDIS_URL",
-    "RAILFORGE_ALLOW_MAINNET"
+    "RAILFORGE_ALLOW_MAINNET",
+    "API_KEY_SALT",
+    "IP_RATE_LIMIT"
   ],
   "tasks": {
     "build": {
       "dependsOn": ["^build"],
-      "outputs": ["dist/**", ".next/**", "!.next/cache/**"]
+      "outputs": []
     },
     "dev": {
       "cache": false,
       "persistent": true
     },
     "test": {
-      "dependsOn": ["^build"],
-      "outputs": ["coverage/**"]
+      "outputs": []
     },
     "test:integration": {
-      "dependsOn": ["^build"],
       "cache": false,
       "env": ["XRPL_NETWORK", "XRPL_WS_URL", "DATABASE_URL", "REDIS_URL"]
     },
     "typecheck": {
-      "dependsOn": ["^build"],
       "outputs": []
     },
     "lint": {
