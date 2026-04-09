@@ -138,7 +138,9 @@ vi.mock('../queues.ts', () => ({
   enqueueWebhookDelivery: enqueueWebhookDeliveryMock,
 }));
 
-const { processTxConfirmJob, TxNotYetValidated } = await import('./txConfirmer.ts');
+const { extractMptIssuanceIdFromMeta, processTxConfirmJob, TxNotYetValidated } = await import(
+  './txConfirmer.ts'
+);
 
 // ── Test helpers ────────────────────────────────────────────────────────────
 
@@ -460,5 +462,100 @@ describe('processTxConfirmJob', () => {
 
     // The tx row update still happened.
     expect(dbUpdateCalls.filter((u) => u.table === 'transactions')).toHaveLength(1);
+  });
+});
+
+// ── extractMptIssuanceIdFromMeta (Sprint 2 carry-over: mpt_issuance_id backfill) ──
+
+describe('extractMptIssuanceIdFromMeta', () => {
+  it('returns the id from a CreatedNode of type MPTokenIssuance (mpt_issuance_id field)', () => {
+    const result = {
+      meta: {
+        AffectedNodes: [
+          {
+            CreatedNode: {
+              LedgerEntryType: 'MPTokenIssuance',
+              NewFields: {
+                mpt_issuance_id: '00ABCDEF1234567890ABCDEF1234567890ABCDEF12345678',
+              },
+            },
+          },
+        ],
+      },
+    };
+    expect(extractMptIssuanceIdFromMeta(result)).toBe(
+      '00ABCDEF1234567890ABCDEF1234567890ABCDEF12345678',
+    );
+  });
+
+  it('returns the id from MPTokenIssuanceID field as fallback', () => {
+    const result = {
+      meta: {
+        AffectedNodes: [
+          {
+            CreatedNode: {
+              LedgerEntryType: 'MPTokenIssuance',
+              NewFields: { MPTokenIssuanceID: 'FFFFEEEE' },
+            },
+          },
+        ],
+      },
+    };
+    expect(extractMptIssuanceIdFromMeta(result)).toBe('FFFFEEEE');
+  });
+
+  it('returns the LedgerIndex of the created node when neither id field is present', () => {
+    const result = {
+      meta: {
+        AffectedNodes: [
+          {
+            CreatedNode: {
+              LedgerEntryType: 'MPTokenIssuance',
+              LedgerIndex: '1234ABCD',
+              NewFields: {},
+            },
+          },
+        ],
+      },
+    };
+    expect(extractMptIssuanceIdFromMeta(result)).toBe('1234ABCD');
+  });
+
+  it('ignores ModifiedNode entries (only CreatedNode counts)', () => {
+    const result = {
+      meta: {
+        AffectedNodes: [
+          {
+            ModifiedNode: {
+              LedgerEntryType: 'MPTokenIssuance',
+              FinalFields: { mpt_issuance_id: 'DECAFBAD' },
+            },
+          },
+        ],
+      },
+    };
+    expect(extractMptIssuanceIdFromMeta(result)).toBeNull();
+  });
+
+  it("ignores CreatedNode entries that aren't MPTokenIssuance", () => {
+    const result = {
+      meta: {
+        AffectedNodes: [
+          {
+            CreatedNode: {
+              LedgerEntryType: 'AccountRoot',
+              NewFields: { mpt_issuance_id: 'WRONG' },
+            },
+          },
+        ],
+      },
+    };
+    expect(extractMptIssuanceIdFromMeta(result)).toBeNull();
+  });
+
+  it('returns null on missing meta or non-array AffectedNodes', () => {
+    expect(extractMptIssuanceIdFromMeta({})).toBeNull();
+    expect(extractMptIssuanceIdFromMeta({ meta: {} })).toBeNull();
+    expect(extractMptIssuanceIdFromMeta({ meta: { AffectedNodes: 'not-array' } })).toBeNull();
   });
 });

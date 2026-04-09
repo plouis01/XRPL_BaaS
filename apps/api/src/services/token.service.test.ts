@@ -20,19 +20,31 @@ const dbState = {
   tokenInsertCalls: [] as Array<{ values: unknown }>,
 };
 
+// Sprint 3 ops (transfer/freeze/clawback): the resolveToken helper uses a
+// select().from().innerJoin().where().limit() chain. Tests set this state
+// to control what the JOIN returns.
+const dbState2 = {
+  resolvedToken: null as unknown,
+};
+
 vi.mock('@railforge/db', () => {
-  // Select chain ends in limit() which returns the mocked issuer row.
+  // Select chain. Two shapes are exposed:
+  //   - select().from().where().limit()         → original createToken path
+  //   - select().from().innerJoin().where().limit() → resolveToken (token ops)
   const select = vi.fn(() => ({
     from: vi.fn((table: unknown) => ({
       where: vi.fn(() => ({
         limit: vi.fn(async () => {
-          // Return empty unless the test has set an issuer row.
           if (!dbState.issuerRow) return [];
-          // Only respond for the accounts table.
           const tableName =
             table && typeof table === 'object' && 'id' in table ? (table as { id: string }).id : '';
           return tableName ? [dbState.issuerRow] : [];
         }),
+      })),
+      innerJoin: vi.fn(() => ({
+        where: vi.fn(() => ({
+          limit: vi.fn(async () => (dbState2.resolvedToken ? [dbState2.resolvedToken] : [])),
+        })),
       })),
     })),
   }));
@@ -42,8 +54,6 @@ vi.mock('@railforge/db', () => {
   const insert = vi.fn((table: unknown) => ({
     values: vi.fn((v: unknown) => ({
       returning: vi.fn(async () => {
-        // We tag each mocked schema table with a unique `id` field; the
-        // tests compare by reference identity.
         if (table === schemaStub.transactions) {
           dbState.txInsertCalls.push({ values: v });
           return dbState.txInsertResult;
@@ -72,6 +82,10 @@ vi.mock('@railforge/db', () => {
     tokens: {
       id: 'tokens-id',
       clientId: 'clientId',
+      tokenType: 'tokenType',
+      currencyCode: 'currencyCode',
+      mptIssuanceId: 'mptIssuanceId',
+      issuerAccount: 'issuerAccount',
     },
   };
 
@@ -94,7 +108,9 @@ vi.mock('@railforge/jobs', () => ({
 }));
 
 // Import after mocks.
-const { createToken, TokenServiceError } = await import('./token.service.ts');
+const { clawbackToken, createToken, freezeToken, TokenServiceError, transferToken } = await import(
+  './token.service.ts'
+);
 
 // ── Test helpers ────────────────────────────────────────────────────────────
 
@@ -254,5 +270,269 @@ describe('createToken', () => {
     };
     expect(enq.txJson.TransferFee).toBe(250);
     expect(enq.txJson.MaximumAmount).toBe('1000000000');
+  });
+});
+
+// ── Sprint 3 Sprint 2 carry-over: token operations ─────────────────────────
+
+const MPT_ID = '00000ABC1234567890ABCDEF1234567890ABCDEF12345678';
+
+const RESOLVED_MPT_TOKEN = {
+  tokenId: 'token-1',
+  tokenType: 'mpt',
+  currencyCode: 'USD',
+  mptIssuanceId: MPT_ID,
+  issuerAccountId: 'acct-uuid-1',
+  issuerAddress: 'rIssuer0000000000000000000000000',
+};
+
+const RESOLVED_TRUSTLINE_TOKEN = {
+  tokenId: 'token-2',
+  tokenType: 'trustline',
+  currencyCode: 'USD',
+  mptIssuanceId: null,
+  issuerAccountId: 'acct-uuid-1',
+  issuerAddress: 'rIssuer0000000000000000000000000',
+};
+
+describe('transferToken', () => {
+  beforeEach(() => {
+    dbState.txInsertCalls.length = 0;
+    dbState.tokenInsertCalls.length = 0;
+    dbState.txInsertResult = [{ id: 'tx-uuid-1' }];
+    enqueueCalls.length = 0;
+    dbState2.resolvedToken = null;
+  });
+
+  afterEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('token_not_found when JOIN returns nothing (no DB writes, no enqueue)', async () => {
+    const err = await transferToken({
+      clientId: 'client-1',
+      tokenId: 'token-1',
+      destination: 'rDest0000000000000000000000000000',
+      amount: '100',
+    }).catch((e) => e);
+    expect(err).toBeInstanceOf(TokenServiceError);
+    expect((err as InstanceType<typeof TokenServiceError>).code).toBe('token_not_found');
+    expect(dbState.txInsertCalls).toHaveLength(0);
+    expect(enqueueCalls).toHaveLength(0);
+  });
+
+  it('MPT happy path: builds MPT Payment, inserts tx row, enqueues', async () => {
+    dbState2.resolvedToken = RESOLVED_MPT_TOKEN;
+
+    const result = await transferToken({
+      clientId: 'client-1',
+      tokenId: 'token-1',
+      destination: 'rDest0000000000000000000000000000',
+      amount: '100',
+    });
+
+    expect(result.txId).toBe('tx-uuid-1');
+    expect(dbState.txInsertCalls).toHaveLength(1);
+    const txValues = dbState.txInsertCalls[0]!.values as Record<string, unknown>;
+    expect(txValues.txType).toBe('Payment');
+    expect(txValues.sourceAddress).toBe(RESOLVED_MPT_TOKEN.issuerAddress);
+
+    expect(enqueueCalls).toHaveLength(1);
+    const enq = enqueueCalls[0]!.data as {
+      txJson: {
+        TransactionType: string;
+        Amount: { mpt_issuance_id: string; value: string };
+      };
+    };
+    expect(enq.txJson.TransactionType).toBe('Payment');
+    expect(enq.txJson.Amount).toEqual({
+      mpt_issuance_id: MPT_ID,
+      value: '100',
+    });
+  });
+
+  it('MPT token without mpt_issuance_id (not yet validated) → token_not_ready', async () => {
+    dbState2.resolvedToken = { ...RESOLVED_MPT_TOKEN, mptIssuanceId: null };
+
+    const err = await transferToken({
+      clientId: 'client-1',
+      tokenId: 'token-1',
+      destination: 'rDest0000000000000000000000000000',
+      amount: '100',
+    }).catch((e) => e);
+    expect(err).toBeInstanceOf(TokenServiceError);
+    expect((err as InstanceType<typeof TokenServiceError>).code).toBe('token_not_ready');
+    expect(dbState.txInsertCalls).toHaveLength(0);
+    expect(enqueueCalls).toHaveLength(0);
+  });
+
+  it('trustline token: builds issued-currency Payment', async () => {
+    dbState2.resolvedToken = RESOLVED_TRUSTLINE_TOKEN;
+
+    await transferToken({
+      clientId: 'client-1',
+      tokenId: 'token-2',
+      destination: 'rDest0000000000000000000000000000',
+      amount: '100',
+    });
+
+    const enq = enqueueCalls[0]!.data as {
+      txJson: {
+        TransactionType: string;
+        Amount: { currency: string; issuer: string; value: string };
+      };
+    };
+    expect(enq.txJson.TransactionType).toBe('Payment');
+    expect(enq.txJson.Amount).toEqual({
+      currency: 'USD',
+      issuer: RESOLVED_TRUSTLINE_TOKEN.issuerAddress,
+      value: '100',
+    });
+  });
+});
+
+describe('freezeToken', () => {
+  beforeEach(() => {
+    dbState.txInsertCalls.length = 0;
+    dbState.txInsertResult = [{ id: 'tx-uuid-1' }];
+    enqueueCalls.length = 0;
+    dbState2.resolvedToken = null;
+  });
+
+  afterEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('MPT happy path (lock): builds MPTokenIssuanceSet with tfMPTLock', async () => {
+    dbState2.resolvedToken = RESOLVED_MPT_TOKEN;
+    await freezeToken({
+      clientId: 'client-1',
+      tokenId: 'token-1',
+    });
+
+    const enq = enqueueCalls[0]!.data as {
+      txJson: {
+        TransactionType: string;
+        Flags: number;
+        MPTokenIssuanceID: string;
+      };
+    };
+    expect(enq.txJson.TransactionType).toBe('MPTokenIssuanceSet');
+    expect(enq.txJson.MPTokenIssuanceID).toBe(MPT_ID);
+    expect(enq.txJson.Flags).toBe(1); // tfMPTLock
+  });
+
+  it('unfreeze=true → tfMPTUnlock flag', async () => {
+    dbState2.resolvedToken = RESOLVED_MPT_TOKEN;
+    await freezeToken({
+      clientId: 'client-1',
+      tokenId: 'token-1',
+      unfreeze: true,
+    });
+    const enq = enqueueCalls[0]!.data as { txJson: { Flags: number } };
+    expect(enq.txJson.Flags).toBe(2); // tfMPTUnlock
+  });
+
+  it('includes Holder when freezing a single holder', async () => {
+    dbState2.resolvedToken = RESOLVED_MPT_TOKEN;
+    await freezeToken({
+      clientId: 'client-1',
+      tokenId: 'token-1',
+      holder: 'rHolder000000000000000000000000000',
+    });
+    const enq = enqueueCalls[0]!.data as { txJson: { Holder?: string } };
+    expect(enq.txJson.Holder).toBe('rHolder000000000000000000000000000');
+  });
+
+  it('trustline token → invalid_input (not supported in this version)', async () => {
+    dbState2.resolvedToken = RESOLVED_TRUSTLINE_TOKEN;
+    const err = await freezeToken({
+      clientId: 'client-1',
+      tokenId: 'token-2',
+    }).catch((e) => e);
+    expect(err).toBeInstanceOf(TokenServiceError);
+    expect((err as InstanceType<typeof TokenServiceError>).code).toBe('invalid_input');
+    expect(dbState.txInsertCalls).toHaveLength(0);
+    expect(enqueueCalls).toHaveLength(0);
+  });
+
+  it('MPT not yet validated → token_not_ready', async () => {
+    dbState2.resolvedToken = { ...RESOLVED_MPT_TOKEN, mptIssuanceId: null };
+    const err = await freezeToken({
+      clientId: 'client-1',
+      tokenId: 'token-1',
+    }).catch((e) => e);
+    expect(err).toBeInstanceOf(TokenServiceError);
+    expect((err as InstanceType<typeof TokenServiceError>).code).toBe('token_not_ready');
+  });
+});
+
+describe('clawbackToken', () => {
+  beforeEach(() => {
+    dbState.txInsertCalls.length = 0;
+    dbState.txInsertResult = [{ id: 'tx-uuid-1' }];
+    enqueueCalls.length = 0;
+    dbState2.resolvedToken = null;
+  });
+
+  afterEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('MPT happy path: builds Clawback with MPT amount + Holder', async () => {
+    dbState2.resolvedToken = RESOLVED_MPT_TOKEN;
+    await clawbackToken({
+      clientId: 'client-1',
+      tokenId: 'token-1',
+      holder: 'rHolder000000000000000000000000000',
+      amount: '10',
+    });
+
+    const enq = enqueueCalls[0]!.data as {
+      txJson: {
+        TransactionType: string;
+        Amount: { mpt_issuance_id?: string; value: string };
+        Holder?: string;
+      };
+    };
+    expect(enq.txJson.TransactionType).toBe('Clawback');
+    expect(enq.txJson.Amount).toEqual({ mpt_issuance_id: MPT_ID, value: '10' });
+    expect(enq.txJson.Holder).toBe('rHolder000000000000000000000000000');
+  });
+
+  it('trustline token: builds Clawback with issued-currency Amount (holder in Amount.issuer per XRPL spec)', async () => {
+    dbState2.resolvedToken = RESOLVED_TRUSTLINE_TOKEN;
+    await clawbackToken({
+      clientId: 'client-1',
+      tokenId: 'token-2',
+      holder: 'rHolder000000000000000000000000000',
+      amount: '10',
+    });
+
+    const enq = enqueueCalls[0]!.data as {
+      txJson: {
+        TransactionType: string;
+        Amount: { currency?: string; issuer?: string; value: string };
+      };
+    };
+    expect(enq.txJson.TransactionType).toBe('Clawback');
+    // Per the XRPL spec, Amount.issuer carries the HOLDER address.
+    expect(enq.txJson.Amount).toEqual({
+      currency: 'USD',
+      issuer: 'rHolder000000000000000000000000000',
+      value: '10',
+    });
+  });
+
+  it('token_not_found → no DB writes, no enqueue', async () => {
+    const err = await clawbackToken({
+      clientId: 'client-1',
+      tokenId: 'token-1',
+      holder: 'rHolder000000000000000000000000000',
+      amount: '10',
+    }).catch((e) => e);
+    expect(err).toBeInstanceOf(TokenServiceError);
+    expect((err as InstanceType<typeof TokenServiceError>).code).toBe('token_not_found');
+    expect(enqueueCalls).toHaveLength(0);
   });
 });

@@ -90,7 +90,14 @@ vi.mock('@railforge/jobs', () => ({
 }));
 
 // Import AFTER mocks.
-const { createAccount, getAccount, AccountServiceError } = await import('./account.service.ts');
+const {
+  AccountServiceError,
+  configureSigners,
+  createAccount,
+  deleteAccount,
+  getAccount,
+  rotateRegularKey,
+} = await import('./account.service.ts');
 
 // ── Tests ───────────────────────────────────────────────────────────────────
 
@@ -331,5 +338,214 @@ describe('getAccount', () => {
     expect(result?.isFunded).toBe(false);
     expect(result?.reserveBalance).toBe('0');
     expect(result?.fundingTxId).toBeNull();
+  });
+});
+
+// ── Sprint 3 Sprint 2 carry-over: account ops (signers/rotate-key/delete) ──
+
+const RESOLVED_FUNDED_ACCOUNT = {
+  id: 'acct-uuid-1',
+  address: 'rOwned00000000000000000000000000',
+  isFunded: true,
+};
+
+const RESOLVED_UNFUNDED_ACCOUNT = {
+  id: 'acct-uuid-2',
+  address: 'rUnfunded000000000000000000000000',
+  isFunded: false,
+};
+
+describe('configureSigners', () => {
+  beforeEach(() => {
+    dbInsertCalls.length = 0;
+    enqueueCalls.length = 0;
+    dbInsertResults.transactions = [{ id: 'tx-uuid-1' }];
+    dbSelectResult.current = [];
+  });
+
+  afterEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("not_found when the account doesn't belong to the client", async () => {
+    dbSelectResult.current = [];
+    const err = await configureSigners({
+      clientId: 'client-1',
+      address: 'rOwned00000000000000000000000000',
+      quorum: 2,
+      signers: [
+        { address: 'rA', weight: 1 },
+        { address: 'rB', weight: 1 },
+      ],
+    }).catch((e) => e);
+    expect(err).toBeInstanceOf(AccountServiceError);
+    expect((err as InstanceType<typeof AccountServiceError>).code).toBe('not_found');
+    expect(dbInsertCalls).toHaveLength(0);
+    expect(enqueueCalls).toHaveLength(0);
+  });
+
+  it("account_not_funded when the funding tx hasn't validated yet", async () => {
+    dbSelectResult.current = [RESOLVED_UNFUNDED_ACCOUNT];
+    const err = await configureSigners({
+      clientId: 'client-1',
+      address: 'rUnfunded000000000000000000000000',
+      quorum: 1,
+      signers: [{ address: 'rA', weight: 1 }],
+    }).catch((e) => e);
+    expect(err).toBeInstanceOf(AccountServiceError);
+    expect((err as InstanceType<typeof AccountServiceError>).code).toBe('account_not_funded');
+  });
+
+  it('happy path: builds SignerListSet, inserts tx row, enqueues', async () => {
+    dbSelectResult.current = [RESOLVED_FUNDED_ACCOUNT];
+
+    const result = await configureSigners({
+      clientId: 'client-1',
+      address: RESOLVED_FUNDED_ACCOUNT.address,
+      quorum: 2,
+      signers: [
+        { address: 'rA000000000000000000000000000000A', weight: 1 },
+        { address: 'rB000000000000000000000000000000B', weight: 1 },
+      ],
+    });
+
+    expect(result.txId).toBe('tx-uuid-1');
+    expect(dbInsertCalls).toHaveLength(1);
+    const txValues = dbInsertCalls[0]!.values as Record<string, unknown>;
+    expect(txValues.txType).toBe('SignerListSet');
+    expect(txValues.sourceAddress).toBe(RESOLVED_FUNDED_ACCOUNT.address);
+
+    expect(enqueueCalls).toHaveLength(1);
+    const enq = enqueueCalls[0] as {
+      txJson: { TransactionType: string; SignerQuorum: number };
+    };
+    expect(enq.txJson.TransactionType).toBe('SignerListSet');
+    expect(enq.txJson.SignerQuorum).toBe(2);
+  });
+
+  it('invalid_input wraps the buildSignerListSet validation error', async () => {
+    dbSelectResult.current = [RESOLVED_FUNDED_ACCOUNT];
+    const err = await configureSigners({
+      clientId: 'client-1',
+      address: RESOLVED_FUNDED_ACCOUNT.address,
+      quorum: 1,
+      // 33 entries — exceeds the 32-max enforced by the builder.
+      signers: Array.from({ length: 33 }, () => ({
+        address: 'rEntry00000000000000000000000000000',
+        weight: 1,
+      })),
+    }).catch((e) => e);
+    expect(err).toBeInstanceOf(AccountServiceError);
+    expect((err as InstanceType<typeof AccountServiceError>).code).toBe('invalid_input');
+    expect(dbInsertCalls).toHaveLength(0);
+    expect(enqueueCalls).toHaveLength(0);
+  });
+});
+
+describe('rotateRegularKey', () => {
+  beforeEach(() => {
+    dbInsertCalls.length = 0;
+    enqueueCalls.length = 0;
+    dbInsertResults.transactions = [{ id: 'tx-uuid-1' }];
+    dbSelectResult.current = [];
+  });
+
+  afterEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('happy path: builds SetRegularKey with the new key', async () => {
+    dbSelectResult.current = [RESOLVED_FUNDED_ACCOUNT];
+    await rotateRegularKey({
+      clientId: 'client-1',
+      address: RESOLVED_FUNDED_ACCOUNT.address,
+      regularKey: 'rNewKey000000000000000000000000000',
+    });
+    const enq = enqueueCalls[0] as {
+      txJson: { TransactionType: string; RegularKey?: string };
+    };
+    expect(enq.txJson.TransactionType).toBe('SetRegularKey');
+    expect(enq.txJson.RegularKey).toBe('rNewKey000000000000000000000000000');
+  });
+
+  it('regularKey=null clears the field (omits RegularKey from the tx)', async () => {
+    dbSelectResult.current = [RESOLVED_FUNDED_ACCOUNT];
+    await rotateRegularKey({
+      clientId: 'client-1',
+      address: RESOLVED_FUNDED_ACCOUNT.address,
+      regularKey: null,
+    });
+    const enq = enqueueCalls[0] as {
+      txJson: { TransactionType: string; RegularKey?: string };
+    };
+    expect(enq.txJson.TransactionType).toBe('SetRegularKey');
+    expect(enq.txJson.RegularKey).toBeUndefined();
+  });
+
+  it('not_found short-circuits with no DB writes', async () => {
+    dbSelectResult.current = [];
+    const err = await rotateRegularKey({
+      clientId: 'client-1',
+      address: 'rUnknown',
+      regularKey: null,
+    }).catch((e) => e);
+    expect(err).toBeInstanceOf(AccountServiceError);
+    expect((err as InstanceType<typeof AccountServiceError>).code).toBe('not_found');
+    expect(dbInsertCalls).toHaveLength(0);
+  });
+});
+
+describe('deleteAccount', () => {
+  beforeEach(() => {
+    dbInsertCalls.length = 0;
+    enqueueCalls.length = 0;
+    dbInsertResults.transactions = [{ id: 'tx-uuid-1' }];
+    dbSelectResult.current = [];
+  });
+
+  afterEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('happy path: builds AccountDelete + enqueues, no soft-delete yet', async () => {
+    dbSelectResult.current = [RESOLVED_FUNDED_ACCOUNT];
+    await deleteAccount({
+      clientId: 'client-1',
+      address: RESOLVED_FUNDED_ACCOUNT.address,
+      destination: 'rDest0000000000000000000000000000',
+    });
+
+    // tx row inserted as AccountDelete
+    expect(dbInsertCalls).toHaveLength(1);
+    expect((dbInsertCalls[0]!.values as Record<string, unknown>).txType).toBe('AccountDelete');
+
+    const enq = enqueueCalls[0] as {
+      txJson: { TransactionType: string; Account: string; Destination: string };
+    };
+    expect(enq.txJson.TransactionType).toBe('AccountDelete');
+    expect(enq.txJson.Destination).toBe('rDest0000000000000000000000000000');
+  });
+
+  it('includes DestinationTag when provided', async () => {
+    dbSelectResult.current = [RESOLVED_FUNDED_ACCOUNT];
+    await deleteAccount({
+      clientId: 'client-1',
+      address: RESOLVED_FUNDED_ACCOUNT.address,
+      destination: 'rDest0000000000000000000000000000',
+      destinationTag: 7,
+    });
+    const enq = enqueueCalls[0] as { txJson: { DestinationTag?: number } };
+    expect(enq.txJson.DestinationTag).toBe(7);
+  });
+
+  it("account_not_funded when the funding tx hasn't validated yet", async () => {
+    dbSelectResult.current = [RESOLVED_UNFUNDED_ACCOUNT];
+    const err = await deleteAccount({
+      clientId: 'client-1',
+      address: RESOLVED_UNFUNDED_ACCOUNT.address,
+      destination: 'rDest0000000000000000000000000000',
+    }).catch((e) => e);
+    expect(err).toBeInstanceOf(AccountServiceError);
+    expect((err as InstanceType<typeof AccountServiceError>).code).toBe('account_not_funded');
   });
 });
