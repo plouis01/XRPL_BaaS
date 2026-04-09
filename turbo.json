@@ -1,6 +1,6 @@
 {
   "$schema": "https://turbo.build/schema.json",
-  "globalDependencies": [".env", "tsconfig.base.json", "biome.json"],
+  "globalDependencies": ["tsconfig.base.json", "biome.json"],
   "globalEnv": [
     "NODE_ENV",
     "XRPL_NETWORK",
@@ -21,13 +21,16 @@
       "persistent": true
     },
     "test": {
+      "dependsOn": ["^build"],
       "outputs": []
     },
     "test:integration": {
+      "dependsOn": ["^build"],
       "cache": false,
       "env": ["XRPL_NETWORK", "XRPL_WS_URL", "DATABASE_URL", "REDIS_URL"]
     },
     "typecheck": {
+      "dependsOn": ["^build"],
       "outputs": []
     },
     "lint": {
