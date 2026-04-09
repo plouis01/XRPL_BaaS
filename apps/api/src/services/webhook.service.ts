@@ -18,10 +18,10 @@
 // - Cross-tenant isolation: every query is scoped by clientId. The
 //   handler reads clientId from the auth context, never the request body.
 
-import { randomBytes } from "node:crypto";
-import { and, db, eq, schema } from "@railforge/db";
+import { randomBytes } from 'node:crypto';
+import { and, db, eq, schema } from '@railforge/db';
 
-const SECRET_PREFIX = "whsec_";
+const SECRET_PREFIX = 'whsec_';
 // 32 random bytes → 43 base64url chars. Plus the prefix → 49-char secret.
 const SECRET_BYTE_LENGTH = 32;
 
@@ -50,11 +50,11 @@ export interface CreatedEndpointView extends EndpointView {
 
 export class WebhookServiceError extends Error {
   constructor(
-    public readonly code: "not_found" | "invalid_url",
+    public readonly code: 'not_found' | 'invalid_url',
     message: string,
   ) {
     super(message);
-    this.name = "WebhookServiceError";
+    this.name = 'WebhookServiceError';
   }
 }
 
@@ -66,7 +66,7 @@ export class WebhookServiceError extends Error {
  * have a recognizable token shape.
  */
 function generateSecret(): string {
-  return SECRET_PREFIX + randomBytes(SECRET_BYTE_LENGTH).toString("base64url");
+  return SECRET_PREFIX + randomBytes(SECRET_BYTE_LENGTH).toString('base64url');
 }
 
 /**
@@ -79,36 +79,25 @@ function validateUrl(url: string): URL {
   try {
     parsed = new URL(url);
   } catch {
-    throw new WebhookServiceError(
-      "invalid_url",
-      "Webhook URL is not a valid URL",
-    );
+    throw new WebhookServiceError('invalid_url', 'Webhook URL is not a valid URL');
   }
-  if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
-    throw new WebhookServiceError(
-      "invalid_url",
-      "Webhook URL must use http or https",
-    );
+  if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+    throw new WebhookServiceError('invalid_url', 'Webhook URL must use http or https');
   }
   // Refuse http:// outside localhost — silent plaintext delivery is a
   // footgun. The worker doesn't enforce TLS itself, so this is the
   // chokepoint.
   if (
-    parsed.protocol === "http:" &&
-    parsed.hostname !== "localhost" &&
-    parsed.hostname !== "127.0.0.1"
+    parsed.protocol === 'http:' &&
+    parsed.hostname !== 'localhost' &&
+    parsed.hostname !== '127.0.0.1'
   ) {
-    throw new WebhookServiceError(
-      "invalid_url",
-      "Webhook URL must use https except on localhost",
-    );
+    throw new WebhookServiceError('invalid_url', 'Webhook URL must use https except on localhost');
   }
   return parsed;
 }
 
-export async function createEndpoint(
-  input: CreateEndpointInput,
-): Promise<CreatedEndpointView> {
+export async function createEndpoint(input: CreateEndpointInput): Promise<CreatedEndpointView> {
   validateUrl(input.url);
 
   const secret = generateSecret();
@@ -130,7 +119,7 @@ export async function createEndpoint(
     });
   const row = inserted[0];
   if (!row) {
-    throw new Error("webhook_endpoints insert returned no row");
+    throw new Error('webhook_endpoints insert returned no row');
   }
 
   return {
@@ -173,10 +162,7 @@ export async function listEndpoints(clientId: string): Promise<EndpointView[]> {
  * different client (the two cases are indistinguishable on purpose, no
  * cross-tenant enumeration).
  */
-export async function deleteEndpoint(
-  clientId: string,
-  endpointId: string,
-): Promise<boolean> {
+export async function deleteEndpoint(clientId: string, endpointId: string): Promise<boolean> {
   const deleted = await db
     .delete(schema.webhookEndpoints)
     .where(
