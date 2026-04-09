@@ -53,6 +53,24 @@ export interface TxConfirmJobData {
   lastLedger: number;
 }
 
+/**
+ * Job payload for webhook delivery.
+ *
+ * The payload itself lives in `webhook_deliveries.payload` so the worker
+ * can fetch it by id without having a giant JSON blob serialized into
+ * BullMQ's Redis-backed job store. Same reason `transactions.requestBody`
+ * is in Postgres rather than the queue.
+ *
+ * The endpointId is included so the worker can fetch the URL + secret in
+ * a single SELECT (avoiding a join through webhook_deliveries on retry).
+ */
+export interface WebhookDeliveryJobData {
+  /** webhook_deliveries.id — the row the worker updates in place. */
+  deliveryId: string;
+  /** webhook_endpoints.id — the destination subscription. */
+  endpointId: string;
+}
+
 // ── Redis connection singleton ─────────────────────────────────────────────
 
 let redisConnection: Redis | null = null;
@@ -72,6 +90,7 @@ export function getJobsRedis(): Redis {
 
 let txSubmitQueue: Queue<TxSubmitJobData> | null = null;
 let txConfirmQueue: Queue<TxConfirmJobData> | null = null;
+const webhookDeliveryQueue: Queue<WebhookDeliveryJobData> | null = null;
 
 export function getTxSubmitQueue(): Queue<TxSubmitJobData> {
   if (txSubmitQueue) return txSubmitQueue;
@@ -101,6 +120,27 @@ export function getTxConfirmQueue(): Queue<TxConfirmJobData> {
   return txConfirmQueue;
 }
 
+export function getWebhookDeliveryQueue(): Queue<WebhookDeliveryJobData> {
+  if (webhookDeliveryQueue) return webhookDeliveryQueue;
+  // Per PLAN.md §4.4: 5 attempts at 5s, 10s, 20s, 40s, 80s. BullMQ's
+  // exponential backoff doubles `delay` for each attempt — starting at
+  // 5000ms gives the documented schedule (5s, 10s, 20s, 40s, 80s).
+  // Total budget: ~155s before a delivery is marked permanently failed.
+  webhookDeliveryQueue = new Queue<WebhookDeliveryJobData>(
+    WEBHOOK_DELIVERY_QUEUE,
+    {
+      connection: getJobsRedis(),
+      defaultJobOptions: {
+        attempts: 5,
+        backoff: { type: "exponential", delay: 5000 },
+        removeOnComplete: { count: 1000 },
+        removeOnFail: { count: 1000 },
+      },
+    },
+  );
+  return webhookDeliveryQueue;
+}
+
 // ── High-level enqueue helpers (for service code in apps/api) ──────────────
 
 /**
@@ -115,12 +155,31 @@ export async function enqueueTxSubmit(data: TxSubmitJobData): Promise<void> {
   await queue.add('submit', data);
 }
 
+/**
+ * Enqueue a webhook delivery for the worker to sign and POST.
+ *
+ * Caller MUST have already INSERTed the corresponding webhook_deliveries
+ * row (so the worker can fetch the payload by id). The caller is usually
+ * the txConfirmer fan-out path that runs after a tx validates on-ledger.
+ */
+export async function enqueueWebhookDelivery(
+  data: WebhookDeliveryJobData,
+): Promise<void> {
+  const queue = getWebhookDeliveryQueue();
+  await queue.add("deliver", data);
+}
+
 // ── Teardown ────────────────────────────────────────────────────────────────
 
 export async function disconnectJobs(): Promise<void> {
-  await Promise.all([txSubmitQueue?.close(), txConfirmQueue?.close()]);
+  await Promise.all([
+    txSubmitQueue?.close(),
+    txConfirmQueue?.close(),
+    webhookDeliveryQueue?.close(),
+  ]);
   txSubmitQueue = null;
   txConfirmQueue = null;
+  webhookDeliveryQueue = null;
   await redisConnection?.quit();
   redisConnection = null;
 }
