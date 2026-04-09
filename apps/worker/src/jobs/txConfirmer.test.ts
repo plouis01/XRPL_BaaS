@@ -25,6 +25,27 @@ const dbSelectResult = {
 // most txs aren't funding txs.
 const accountUpdateReturning = { current: [] as unknown[] };
 
+// ── Sprint 3 webhook fan-out: extra mock state ──
+//
+// The fan-out path issues TWO additional DB calls:
+//   1. SELECT … FROM webhook_endpoints INNER JOIN transactions WHERE …
+//   2. INSERT INTO webhook_deliveries … RETURNING id, endpoint_id
+//
+// We track call order so the existing simple `select.from.where.limit`
+// chain (used by the sequencer-invalidate path) and the new
+// `select.from.innerJoin.where` chain don't trample each other.
+
+// Subscribers returned by the JOIN select. Empty by default.
+const subscribersResult = { current: [] as Array<{ endpointId: string }> };
+// Rows the webhook_deliveries insert .returning() resolves to.
+const deliveryInsertResult = {
+  current: [] as Array<{ id: string; endpointId: string }>,
+};
+// Tracks how many times .insert was called and with what.
+const dbInsertCalls: Array<{ table: string; values: unknown }> = [];
+// queues mock spy — counts enqueueWebhookDelivery calls.
+const enqueueWebhookDeliveryMock = vi.fn(async (_data: unknown) => {});
+
 vi.mock('@railforge/db', () => {
   const update = vi.fn((table: { __name: string }) => ({
     set: vi.fn((payload: unknown) => {
@@ -40,20 +61,37 @@ vi.mock('@railforge/db', () => {
       return { where };
     }),
   }));
-  // Select for the sequencer-invalidate path (lookup sourceAddress by txId).
+  // Select supports BOTH chains used by the worker:
+  //   - sequencer-invalidate: select().from().where().limit()  → dbSelectResult
+  //   - webhook fan-out:      select().from().innerJoin().where()  → subscribersResult
+  // We expose `where` as a thenable AND as an object with `.limit`, so both
+  // chains resolve with the right data.
   const select = vi.fn(() => ({
     from: vi.fn(() => ({
       where: vi.fn(() => ({
         limit: vi.fn(async () => dbSelectResult.current),
       })),
+      innerJoin: vi.fn(() => ({
+        where: vi.fn(async () => subscribersResult.current),
+      })),
+    })),
+  }));
+  // Insert supports the webhook_deliveries fan-out path: insert().values().returning().
+  const insert = vi.fn((table: { __name: string }) => ({
+    values: vi.fn((v: unknown) => ({
+      returning: vi.fn(async () => {
+        dbInsertCalls.push({ table: table.__name, values: v });
+        return deliveryInsertResult.current;
+      }),
     })),
   }));
   return {
-    db: { update, select },
+    db: { update, select, insert },
     schema: {
       transactions: {
         __name: 'transactions',
         id: 'id',
+        clientId: 'clientId',
         sourceAddress: 'sourceAddress',
       },
       accounts: {
@@ -61,8 +99,26 @@ vi.mock('@railforge/db', () => {
         id: 'id',
         fundingTxId: 'fundingTxId',
       },
+      webhookEndpoints: {
+        __name: 'webhook_endpoints',
+        id: 'id',
+        clientId: 'clientId',
+        events: 'events',
+        isActive: 'isActive',
+      },
+      webhookDeliveries: {
+        __name: 'webhook_deliveries',
+        id: 'id',
+        endpointId: 'endpointId',
+      },
     },
     eq: vi.fn((col: unknown, val: unknown) => ({ col, val })),
+    and: vi.fn((...args: unknown[]) => ({ and: args })),
+    sql: Object.assign(
+      // Tag function form: sql`...` — return a marker the WHERE doesn't care about.
+      (..._args: unknown[]) => ({ __sql: true }),
+      // Properties on `sql` we don't use here.
+    ),
   };
 });
 
@@ -79,6 +135,7 @@ vi.mock('../queues.ts', () => ({
   getSequencer: async () => ({
     invalidate: stubs.sequencerInvalidate,
   }),
+  enqueueWebhookDelivery: enqueueWebhookDeliveryMock,
 }));
 
 const { processTxConfirmJob, TxNotYetValidated } = await import('./txConfirmer.ts');
@@ -100,6 +157,11 @@ describe('processTxConfirmJob', () => {
     dbUpdateCalls.length = 0;
     dbSelectResult.current = [{ sourceAddress: 'rSource00000000000000000000000000' }];
     accountUpdateReturning.current = [];
+    // Sprint 3 fan-out state.
+    subscribersResult.current = [];
+    deliveryInsertResult.current = [];
+    dbInsertCalls.length = 0;
+    enqueueWebhookDeliveryMock.mockClear();
   });
 
   afterEach(() => {
@@ -290,6 +352,113 @@ describe('processTxConfirmJob', () => {
     await processTxConfirmJob(makeJob(BASE_JOB));
 
     expect(dbUpdateCalls.filter((u) => u.table === 'accounts')).toHaveLength(0);
+    expect(dbUpdateCalls.filter((u) => u.table === 'transactions')).toHaveLength(1);
+  });
+
+  // ── Sprint 3 webhook fan-out ─────────────────────────────────────────────
+
+  it('tesSUCCESS with N matching subscribers: inserts N delivery rows and enqueues N jobs', async () => {
+    stubs.clientRequest.mockResolvedValueOnce({
+      result: {
+        validated: true,
+        ledger_index: 115,
+        meta: { TransactionResult: 'tesSUCCESS' },
+      },
+    });
+    // Two subscribers for transaction.validated.
+    subscribersResult.current = [{ endpointId: 'ep-1' }, { endpointId: 'ep-2' }];
+    deliveryInsertResult.current = [
+      { id: 'del-1', endpointId: 'ep-1' },
+      { id: 'del-2', endpointId: 'ep-2' },
+    ];
+
+    await processTxConfirmJob(makeJob(BASE_JOB));
+
+    // Single batched INSERT into webhook_deliveries with both rows.
+    const deliveryInsert = dbInsertCalls.find((c) => c.table === 'webhook_deliveries');
+    expect(deliveryInsert).toBeDefined();
+    const values = deliveryInsert!.values as Array<Record<string, unknown>>;
+    expect(values).toHaveLength(2);
+    expect(values[0]?.eventType).toBe('transaction.validated');
+    expect(values[0]?.endpointId).toBe('ep-1');
+    expect(values[1]?.endpointId).toBe('ep-2');
+    // Payload includes the standard envelope fields.
+    const payload = values[0]?.payload as Record<string, unknown>;
+    expect(payload.transaction_id).toBe('tx-uuid-1');
+    expect(payload.tx_hash).toBe('ABC123');
+    expect(payload.result_code).toBe('tesSUCCESS');
+    expect(payload.status).toBe('validated');
+
+    // Two enqueue calls, one per inserted row.
+    expect(enqueueWebhookDeliveryMock).toHaveBeenCalledTimes(2);
+    expect(enqueueWebhookDeliveryMock).toHaveBeenCalledWith({
+      deliveryId: 'del-1',
+      endpointId: 'ep-1',
+    });
+    expect(enqueueWebhookDeliveryMock).toHaveBeenCalledWith({
+      deliveryId: 'del-2',
+      endpointId: 'ep-2',
+    });
+  });
+
+  it("validated tec error: fans out 'transaction.failed' (not 'transaction.validated')", async () => {
+    stubs.clientRequest.mockResolvedValueOnce({
+      result: {
+        validated: true,
+        ledger_index: 115,
+        meta: { TransactionResult: 'tecUNFUNDED_PAYMENT' },
+      },
+    });
+    subscribersResult.current = [{ endpointId: 'ep-1' }];
+    deliveryInsertResult.current = [{ id: 'del-1', endpointId: 'ep-1' }];
+
+    await processTxConfirmJob(makeJob(BASE_JOB));
+
+    const deliveryInsert = dbInsertCalls.find((c) => c.table === 'webhook_deliveries');
+    expect(deliveryInsert).toBeDefined();
+    const values = deliveryInsert!.values as Array<Record<string, unknown>>;
+    expect(values[0]?.eventType).toBe('transaction.failed');
+    const payload = values[0]?.payload as Record<string, unknown>;
+    expect(payload.result_code).toBe('tecUNFUNDED_PAYMENT');
+    expect(payload.status).toBe('failed');
+  });
+
+  it('validated tx with NO matching subscribers: skips insert and enqueue entirely', async () => {
+    stubs.clientRequest.mockResolvedValueOnce({
+      result: {
+        validated: true,
+        ledger_index: 115,
+        meta: { TransactionResult: 'tesSUCCESS' },
+      },
+    });
+    subscribersResult.current = []; // no subscribers
+
+    await processTxConfirmJob(makeJob(BASE_JOB));
+
+    expect(dbInsertCalls.find((c) => c.table === 'webhook_deliveries')).toBeUndefined();
+    expect(enqueueWebhookDeliveryMock).not.toHaveBeenCalled();
+  });
+
+  it('fan-out failure is non-fatal (tx update still happens, no throw)', async () => {
+    stubs.clientRequest.mockResolvedValueOnce({
+      result: {
+        validated: true,
+        ledger_index: 115,
+        meta: { TransactionResult: 'tesSUCCESS' },
+      },
+    });
+    // Make the insert throw — fan-out should swallow.
+    subscribersResult.current = [{ endpointId: 'ep-1' }];
+    enqueueWebhookDeliveryMock.mockImplementationOnce(async () => {
+      throw new Error('redis down');
+    });
+    deliveryInsertResult.current = [{ id: 'del-1', endpointId: 'ep-1' }];
+
+    // Must NOT throw — the tx is already validated, retrying the whole job
+    // would re-fire successful deliveries.
+    await expect(processTxConfirmJob(makeJob(BASE_JOB))).resolves.toBeUndefined();
+
+    // The tx row update still happened.
     expect(dbUpdateCalls.filter((u) => u.table === 'transactions')).toHaveLength(1);
   });
 });
