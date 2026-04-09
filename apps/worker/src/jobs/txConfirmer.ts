@@ -18,7 +18,7 @@
 // per subscriber, and enqueue them on the webhook-delivery queue. The
 // delivery worker handles retries independently from this job.
 
-import { and, db, eq, schema, sql } from '@railforge/db';
+import { and, db, eq, isNull, schema, sql } from '@railforge/db';
 import { type Job, Worker } from 'bullmq';
 import type { Redis } from 'ioredis';
 import { logger } from '../logger.ts';
@@ -195,6 +195,129 @@ export async function processTxConfirmJob(job: Job<TxConfirmJobData>): Promise<v
   } catch (err) {
     log.error({ err }, 'webhook fan-out failed (non-fatal)');
   }
+
+  // 6. Backfill tokens.mpt_issuance_id from tx metadata.
+  //
+  // When an MPTokenIssuanceCreate validates, the on-ledger MPTokenIssuance
+  // ledger entry gets a fresh `mpt_issuance_id`. The token service writes
+  // the tokens row eagerly with mpt_issuance_id=null, then this block
+  // backfills the column once the validated tx response carries the id.
+  //
+  // Why join via transactions.id rather than re-querying by issuer
+  // address: a token's issuer may have multiple in-flight issuance txs
+  // — joining via the unique tx id is the only safe match.
+  //
+  // Same failure-isolation rule as the webhook fan-out: a backfill error
+  // must not retry the whole confirmation job, because the tx is already
+  // validated and the webhook might already have fired.
+  if (isSuccess) {
+    try {
+      await backfillMptIssuanceId(txId, txResponse.result);
+    } catch (err) {
+      log.error({ err }, 'mpt_issuance_id backfill failed (non-fatal)');
+    }
+  }
+}
+
+/**
+ * Walk a validated tx's meta.AffectedNodes to find the freshly-created
+ * MPTokenIssuance entry and pull its `mpt_issuance_id` (or `MPTokenID`,
+ * the field name varies by rippled version). Returns the id or null.
+ *
+ * Exported as a pure helper so the txConfirmer test can exercise the
+ * parsing logic without spinning up the full DB chain.
+ */
+export function extractMptIssuanceIdFromMeta(
+  // biome-ignore lint/suspicious/noExplicitAny: rippled tx meta is loosely typed
+  result: any,
+): string | null {
+  const meta = result?.meta;
+  if (!meta || typeof meta !== 'object') return null;
+  const nodes = (meta as { AffectedNodes?: unknown[] }).AffectedNodes;
+  if (!Array.isArray(nodes)) return null;
+
+  for (const node of nodes) {
+    // Look for a CreatedNode with LedgerEntryType MPTokenIssuance.
+    const created = (node as { CreatedNode?: Record<string, unknown> }).CreatedNode;
+    if (!created) continue;
+    if (created.LedgerEntryType !== 'MPTokenIssuance') continue;
+
+    // The id may be on the node fields under a couple of names depending
+    // on rippled version: `mpt_issuance_id`, `MPTokenIssuanceID`, or
+    // exposed as the LedgerIndex of the created entry. Try all three.
+    const fields = (created.NewFields ?? {}) as Record<string, unknown>;
+    const candidates = [fields.mpt_issuance_id, fields.MPTokenIssuanceID, created.LedgerIndex];
+    for (const c of candidates) {
+      if (typeof c === 'string' && c.length > 0) {
+        return c;
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * Backfill tokens.mpt_issuance_id by joining via the transactions row.
+ * Single UPDATE: tokens.mpt_issuance_id = <extracted> WHERE
+ * issuer_account = (SELECT id FROM accounts WHERE address = source_address)
+ * AND mpt_issuance_id IS NULL AND token_type = 'mpt'.
+ *
+ * The "IS NULL" guard makes this idempotent — replays of an already-
+ * backfilled validation are no-ops, not double-writes.
+ */
+async function backfillMptIssuanceId(
+  txId: string,
+  // biome-ignore lint/suspicious/noExplicitAny: rippled tx meta is loosely typed
+  result: any,
+): Promise<void> {
+  const id = extractMptIssuanceIdFromMeta(result);
+  if (!id) return; // not an MPT issuance tx, or no id in meta — silent
+
+  // Look up the source address + transaction type from the transactions
+  // row. We need both because we only want to backfill for actual MPT
+  // issuance txs — a Payment that happens to touch an MPT entry should
+  // not steal the id slot.
+  const txRows = await db
+    .select({
+      sourceAddress: schema.transactions.sourceAddress,
+      txType: schema.transactions.txType,
+    })
+    .from(schema.transactions)
+    .where(eq(schema.transactions.id, txId))
+    .limit(1);
+  const txRow = txRows[0];
+  if (!txRow || txRow.txType !== 'MPTokenIssuanceCreate') return;
+
+  // Find the issuer account row by address. We can't trust the JOIN to
+  // do this in one shot because the tokens table stores issuer_account
+  // as the accounts.id (uuid), not the address.
+  const acctRows = await db
+    .select({ id: schema.accounts.id })
+    .from(schema.accounts)
+    .where(eq(schema.accounts.address, txRow.sourceAddress))
+    .limit(1);
+  const acctId = acctRows[0]?.id;
+  if (!acctId) return;
+
+  // Find the most-recent MPT-typed token row for this issuer that has
+  // a NULL mpt_issuance_id. There SHOULD be exactly one in flight per
+  // issuer at a time given the sequencer serialization, but we order
+  // by created_at desc + limit 1 just in case.
+  const tokenRows = await db
+    .select({ id: schema.tokens.id })
+    .from(schema.tokens)
+    .where(
+      and(
+        eq(schema.tokens.issuerAccount, acctId),
+        eq(schema.tokens.tokenType, 'mpt'),
+        isNull(schema.tokens.mptIssuanceId),
+      ),
+    )
+    .limit(1);
+  const tokenId = tokenRows[0]?.id;
+  if (!tokenId) return;
+
+  await db.update(schema.tokens).set({ mptIssuanceId: id }).where(eq(schema.tokens.id, tokenId));
 }
 
 /**
