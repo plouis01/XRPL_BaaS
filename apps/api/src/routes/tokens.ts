@@ -6,17 +6,17 @@
 // PUT    /v1/tokens/:id/freeze   → TODO later this sprint
 // PUT    /v1/tokens/:id/clawback → TODO later this sprint
 
-import { zValidator } from "@hono/zod-validator";
-import { Hono } from "hono";
-import { TokenServiceError, createToken } from "../services/token.service.ts";
-import type { AppEnv } from "../types.ts";
-import { createTokenSchema } from "../validators/schemas.ts";
+import { zValidator } from '@hono/zod-validator';
+import { Hono } from 'hono';
+import { TokenServiceError, createToken } from '../services/token.service.ts';
+import type { AppEnv } from '../types.ts';
+import { createTokenSchema } from '../validators/schemas.ts';
 
 const tokens = new Hono<AppEnv>();
 
-tokens.post("/", zValidator("json", createTokenSchema), async (c) => {
-  const clientId = c.get("clientId");
-  const body = c.req.valid("json");
+tokens.post('/', zValidator('json', createTokenSchema), async (c) => {
+  const clientId = c.get('clientId');
+  const body = c.req.valid('json');
 
   try {
     const token = await createToken({
@@ -50,13 +50,13 @@ tokens.post("/", zValidator("json", createTokenSchema), async (c) => {
     );
   } catch (err) {
     if (err instanceof TokenServiceError) {
-      if (err.code === "issuer_not_found") {
-        return c.json({ error: "Issuer account not found" }, 404);
+      if (err.code === 'issuer_not_found') {
+        return c.json({ error: 'Issuer account not found' }, 404);
       }
-      if (err.code === "trustline_not_supported_yet") {
+      if (err.code === 'trustline_not_supported_yet') {
         return c.json({ error: err.message }, 501);
       }
-      if (err.code === "invalid_input") {
+      if (err.code === 'invalid_input') {
         return c.json({ error: err.message }, 400);
       }
     }
@@ -65,9 +65,9 @@ tokens.post("/", zValidator("json", createTokenSchema), async (c) => {
 });
 
 // TODO Sprint 2 follow-ups
-tokens.get("/:id", (c) => c.json({ error: "not implemented" }, 501));
-tokens.post("/:id/transfer", (c) => c.json({ error: "not implemented" }, 501));
-tokens.put("/:id/freeze", (c) => c.json({ error: "not implemented" }, 501));
-tokens.put("/:id/clawback", (c) => c.json({ error: "not implemented" }, 501));
+tokens.get('/:id', (c) => c.json({ error: 'not implemented' }, 501));
+tokens.post('/:id/transfer', (c) => c.json({ error: 'not implemented' }, 501));
+tokens.put('/:id/freeze', (c) => c.json({ error: 'not implemented' }, 501));
+tokens.put('/:id/clawback', (c) => c.json({ error: 'not implemented' }, 501));
 
 export default tokens;

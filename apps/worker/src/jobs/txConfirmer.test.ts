@@ -6,18 +6,18 @@
 //   3. Tx not found AND before lastLedger → throw for BullMQ retry
 //   4. Tx not found AND past lastLedger → invalidate sequencer, mark failed
 
-import type { Job } from "bullmq";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { TxConfirmJobData } from "../queues.ts";
+import type { Job } from 'bullmq';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { TxConfirmJobData } from '../queues.ts';
 
 // ── Mocks ───────────────────────────────────────────────────────────────────
 
 const dbUpdateCalls: Array<{ set: unknown }> = [];
 const dbSelectResult = {
-  current: [{ sourceAddress: "rSource00000000000000000000000000" }],
+  current: [{ sourceAddress: 'rSource00000000000000000000000000' }],
 };
 
-vi.mock("@railforge/db", () => {
+vi.mock('@railforge/db', () => {
   const update = vi.fn(() => ({
     set: vi.fn((payload: unknown) => ({
       where: vi.fn(() => {
@@ -38,8 +38,8 @@ vi.mock("@railforge/db", () => {
     db: { update, select },
     schema: {
       transactions: {
-        id: "id",
-        sourceAddress: "sourceAddress",
+        id: 'id',
+        sourceAddress: 'sourceAddress',
       },
     },
     eq: vi.fn((col: unknown, val: unknown) => ({ col, val })),
@@ -51,8 +51,8 @@ const stubs = {
   clientRequest: vi.fn(),
 };
 
-vi.mock("../queues.ts", () => ({
-  TX_CONFIRM_QUEUE: "railforge:tx-confirm",
+vi.mock('../queues.ts', () => ({
+  TX_CONFIRM_QUEUE: 'railforge:tx-confirm',
   getXrplPool: async () => ({
     getClient: () => ({ request: stubs.clientRequest }),
   }),
@@ -61,39 +61,36 @@ vi.mock("../queues.ts", () => ({
   }),
 }));
 
-const { processTxConfirmJob, TxNotYetValidated } =
-  await import("./txConfirmer.ts");
+const { processTxConfirmJob, TxNotYetValidated } = await import('./txConfirmer.ts');
 
 // ── Test helpers ────────────────────────────────────────────────────────────
 
 function makeJob(data: TxConfirmJobData): Job<TxConfirmJobData> {
-  return { data, id: "job-1" } as unknown as Job<TxConfirmJobData>;
+  return { data, id: 'job-1' } as unknown as Job<TxConfirmJobData>;
 }
 
 const BASE_JOB: TxConfirmJobData = {
-  txId: "tx-uuid-1",
-  txHash: "ABC123",
+  txId: 'tx-uuid-1',
+  txHash: 'ABC123',
   lastLedger: 120,
 };
 
-describe("processTxConfirmJob", () => {
+describe('processTxConfirmJob', () => {
   beforeEach(() => {
     dbUpdateCalls.length = 0;
-    dbSelectResult.current = [
-      { sourceAddress: "rSource00000000000000000000000000" },
-    ];
+    dbSelectResult.current = [{ sourceAddress: 'rSource00000000000000000000000000' }];
   });
 
   afterEach(() => {
     vi.clearAllMocks();
   });
 
-  it("validated tesSUCCESS: updates row with ledger_index and validated status", async () => {
+  it('validated tesSUCCESS: updates row with ledger_index and validated status', async () => {
     stubs.clientRequest.mockResolvedValueOnce({
       result: {
         validated: true,
         ledger_index: 115,
-        meta: { TransactionResult: "tesSUCCESS" },
+        meta: { TransactionResult: 'tesSUCCESS' },
       },
     });
 
@@ -101,8 +98,8 @@ describe("processTxConfirmJob", () => {
 
     expect(dbUpdateCalls).toHaveLength(1);
     const update = dbUpdateCalls[0]!.set as Record<string, unknown>;
-    expect(update.status).toBe("validated");
-    expect(update.resultCode).toBe("tesSUCCESS");
+    expect(update.status).toBe('validated');
+    expect(update.resultCode).toBe('tesSUCCESS');
     expect(update.ledgerIndex).toBe(115);
     expect(update.confirmedAt).toBeInstanceOf(Date);
     expect(update.errorMessage).toBeUndefined();
@@ -111,57 +108,53 @@ describe("processTxConfirmJob", () => {
     expect(stubs.sequencerInvalidate).not.toHaveBeenCalled();
   });
 
-  it("validated with tec error: updates row with failed status and the result code", async () => {
+  it('validated with tec error: updates row with failed status and the result code', async () => {
     stubs.clientRequest.mockResolvedValueOnce({
       result: {
         validated: true,
         ledger_index: 115,
-        meta: { TransactionResult: "tecUNFUNDED_PAYMENT" },
+        meta: { TransactionResult: 'tecUNFUNDED_PAYMENT' },
       },
     });
 
     await processTxConfirmJob(makeJob(BASE_JOB));
 
     const update = dbUpdateCalls[0]!.set as Record<string, unknown>;
-    expect(update.status).toBe("failed");
-    expect(update.resultCode).toBe("tecUNFUNDED_PAYMENT");
+    expect(update.status).toBe('failed');
+    expect(update.resultCode).toBe('tecUNFUNDED_PAYMENT');
     expect(update.errorMessage).toMatch(/tecUNFUNDED_PAYMENT/);
     expect(update.ledgerIndex).toBe(115);
   });
 
-  it("tx found but not yet validated: throws TxNotYetValidated for BullMQ retry", async () => {
+  it('tx found but not yet validated: throws TxNotYetValidated for BullMQ retry', async () => {
     stubs.clientRequest.mockResolvedValueOnce({
       result: {
         validated: false,
-        meta: { TransactionResult: "tesSUCCESS" },
+        meta: { TransactionResult: 'tesSUCCESS' },
       },
     });
 
-    await expect(processTxConfirmJob(makeJob(BASE_JOB))).rejects.toThrow(
-      TxNotYetValidated,
-    );
+    await expect(processTxConfirmJob(makeJob(BASE_JOB))).rejects.toThrow(TxNotYetValidated);
 
     // No DB update — still propagating.
     expect(dbUpdateCalls).toHaveLength(0);
   });
 
-  it("tx not found AND current ledger still below lastLedger: throws for retry", async () => {
+  it('tx not found AND current ledger still below lastLedger: throws for retry', async () => {
     // First call = tx lookup throws txnNotFound. Second call = ledger_current.
     stubs.clientRequest
-      .mockRejectedValueOnce(new Error("txnNotFound"))
+      .mockRejectedValueOnce(new Error('txnNotFound'))
       .mockResolvedValueOnce({ result: { ledger_current_index: 110 } });
 
-    await expect(processTxConfirmJob(makeJob(BASE_JOB))).rejects.toThrow(
-      TxNotYetValidated,
-    );
+    await expect(processTxConfirmJob(makeJob(BASE_JOB))).rejects.toThrow(TxNotYetValidated);
 
     expect(dbUpdateCalls).toHaveLength(0);
     expect(stubs.sequencerInvalidate).not.toHaveBeenCalled();
   });
 
-  it("tx not found AND current ledger past lastLedger: marks LAST_LEDGER_EXPIRED and invalidates sequencer", async () => {
+  it('tx not found AND current ledger past lastLedger: marks LAST_LEDGER_EXPIRED and invalidates sequencer', async () => {
     stubs.clientRequest
-      .mockRejectedValueOnce(new Error("txnNotFound"))
+      .mockRejectedValueOnce(new Error('txnNotFound'))
       .mockResolvedValueOnce({ result: { ledger_current_index: 125 } }); // > 120
 
     await processTxConfirmJob(makeJob(BASE_JOB));
@@ -169,20 +162,18 @@ describe("processTxConfirmJob", () => {
     // DB row marked failed with LAST_LEDGER_EXPIRED.
     expect(dbUpdateCalls).toHaveLength(1);
     const update = dbUpdateCalls[0]!.set as Record<string, unknown>;
-    expect(update.status).toBe("failed");
-    expect(update.resultCode).toBe("LAST_LEDGER_EXPIRED");
+    expect(update.status).toBe('failed');
+    expect(update.resultCode).toBe('LAST_LEDGER_EXPIRED');
     expect(update.errorMessage).toMatch(/expired/i);
 
     // Sequencer invalidated — the unconsumed Sequence is still on-ledger.
-    expect(stubs.sequencerInvalidate).toHaveBeenCalledWith(
-      "rSource00000000000000000000000000",
-    );
+    expect(stubs.sequencerInvalidate).toHaveBeenCalledWith('rSource00000000000000000000000000');
   });
 
-  it("expired with missing row: does NOT throw when sourceAddress lookup returns empty", async () => {
+  it('expired with missing row: does NOT throw when sourceAddress lookup returns empty', async () => {
     dbSelectResult.current = [];
     stubs.clientRequest
-      .mockRejectedValueOnce(new Error("txnNotFound"))
+      .mockRejectedValueOnce(new Error('txnNotFound'))
       .mockResolvedValueOnce({ result: { ledger_current_index: 125 } });
 
     // Must not throw — the DB update still proceeds without the invalidate.

@@ -26,19 +26,19 @@
 // Run with:
 //   RAILFORGE_TEST_NETWORK=testnet bun run --filter @railforge/worker test:integration
 
-import Redis from "ioredis";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { Wallet, type Client } from "xrpl";
-import { buildXrpPayment } from "@railforge/xrpl-core";
-import { XrplClientPool } from "./client.ts";
-import { TxSequencer } from "./sequencer.ts";
-import { DevSigner } from "./signer.ts";
+import { buildXrpPayment } from '@railforge/xrpl-core';
+import Redis from 'ioredis';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { type Client, Wallet } from 'xrpl';
+import { XrplClientPool } from './client.ts';
+import { TxSequencer } from './sequencer.ts';
+import { DevSigner } from './signer.ts';
 
-const SHOULD_RUN = process.env.RAILFORGE_TEST_NETWORK === "testnet";
+const SHOULD_RUN = process.env.RAILFORGE_TEST_NETWORK === 'testnet';
 
 const describeOrSkip = SHOULD_RUN ? describe : describe.skip;
 
-describeOrSkip("pipeline integration (testnet)", () => {
+describeOrSkip('pipeline integration (testnet)', () => {
   let pool: XrplClientPool;
   let redis: Redis;
   let sequencer: TxSequencer;
@@ -48,10 +48,10 @@ describeOrSkip("pipeline integration (testnet)", () => {
   beforeAll(async () => {
     // 1. Real XRPL pool against testnet.
     pool = new XrplClientPool();
-    await pool.initialize("testnet", 1);
+    await pool.initialize('testnet', 1);
 
     // 2. Real Redis.
-    const redisUrl = process.env.REDIS_URL ?? "redis://localhost:6379";
+    const redisUrl = process.env.REDIS_URL ?? 'redis://localhost:6379';
     redis = new Redis(redisUrl, { maxRetriesPerRequest: null });
 
     // 3. Sequencer on real Redis + real XRPL pool.
@@ -62,13 +62,10 @@ describeOrSkip("pipeline integration (testnet)", () => {
 
     // 5. Fund a fresh wallet from the testnet faucet. The faucet response
     // includes a secret we can reconstruct into a Wallet.
-    const faucetRes = await fetch(
-      "https://faucet.altnet.rippletest.net/accounts",
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-      },
-    );
+    const faucetRes = await fetch('https://faucet.altnet.rippletest.net/accounts', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+    });
     if (!faucetRes.ok) {
       throw new Error(`faucet failed: ${faucetRes.status}`);
     }
@@ -78,7 +75,7 @@ describeOrSkip("pipeline integration (testnet)", () => {
     };
     const seed = faucetBody.account.secret ?? faucetBody.seed;
     if (!seed) {
-      throw new Error("faucet returned no seed");
+      throw new Error('faucet returned no seed');
     }
     fundedWallet = Wallet.fromSeed(seed);
     signer.registerWallet(fundedWallet);
@@ -89,16 +86,16 @@ describeOrSkip("pipeline integration (testnet)", () => {
     for (let i = 0; i < 15; i++) {
       try {
         await client.request({
-          command: "account_info",
+          command: 'account_info',
           account: fundedWallet.classicAddress,
-          ledger_index: "current",
+          ledger_index: 'current',
         });
         return; // funded and visible
       } catch {
         await new Promise((r) => setTimeout(r, 2000));
       }
     }
-    throw new Error("faucet-funded account never appeared on-ledger");
+    throw new Error('faucet-funded account never appeared on-ledger');
   });
 
   afterAll(async () => {
@@ -111,49 +108,43 @@ describeOrSkip("pipeline integration (testnet)", () => {
     await pool?.shutdown().catch(() => {});
   });
 
-  it("XrplClientPool: account_info returns a Sequence for the funded wallet", async () => {
+  it('XrplClientPool: account_info returns a Sequence for the funded wallet', async () => {
     const client = pool.getClient() as Client;
     const info = await client.request({
-      command: "account_info",
+      command: 'account_info',
       account: fundedWallet.classicAddress,
-      ledger_index: "current",
+      ledger_index: 'current',
     });
-    expect(info.result.account_data.Sequence).toBeTypeOf("number");
+    expect(info.result.account_data.Sequence).toBeTypeOf('number');
     expect(info.result.account_data.Sequence).toBeGreaterThan(0);
   });
 
-  it("TxSequencer.getNextSequence matches the ledger sequence on first call", async () => {
+  it('TxSequencer.getNextSequence matches the ledger sequence on first call', async () => {
     const client = pool.getClient() as Client;
     const info = await client.request({
-      command: "account_info",
+      command: 'account_info',
       account: fundedWallet.classicAddress,
-      ledger_index: "current",
+      ledger_index: 'current',
     });
     const ledgerSeq = info.result.account_data.Sequence;
 
     // Flush cache so we hit the ledger-fetch path.
     await sequencer.invalidate(fundedWallet.classicAddress);
 
-    const nextSeq = await sequencer.getNextSequence(
-      fundedWallet.classicAddress,
-    );
+    const nextSeq = await sequencer.getNextSequence(fundedWallet.classicAddress);
     expect(nextSeq).toBe(ledgerSeq);
 
     // Second call should come from the cache.
-    const nextNextSeq = await sequencer.getNextSequence(
-      fundedWallet.classicAddress,
-    );
+    const nextNextSeq = await sequencer.getNextSequence(fundedWallet.classicAddress);
     expect(nextNextSeq).toBe(ledgerSeq + 1);
   });
 
-  it("DevSigner.sign produces a blob rippled accepts (full sign+submit cycle)", async () => {
+  it('DevSigner.sign produces a blob rippled accepts (full sign+submit cycle)', async () => {
     const client = pool.getClient() as Client;
     await sequencer.invalidate(fundedWallet.classicAddress);
-    const sequence = await sequencer.getNextSequence(
-      fundedWallet.classicAddress,
-    );
+    const sequence = await sequencer.getNextSequence(fundedWallet.classicAddress);
 
-    const ledgerResponse = await client.request({ command: "ledger_current" });
+    const ledgerResponse = await client.request({ command: 'ledger_current' });
     const lastLedger = ledgerResponse.result.ledger_current_index + 20;
 
     // Send to a throwaway destination. XRPL rejects self-payments with
@@ -165,13 +156,13 @@ describeOrSkip("pipeline integration (testnet)", () => {
     const tx = buildXrpPayment({
       account: fundedWallet.classicAddress,
       destination: destWallet.classicAddress,
-      amountDrops: "1",
+      amountDrops: '1',
     });
     const fullTx = {
       ...tx,
       Sequence: sequence,
       LastLedgerSequence: lastLedger,
-      Fee: "12",
+      Fee: '12',
     };
 
     const signed = await signer.sign(fundedWallet.classicAddress, fullTx);
@@ -189,7 +180,7 @@ describeOrSkip("pipeline integration (testnet)", () => {
     // Any of the above proves the sign+submit path works.
     // - tem*/tef*/tel* would indicate a malformed/rejected blob → test failure.
     const submitRes = (await client.request({
-      command: "submit",
+      command: 'submit',
       tx_blob: signed.tx_blob,
     })) as { result: { engine_result: string } };
 

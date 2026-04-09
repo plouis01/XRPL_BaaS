@@ -14,7 +14,8 @@
       "coverage",
       "**/migrations/*.sql",
       "**/vitest.config.ts.timestamp-*.mjs",
-      "**/.tsbuildinfo"
+      "**/.tsbuildinfo",
+      "scripts/**"
     ]
   },
   "formatter": {
@@ -42,6 +43,21 @@
       }
     }
   },
+  "overrides": [
+    {
+      "include": ["**/*.test.ts"],
+      "linter": {
+        "rules": {
+          "style": {
+            "noNonNullAssertion": "off"
+          },
+          "suspicious": {
+            "noExplicitAny": "warn"
+          }
+        }
+      }
+    }
+  ],
   "javascript": {
     "formatter": {
       "quoteStyle": "single",

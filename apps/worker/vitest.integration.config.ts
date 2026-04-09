@@ -1,4 +1,4 @@
-import { defineConfig } from "vitest/config";
+import { defineConfig } from 'vitest/config';
 
 // Integration-test config for apps/worker.
 //
@@ -12,10 +12,10 @@ import { defineConfig } from "vitest/config";
 
 export default defineConfig({
   test: {
-    include: ["src/**/*.integration.test.ts"],
-    environment: "node",
+    include: ['src/**/*.integration.test.ts'],
+    environment: 'node',
     globals: false,
-    reporters: ["default"],
+    reporters: ['default'],
     // Integration tests talk to the internet — give them room.
     testTimeout: 60_000,
     hookTimeout: 60_000,

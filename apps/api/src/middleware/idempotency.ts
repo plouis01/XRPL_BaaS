@@ -23,12 +23,12 @@
 //
 // Closes PLAN.md §9.2 item #10.
 
-import type { MiddlewareHandler } from "hono";
-import { getRedis } from "../redis.ts";
-import type { AppEnv } from "../types.ts";
+import type { MiddlewareHandler } from 'hono';
+import { getRedis } from '../redis.ts';
+import type { AppEnv } from '../types.ts';
 
 const IDEMP_TTL_SECONDS = 24 * 60 * 60; // 24h
-const CACHEABLE_METHODS = new Set(["POST", "PUT", "DELETE", "PATCH"]);
+const CACHEABLE_METHODS = new Set(['POST', 'PUT', 'DELETE', 'PATCH']);
 
 interface CachedResponse {
   status: number;
@@ -44,16 +44,16 @@ export const idempotency: MiddlewareHandler<AppEnv> = async (c, next) => {
     return;
   }
 
-  const key = c.req.header("idempotency-key");
+  const key = c.req.header('idempotency-key');
   if (!key) {
-    return c.json({ error: "Missing Idempotency-Key header" }, 400);
+    return c.json({ error: 'Missing Idempotency-Key header' }, 400);
   }
 
   // clientId is set by auth middleware which runs BEFORE this one. If it's
   // missing, something is very wrong upstream — fail closed.
-  const clientId = c.get("clientId");
+  const clientId = c.get('clientId');
   if (!clientId) {
-    return c.json({ error: "Idempotency context missing client id" }, 500);
+    return c.json({ error: 'Idempotency context missing client id' }, 500);
   }
 
   const path = new URL(c.req.url).pathname;
@@ -68,7 +68,7 @@ export const idempotency: MiddlewareHandler<AppEnv> = async (c, next) => {
       // Emit a signal header so clients can tell this was a replay — useful
       // for debugging and not sensitive (the client already knows it sent a
       // duplicate request).
-      c.header("X-Idempotent-Replay", "true");
+      c.header('X-Idempotent-Replay', 'true');
       // biome-ignore lint/suspicious/noExplicitAny: status code is narrowed at runtime
       return c.json(body as any, status as any);
     } catch {
@@ -101,13 +101,7 @@ export const idempotency: MiddlewareHandler<AppEnv> = async (c, next) => {
         // SETNX — only set if no one else has written to this key in the
         // meantime (which would happen on concurrent duplicate requests).
         // If another request beat us to it, we just skip the write.
-        await redis.set(
-          cacheKey,
-          JSON.stringify(payload),
-          "EX",
-          IDEMP_TTL_SECONDS,
-          "NX",
-        );
+        await redis.set(cacheKey, JSON.stringify(payload), 'EX', IDEMP_TTL_SECONDS, 'NX');
       }
     } catch {
       // Non-fatal — the response has already been returned to the client

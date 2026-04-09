@@ -32,15 +32,15 @@
 // the lookup returns null and we 404. This matches the pattern in
 // account.service.getAccount.
 
-import { and, db, eq, isNull, schema } from "@railforge/db";
-import { enqueueTxSubmit } from "@railforge/jobs";
-import { buildMptIssuanceCreate } from "@railforge/xrpl-core";
-import { logger } from "../logger.ts";
+import { and, db, eq, isNull, schema } from '@railforge/db';
+import { enqueueTxSubmit } from '@railforge/jobs';
+import { buildMptIssuanceCreate } from '@railforge/xrpl-core';
+import { logger } from '../logger.ts';
 
 export interface CreateTokenInput {
   clientId: string;
   issuer: string;
-  type: "mpt" | "trustline";
+  type: 'mpt' | 'trustline';
   currencyCode: string;
   transferFee: number;
   clawback: boolean;
@@ -61,21 +61,18 @@ export interface TokenView {
   clawback: boolean;
   freezeEnabled: boolean;
   maxSupply: string | null;
-  status: "queued" | "submitted" | "validated" | "failed";
+  status: 'queued' | 'submitted' | 'validated' | 'failed';
   txId: string;
   createdAt: Date | null;
 }
 
 export class TokenServiceError extends Error {
   constructor(
-    public readonly code:
-      | "issuer_not_found"
-      | "trustline_not_supported_yet"
-      | "invalid_input",
+    public readonly code: 'issuer_not_found' | 'trustline_not_supported_yet' | 'invalid_input',
     message: string,
   ) {
     super(message);
-    this.name = "TokenServiceError";
+    this.name = 'TokenServiceError';
   }
 }
 
@@ -88,8 +85,8 @@ export class TokenServiceError extends Error {
  */
 export async function createToken(input: CreateTokenInput): Promise<TokenView> {
   const log = logger.child({
-    service: "token",
-    op: "create",
+    service: 'token',
+    op: 'create',
     clientId: input.clientId,
     issuer: input.issuer,
   });
@@ -116,25 +113,19 @@ export async function createToken(input: CreateTokenInput): Promise<TokenView> {
 
   const issuer = issuerRows[0];
   if (!issuer) {
-    throw new TokenServiceError(
-      "issuer_not_found",
-      "Issuer account not found for this client",
-    );
+    throw new TokenServiceError('issuer_not_found', 'Issuer account not found for this client');
   }
   if (!issuer.isFunded) {
     // An unfunded issuer can't submit any transaction — surface this
     // clearly rather than letting the submit fail with tecNO_DST or similar.
-    throw new TokenServiceError(
-      "issuer_not_found",
-      "Issuer account is not yet funded",
-    );
+    throw new TokenServiceError('issuer_not_found', 'Issuer account is not yet funded');
   }
 
   // 2. Trustline path deferred. Document clearly.
-  if (input.type === "trustline") {
+  if (input.type === 'trustline') {
     throw new TokenServiceError(
-      "trustline_not_supported_yet",
-      "Trustline issuance is not yet implemented. Use type=mpt.",
+      'trustline_not_supported_yet',
+      'Trustline issuance is not yet implemented. Use type=mpt.',
     );
   }
 
@@ -146,9 +137,7 @@ export async function createToken(input: CreateTokenInput): Promise<TokenView> {
     // Flags — tfMPTCanTransfer so holders can move it; tfMPTCanEscrow.
     // Clawback/freeze are set via separate AccountSet paths in follow-ups.
     flags: 0x00000020 | 0x00000001, // tfMPTCanTransfer + tfMPTCanLock
-    ...(input.maxSupply !== undefined
-      ? { maximumAmount: input.maxSupply }
-      : {}),
+    ...(input.maxSupply !== undefined ? { maximumAmount: input.maxSupply } : {}),
   });
 
   // 4. Insert the transactions row FIRST to get a stable txId.
@@ -156,11 +145,11 @@ export async function createToken(input: CreateTokenInput): Promise<TokenView> {
     .insert(schema.transactions)
     .values({
       clientId: input.clientId,
-      txType: "MPTokenIssuanceCreate",
+      txType: 'MPTokenIssuanceCreate',
       sourceAddress: issuer.address,
-      status: "queued",
+      status: 'queued',
       requestBody: {
-        op: "createToken",
+        op: 'createToken',
         issuer: input.issuer,
         type: input.type,
         currencyCode: input.currencyCode,
@@ -174,7 +163,7 @@ export async function createToken(input: CreateTokenInput): Promise<TokenView> {
 
   const txId = txInserted[0]?.id;
   if (!txId) {
-    throw new Error("transactions insert returned no row");
+    throw new Error('transactions insert returned no row');
   }
 
   // 5. Insert the tokens row now. mpt_issuance_id stays null until the
@@ -197,7 +186,7 @@ export async function createToken(input: CreateTokenInput): Promise<TokenView> {
 
   const tokenId = tokenInserted[0]?.id;
   if (!tokenId) {
-    throw new Error("tokens insert returned no row");
+    throw new Error('tokens insert returned no row');
   }
 
   // 6. Enqueue the submit job. The worker reads the seed from
@@ -208,7 +197,7 @@ export async function createToken(input: CreateTokenInput): Promise<TokenView> {
     txJson: mptTx,
   });
 
-  log.info({ txId, tokenId }, "token create enqueued");
+  log.info({ txId, tokenId }, 'token create enqueued');
 
   return {
     id: tokenId,
@@ -222,7 +211,7 @@ export async function createToken(input: CreateTokenInput): Promise<TokenView> {
     clawback: input.clawback,
     freezeEnabled: input.freezeEnabled,
     maxSupply: input.maxSupply ?? null,
-    status: "queued",
+    status: 'queued',
     txId,
     createdAt: new Date(),
   };

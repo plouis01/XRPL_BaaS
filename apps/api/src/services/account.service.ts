@@ -23,18 +23,18 @@
 // `*.seed` and `*.master_key_ref` in both snake_case and camelCase — see
 // packages/logger/src/index.ts.
 
-import { db, eq, schema, and, isNull } from "@railforge/db";
-import { Wallet } from "xrpl";
-import { logger } from "../logger.ts";
+import { and, db, eq, isNull, schema } from '@railforge/db';
+import { Wallet } from 'xrpl';
+import { logger } from '../logger.ts';
 
 // Testnet faucet endpoint. Mainnet has no faucet — Sprint 3's treasury
 // pattern replaces this.
-const TESTNET_FAUCET_URL = "https://faucet.altnet.rippletest.net/accounts";
+const TESTNET_FAUCET_URL = 'https://faucet.altnet.rippletest.net/accounts';
 
 export interface CreateAccountInput {
   clientId: string;
   label?: string;
-  custodyMode?: "semi" | "non_custodial";
+  custodyMode?: 'semi' | 'non_custodial';
 }
 
 export interface AccountView {
@@ -50,15 +50,11 @@ export interface AccountView {
 
 export class AccountServiceError extends Error {
   constructor(
-    public readonly code:
-      | "faucet_failed"
-      | "faucet_bad_response"
-      | "not_found"
-      | "db_conflict",
+    public readonly code: 'faucet_failed' | 'faucet_bad_response' | 'not_found' | 'db_conflict',
     message: string,
   ) {
     super(message);
-    this.name = "AccountServiceError";
+    this.name = 'AccountServiceError';
   }
 }
 
@@ -68,12 +64,10 @@ export class AccountServiceError extends Error {
  *
  * @throws {AccountServiceError} on faucet failure or DB conflict
  */
-export async function createAccount(
-  input: CreateAccountInput,
-): Promise<AccountView> {
+export async function createAccount(input: CreateAccountInput): Promise<AccountView> {
   const log = logger.child({
-    service: "account",
-    op: "create",
+    service: 'account',
+    op: 'create',
     clientId: input.clientId,
   });
 
@@ -82,31 +76,28 @@ export async function createAccount(
   // on this stack frame briefly, goes into master_key_ref, and disappears.
   const wallet = Wallet.generate();
   if (!wallet.seed) {
-    throw new Error("Wallet.generate() returned no seed — should never happen");
+    throw new Error('Wallet.generate() returned no seed — should never happen');
   }
   const address = wallet.classicAddress;
 
   // 2. Fund via the testnet faucet. The faucet takes a `destination` in
   // its POST body to fund an existing address rather than generating a
   // fresh one, which is what we want since we need the seed.
-  let reserveBalance = "0";
+  let reserveBalance = '0';
   let isFunded = false;
   try {
     const response = await fetch(TESTNET_FAUCET_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ destination: address }),
       // 30s timeout — the faucet is occasionally slow but shouldn't hang.
       signal: AbortSignal.timeout(30_000),
     });
 
     if (!response.ok) {
-      const bodyText = await response.text().catch(() => "");
-      log.error({ status: response.status, body: bodyText }, "faucet non-200");
-      throw new AccountServiceError(
-        "faucet_failed",
-        `Faucet returned ${response.status}`,
-      );
+      const bodyText = await response.text().catch(() => '');
+      log.error({ status: response.status, body: bodyText }, 'faucet non-200');
+      throw new AccountServiceError('faucet_failed', `Faucet returned ${response.status}`);
     }
 
     const body = (await response.json()) as {
@@ -118,24 +109,24 @@ export async function createAccount(
     // that would otherwise leave us with a seed for a different account.
     if (body.account?.address && body.account.address !== address) {
       throw new AccountServiceError(
-        "faucet_bad_response",
-        "Faucet returned an address that does not match the one we requested",
+        'faucet_bad_response',
+        'Faucet returned an address that does not match the one we requested',
       );
     }
 
     isFunded = true;
     // Faucet returns balance in XRP. Store as drops-string for consistency
     // with reserve_balance elsewhere. 1 XRP = 1_000_000 drops.
-    if (typeof body.balance === "number") {
+    if (typeof body.balance === 'number') {
       reserveBalance = String(Math.round(body.balance * 1_000_000));
     }
-    log.info({ address, balance: body.balance }, "faucet funded");
+    log.info({ address, balance: body.balance }, 'faucet funded');
   } catch (err) {
     if (err instanceof AccountServiceError) throw err;
-    log.error({ err }, "faucet request failed");
+    log.error({ err }, 'faucet request failed');
     throw new AccountServiceError(
-      "faucet_failed",
-      err instanceof Error ? err.message : "unknown faucet error",
+      'faucet_failed',
+      err instanceof Error ? err.message : 'unknown faucet error',
     );
   }
 
@@ -152,7 +143,7 @@ export async function createAccount(
         address,
         masterKeyRef: wallet.seed,
         regularKey: null,
-        custodyMode: input.custodyMode ?? "semi",
+        custodyMode: input.custodyMode ?? 'semi',
         label: input.label ?? null,
         isFunded,
         reserveBalance,
@@ -162,18 +153,18 @@ export async function createAccount(
 
     const row = inserted[0];
     if (!row) {
-      throw new AccountServiceError("db_conflict", "insert returned no row");
+      throw new AccountServiceError('db_conflict', 'insert returned no row');
     }
     insertedId = row.id;
   } catch (err) {
     // Postgres unique-violation error code 23505.
     if (
       err &&
-      typeof err === "object" &&
-      "code" in err &&
-      (err as { code: string }).code === "23505"
+      typeof err === 'object' &&
+      'code' in err &&
+      (err as { code: string }).code === '23505'
     ) {
-      throw new AccountServiceError("db_conflict", "Address collision (retry)");
+      throw new AccountServiceError('db_conflict', 'Address collision (retry)');
     }
     throw err;
   }
@@ -183,7 +174,7 @@ export async function createAccount(
     id: insertedId,
     address,
     regularKey: null,
-    custodyMode: input.custodyMode ?? "semi",
+    custodyMode: input.custodyMode ?? 'semi',
     label: input.label ?? null,
     isFunded,
     reserveBalance,
@@ -197,10 +188,7 @@ export async function createAccount(
  * are indistinguishable to the caller, which is intentional (no cross-
  * tenant enumeration).
  */
-export async function getAccount(
-  clientId: string,
-  address: string,
-): Promise<AccountView | null> {
+export async function getAccount(clientId: string, address: string): Promise<AccountView | null> {
   const rows = await db
     .select({
       id: schema.accounts.id,
@@ -232,7 +220,7 @@ export async function getAccount(
     custodyMode: row.custodyMode,
     label: row.label,
     isFunded: row.isFunded ?? false,
-    reserveBalance: row.reserveBalance ?? "0",
+    reserveBalance: row.reserveBalance ?? '0',
     createdAt: row.createdAt,
   };
 }

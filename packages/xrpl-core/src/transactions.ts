@@ -23,7 +23,7 @@ import type {
   SignerEntry,
   SignerListSet,
   TrustSet,
-} from "xrpl";
+} from 'xrpl';
 
 // ── Payment (XRP or issued currency) ────────────────────────────────────────
 
@@ -40,7 +40,7 @@ export interface BuildXrpPaymentInput {
 
 export function buildXrpPayment(input: BuildXrpPaymentInput): Payment {
   const tx: Payment = {
-    TransactionType: "Payment",
+    TransactionType: 'Payment',
     Account: input.account,
     Destination: input.destination,
     Amount: input.amountDrops,
@@ -52,9 +52,7 @@ export function buildXrpPayment(input: BuildXrpPaymentInput): Payment {
     tx.Memos = [
       {
         Memo: {
-          MemoData: Buffer.from(input.memo, "utf8")
-            .toString("hex")
-            .toUpperCase(),
+          MemoData: Buffer.from(input.memo, 'utf8').toString('hex').toUpperCase(),
         },
       },
     ];
@@ -75,11 +73,9 @@ export interface BuildIssuedCurrencyPaymentInput {
  * Issued-currency Payment (trust-line-based). For MPT payments, see
  * buildMptPayment. The issuer is the same as the token's creator.
  */
-export function buildIssuedCurrencyPayment(
-  input: BuildIssuedCurrencyPaymentInput,
-): Payment {
+export function buildIssuedCurrencyPayment(input: BuildIssuedCurrencyPaymentInput): Payment {
   const tx: Payment = {
-    TransactionType: "Payment",
+    TransactionType: 'Payment',
     Account: input.account,
     Destination: input.destination,
     Amount: {
@@ -112,15 +108,14 @@ export interface BuildAccountSetInput {
 
 export function buildAccountSet(input: BuildAccountSetInput): AccountSet {
   const tx: AccountSet = {
-    TransactionType: "AccountSet",
+    TransactionType: 'AccountSet',
     Account: input.account,
   };
   if (input.setFlag !== undefined) tx.SetFlag = input.setFlag;
   if (input.clearFlag !== undefined) tx.ClearFlag = input.clearFlag;
   if (input.domain !== undefined) tx.Domain = input.domain.toUpperCase();
   if (input.transferRate !== undefined) tx.TransferRate = input.transferRate;
-  if (input.walletLocator !== undefined)
-    tx.WalletLocator = input.walletLocator.toUpperCase();
+  if (input.walletLocator !== undefined) tx.WalletLocator = input.walletLocator.toUpperCase();
   return tx;
 }
 
@@ -134,13 +129,9 @@ export interface BuildSignerListSetInput {
   signerEntries: Array<{ address: string; weight: number }>;
 }
 
-export function buildSignerListSet(
-  input: BuildSignerListSetInput,
-): SignerListSet {
+export function buildSignerListSet(input: BuildSignerListSetInput): SignerListSet {
   if (input.signerEntries.length > 32) {
-    throw new Error(
-      `SignerListSet supports at most 32 entries, got ${input.signerEntries.length}`,
-    );
+    throw new Error(`SignerListSet supports at most 32 entries, got ${input.signerEntries.length}`);
   }
   if (input.signerQuorum < 0) {
     throw new Error(`SignerQuorum must be >= 0, got ${input.signerQuorum}`);
@@ -156,7 +147,7 @@ export function buildSignerListSet(
   // SignerQuorum = 0 + empty entries = delete the signer list.
   // Any other combination sets/updates it.
   const tx: SignerListSet = {
-    TransactionType: "SignerListSet",
+    TransactionType: 'SignerListSet',
     Account: input.account,
     SignerQuorum: input.signerQuorum,
     SignerEntries: entries,
@@ -173,11 +164,9 @@ export interface BuildAccountDeleteInput {
   destinationTag?: number;
 }
 
-export function buildAccountDelete(
-  input: BuildAccountDeleteInput,
-): AccountDelete {
+export function buildAccountDelete(input: BuildAccountDeleteInput): AccountDelete {
   const tx: AccountDelete = {
-    TransactionType: "AccountDelete",
+    TransactionType: 'AccountDelete',
     Account: input.account,
     Destination: input.destination,
   };
@@ -203,34 +192,23 @@ export interface BuildMptIssuanceCreateInput {
   mptMetadata?: string;
 }
 
-export function buildMptIssuanceCreate(
-  input: BuildMptIssuanceCreateInput,
-): MPTokenIssuanceCreate {
-  if (
-    input.transferFee !== undefined &&
-    (input.transferFee < 0 || input.transferFee > 50_000)
-  ) {
-    throw new Error(
-      `MPT transferFee must be 0-50000 basis points, got ${input.transferFee}`,
-    );
+export function buildMptIssuanceCreate(input: BuildMptIssuanceCreateInput): MPTokenIssuanceCreate {
+  if (input.transferFee !== undefined && (input.transferFee < 0 || input.transferFee > 50_000)) {
+    throw new Error(`MPT transferFee must be 0-50000 basis points, got ${input.transferFee}`);
   }
-  if (
-    input.assetScale !== undefined &&
-    (input.assetScale < 0 || input.assetScale > 19)
-  ) {
+  if (input.assetScale !== undefined && (input.assetScale < 0 || input.assetScale > 19)) {
     throw new Error(`MPT assetScale must be 0-19, got ${input.assetScale}`);
   }
 
   const tx: MPTokenIssuanceCreate = {
-    TransactionType: "MPTokenIssuanceCreate",
+    TransactionType: 'MPTokenIssuanceCreate',
     Account: input.account,
   };
   if (input.assetScale !== undefined) tx.AssetScale = input.assetScale;
   if (input.transferFee !== undefined) tx.TransferFee = input.transferFee;
   if (input.maximumAmount !== undefined) tx.MaximumAmount = input.maximumAmount;
   if (input.flags !== undefined) tx.Flags = input.flags;
-  if (input.mptMetadata !== undefined)
-    tx.MPTokenMetadata = input.mptMetadata.toUpperCase();
+  if (input.mptMetadata !== undefined) tx.MPTokenMetadata = input.mptMetadata.toUpperCase();
   return tx;
 }
 
@@ -249,7 +227,7 @@ export interface BuildTrustSetInput {
 
 export function buildTrustSet(input: BuildTrustSetInput): TrustSet {
   const tx: TrustSet = {
-    TransactionType: "TrustSet",
+    TransactionType: 'TrustSet',
     Account: input.account,
     LimitAmount: {
       currency: input.currency,

@@ -13,14 +13,14 @@
 // in-flight jobs on production rolling deploys. Add a new queue;
 // never rename an existing one.
 
-import { Queue } from "bullmq";
-import { Redis } from "ioredis";
+import { Queue } from 'bullmq';
+import { Redis } from 'ioredis';
 
 // ── Queue names ─────────────────────────────────────────────────────────────
 
-export const TX_SUBMIT_QUEUE = "railforge:tx-submit";
-export const TX_CONFIRM_QUEUE = "railforge:tx-confirm";
-export const WEBHOOK_DELIVERY_QUEUE = "railforge:webhook-delivery";
+export const TX_SUBMIT_QUEUE = 'railforge:tx-submit';
+export const TX_CONFIRM_QUEUE = 'railforge:tx-confirm';
+export const WEBHOOK_DELIVERY_QUEUE = 'railforge:webhook-delivery';
 
 // ── Job payload shapes ──────────────────────────────────────────────────────
 
@@ -52,7 +52,7 @@ let redisConnection: Redis | null = null;
 
 export function getJobsRedis(): Redis {
   if (redisConnection) return redisConnection;
-  const url = process.env.REDIS_URL ?? "redis://localhost:6379";
+  const url = process.env.REDIS_URL ?? 'redis://localhost:6379';
   redisConnection = new Redis(url, {
     // BullMQ requires this — blocking commands are its core scheduling
     // mechanism and get confused by the default retry behavior.
@@ -72,7 +72,7 @@ export function getTxSubmitQueue(): Queue<TxSubmitJobData> {
     connection: getJobsRedis(),
     defaultJobOptions: {
       attempts: 3,
-      backoff: { type: "exponential", delay: 2000 },
+      backoff: { type: 'exponential', delay: 2000 },
       removeOnComplete: { count: 1000 },
       removeOnFail: { count: 1000 },
     },
@@ -86,7 +86,7 @@ export function getTxConfirmQueue(): Queue<TxConfirmJobData> {
     connection: getJobsRedis(),
     defaultJobOptions: {
       attempts: 20, // polling — many quick retries
-      backoff: { type: "fixed", delay: 4000 },
+      backoff: { type: 'fixed', delay: 4000 },
       removeOnComplete: { count: 1000 },
       removeOnFail: { count: 1000 },
     },
@@ -105,7 +105,7 @@ export function getTxConfirmQueue(): Queue<TxConfirmJobData> {
  */
 export async function enqueueTxSubmit(data: TxSubmitJobData): Promise<void> {
   const queue = getTxSubmitQueue();
-  await queue.add("submit", data);
+  await queue.add('submit', data);
 }
 
 // ── Teardown ────────────────────────────────────────────────────────────────
