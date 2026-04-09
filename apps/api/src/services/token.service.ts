@@ -34,7 +34,15 @@
 
 import { and, db, eq, isNull, schema } from '@railforge/db';
 import { enqueueTxSubmit } from '@railforge/jobs';
-import { buildMptIssuanceCreate } from '@railforge/xrpl-core';
+import {
+  buildIssuedCurrencyClawback,
+  buildIssuedCurrencyPayment,
+  buildMptClawback,
+  buildMptIssuanceCreate,
+  buildMptIssuanceSet,
+  buildMptPayment,
+  buildTrustSet,
+} from '@railforge/xrpl-core';
 import { logger } from '../logger.ts';
 
 export interface CreateTokenInput {
@@ -47,6 +55,12 @@ export interface CreateTokenInput {
   freezeEnabled: boolean;
   maxSupply?: string;
   metadata?: Record<string, unknown>;
+  /**
+   * Trust line opt-in only: the holding limit. Required when type='trustline',
+   * ignored otherwise. The validator should reject the request if missing,
+   * but the service double-checks since validators can drift.
+   */
+  trustlineLimit?: string;
 }
 
 export interface TokenView {
@@ -68,7 +82,12 @@ export interface TokenView {
 
 export class TokenServiceError extends Error {
   constructor(
-    public readonly code: 'issuer_not_found' | 'trustline_not_supported_yet' | 'invalid_input',
+    public readonly code:
+      | 'issuer_not_found'
+      | 'token_not_found'
+      | 'token_not_ready'
+      | 'trustline_missing_limit'
+      | 'invalid_input',
     message: string,
   ) {
     super(message);
@@ -121,31 +140,51 @@ export async function createToken(input: CreateTokenInput): Promise<TokenView> {
     throw new TokenServiceError('issuer_not_found', 'Issuer account is not yet funded');
   }
 
-  // 2. Trustline path deferred. Document clearly.
+  // 2. Build the XRPL tx via the canonical builder. Sequence / Fee /
+  // LastLedgerSequence are filled by the txSubmitter worker.
+  //
+  // Trust line opt-in (Sprint 3): when type='trustline' the service
+  // builds a TrustSet from the issuer to itself with the requested limit.
+  // The currencyCode is the on-ledger currency identifier. The requested
+  // `trustlineLimit` is required and the validator enforces it; we
+  // double-check here in case the validator schema drifts.
+  let txJson: ReturnType<typeof buildMptIssuanceCreate> | ReturnType<typeof buildTrustSet>;
+  let txType: 'MPTokenIssuanceCreate' | 'TrustSet';
   if (input.type === 'trustline') {
-    throw new TokenServiceError(
-      'trustline_not_supported_yet',
-      'Trustline issuance is not yet implemented. Use type=mpt.',
-    );
+    if (!input.trustlineLimit) {
+      throw new TokenServiceError(
+        'trustline_missing_limit',
+        'Trust line tokens require a trustline_limit',
+      );
+    }
+    txJson = buildTrustSet({
+      account: issuer.address,
+      currency: input.currencyCode,
+      // For an issuer self-issuing a trust-line token, the issuer field
+      // on the limit IS the issuer's own address. Holders later create
+      // their own TrustSet pointing at this issuer.
+      issuer: issuer.address,
+      limit: input.trustlineLimit,
+    });
+    txType = 'TrustSet';
+  } else {
+    txJson = buildMptIssuanceCreate({
+      account: issuer.address,
+      transferFee: input.transferFee,
+      // Flags — tfMPTCanTransfer so holders can move it; tfMPTCanLock so
+      // freeze (MPTokenIssuanceSet with tfMPTLock) is later possible.
+      flags: 0x00000020 | 0x00000001, // tfMPTCanTransfer + tfMPTCanLock
+      ...(input.maxSupply !== undefined ? { maximumAmount: input.maxSupply } : {}),
+    });
+    txType = 'MPTokenIssuanceCreate';
   }
 
-  // 3. Build the XRPL tx via the canonical builder. Sequence / Fee /
-  // LastLedgerSequence are filled by the txSubmitter worker.
-  const mptTx = buildMptIssuanceCreate({
-    account: issuer.address,
-    transferFee: input.transferFee,
-    // Flags — tfMPTCanTransfer so holders can move it; tfMPTCanEscrow.
-    // Clawback/freeze are set via separate AccountSet paths in follow-ups.
-    flags: 0x00000020 | 0x00000001, // tfMPTCanTransfer + tfMPTCanLock
-    ...(input.maxSupply !== undefined ? { maximumAmount: input.maxSupply } : {}),
-  });
-
-  // 4. Insert the transactions row FIRST to get a stable txId.
+  // 3. Insert the transactions row FIRST to get a stable txId.
   const txInserted = await db
     .insert(schema.transactions)
     .values({
       clientId: input.clientId,
-      txType: 'MPTokenIssuanceCreate',
+      txType,
       sourceAddress: issuer.address,
       status: 'queued',
       requestBody: {
@@ -157,6 +196,7 @@ export async function createToken(input: CreateTokenInput): Promise<TokenView> {
         clawback: input.clawback,
         freezeEnabled: input.freezeEnabled,
         maxSupply: input.maxSupply ?? null,
+        trustlineLimit: input.trustlineLimit ?? null,
       },
     })
     .returning({ id: schema.transactions.id });
@@ -194,10 +234,10 @@ export async function createToken(input: CreateTokenInput): Promise<TokenView> {
   await enqueueTxSubmit({
     txId,
     sourceAddress: issuer.address,
-    txJson: mptTx,
+    txJson,
   });
 
-  log.info({ txId, tokenId }, 'token create enqueued');
+  log.info({ txId, tokenId, txType }, 'token create enqueued');
 
   return {
     id: tokenId,
@@ -215,4 +255,277 @@ export async function createToken(input: CreateTokenInput): Promise<TokenView> {
     txId,
     createdAt: new Date(),
   };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Token operations: transfer / freeze / clawback
+//
+// Shared shape: each op (a) looks up the token + its issuer scoped to the
+// client, (b) verifies the token is ready (mpt_issuance_id present for MPT
+// ops), (c) builds the right tx via xrpl-core, (d) inserts a transactions
+// row, (e) enqueues. The pattern mirrors createToken().
+//
+// CROSS-TENANT CHECK: every lookup is scoped by clientId. The two-step
+// SELECT (token by id+client → issuer account) prevents leaking the
+// existence of tokens that belong to other tenants.
+// ─────────────────────────────────────────────────────────────────────────────
+
+interface ResolvedToken {
+  tokenId: string;
+  tokenType: string;
+  currencyCode: string;
+  mptIssuanceId: string | null;
+  issuerAccountId: string;
+  issuerAddress: string;
+}
+
+/**
+ * Look up a token + its issuer account, scoped to the client. Returns
+ * `null` if the token doesn't exist OR belongs to another tenant — both
+ * cases are indistinguishable from the caller's perspective.
+ *
+ * Single JOIN over (tokens, accounts) — Postgres uses the tokens.id PK
+ * and the FK index on issuer_account, so this is two index lookups.
+ */
+async function resolveToken(clientId: string, tokenId: string): Promise<ResolvedToken | null> {
+  const rows = await db
+    .select({
+      tokenId: schema.tokens.id,
+      tokenType: schema.tokens.tokenType,
+      currencyCode: schema.tokens.currencyCode,
+      mptIssuanceId: schema.tokens.mptIssuanceId,
+      issuerAccountId: schema.tokens.issuerAccount,
+      issuerAddress: schema.accounts.address,
+    })
+    .from(schema.tokens)
+    .innerJoin(schema.accounts, eq(schema.tokens.issuerAccount, schema.accounts.id))
+    .where(and(eq(schema.tokens.id, tokenId), eq(schema.tokens.clientId, clientId)))
+    .limit(1);
+  return rows[0] ?? null;
+}
+
+export interface TransferTokenInput {
+  clientId: string;
+  tokenId: string;
+  destination: string;
+  amount: string;
+  destinationTag?: number;
+}
+
+/**
+ * Transfer token value from the issuer to a destination. For MPT tokens
+ * the issuance must already be validated on-ledger (mpt_issuance_id is
+ * non-null) — we can't reference an MPT that doesn't exist yet.
+ *
+ * For trust-line tokens, "transfer" is just a Payment with the issued-
+ * currency Amount shape. The issuer can always transfer; it's the holder
+ * receiving side that needs the trust line set up.
+ *
+ * @throws {TokenServiceError} on token_not_found or token_not_ready
+ */
+export async function transferToken(input: TransferTokenInput): Promise<{ txId: string }> {
+  const log = logger.child({
+    service: 'token',
+    op: 'transfer',
+    clientId: input.clientId,
+    tokenId: input.tokenId,
+  });
+
+  const token = await resolveToken(input.clientId, input.tokenId);
+  if (!token) {
+    throw new TokenServiceError('token_not_found', 'Token not found');
+  }
+
+  let txJson: ReturnType<typeof buildMptPayment> | ReturnType<typeof buildIssuedCurrencyPayment>;
+  if (token.tokenType === 'mpt') {
+    if (!token.mptIssuanceId) {
+      // MPT issuance hasn't been validated yet — we don't have an
+      // mpt_issuance_id to reference. The client must wait for the
+      // create tx to land. The txConfirmer backfills this column on
+      // tesSUCCESS (PLAN.md §6 Sprint 3 carry-over).
+      throw new TokenServiceError(
+        'token_not_ready',
+        'Token issuance has not yet validated on-ledger',
+      );
+    }
+    txJson = buildMptPayment({
+      account: token.issuerAddress,
+      destination: input.destination,
+      mptIssuanceId: token.mptIssuanceId,
+      value: input.amount,
+      ...(input.destinationTag !== undefined ? { destinationTag: input.destinationTag } : {}),
+    });
+  } else {
+    // Trust-line token — issued-currency Payment shape.
+    txJson = buildIssuedCurrencyPayment({
+      account: token.issuerAddress,
+      destination: input.destination,
+      currency: token.currencyCode,
+      issuer: token.issuerAddress,
+      value: input.amount,
+      ...(input.destinationTag !== undefined ? { destinationTag: input.destinationTag } : {}),
+    });
+  }
+
+  const txInserted = await db
+    .insert(schema.transactions)
+    .values({
+      clientId: input.clientId,
+      txType: 'Payment',
+      sourceAddress: token.issuerAddress,
+      status: 'queued',
+      requestBody: {
+        op: 'transferToken',
+        tokenId: input.tokenId,
+        destination: input.destination,
+        amount: input.amount,
+      },
+    })
+    .returning({ id: schema.transactions.id });
+  const txId = txInserted[0]?.id;
+  if (!txId) throw new Error('transactions insert returned no row');
+
+  await enqueueTxSubmit({ txId, sourceAddress: token.issuerAddress, txJson });
+  log.info({ txId }, 'token transfer enqueued');
+  return { txId };
+}
+
+export interface FreezeTokenInput {
+  clientId: string;
+  tokenId: string;
+  /** Holder to freeze. Omit to freeze the entire issuance. */
+  holder?: string;
+  /** True to unfreeze (tfMPTUnlock), false (default) to freeze (tfMPTLock). */
+  unfreeze?: boolean;
+}
+
+/**
+ * Freeze (or unfreeze) an MPT token. Trust-line freeze is a different
+ * code path (TrustSet with tfSetFreeze flag) and is deferred to a later
+ * sprint — for now we reject trust-line tokens with invalid_input.
+ */
+export async function freezeToken(input: FreezeTokenInput): Promise<{ txId: string }> {
+  const log = logger.child({
+    service: 'token',
+    op: 'freeze',
+    clientId: input.clientId,
+    tokenId: input.tokenId,
+  });
+
+  const token = await resolveToken(input.clientId, input.tokenId);
+  if (!token) {
+    throw new TokenServiceError('token_not_found', 'Token not found');
+  }
+  if (token.tokenType !== 'mpt') {
+    throw new TokenServiceError(
+      'invalid_input',
+      'freeze is only supported for MPT tokens in this version',
+    );
+  }
+  if (!token.mptIssuanceId) {
+    throw new TokenServiceError(
+      'token_not_ready',
+      'Token issuance has not yet validated on-ledger',
+    );
+  }
+
+  const txJson = buildMptIssuanceSet({
+    account: token.issuerAddress,
+    mptIssuanceId: token.mptIssuanceId,
+    action: input.unfreeze ? 'unlock' : 'lock',
+    ...(input.holder !== undefined ? { holder: input.holder } : {}),
+  });
+
+  const txInserted = await db
+    .insert(schema.transactions)
+    .values({
+      clientId: input.clientId,
+      txType: 'MPTokenIssuanceSet',
+      sourceAddress: token.issuerAddress,
+      status: 'queued',
+      requestBody: {
+        op: 'freezeToken',
+        tokenId: input.tokenId,
+        holder: input.holder ?? null,
+        unfreeze: input.unfreeze ?? false,
+      },
+    })
+    .returning({ id: schema.transactions.id });
+  const txId = txInserted[0]?.id;
+  if (!txId) throw new Error('transactions insert returned no row');
+
+  await enqueueTxSubmit({ txId, sourceAddress: token.issuerAddress, txJson });
+  log.info({ txId, action: input.unfreeze ? 'unlock' : 'lock' }, 'token freeze enqueued');
+  return { txId };
+}
+
+export interface ClawbackTokenInput {
+  clientId: string;
+  tokenId: string;
+  holder: string;
+  amount: string;
+}
+
+/**
+ * Claw back tokens from a holder. Per the XRPL Clawback spec the
+ * issuer is implicit — it's the Account submitting the tx. We use
+ * the right amount shape (MPT vs issued currency) based on tokenType.
+ */
+export async function clawbackToken(input: ClawbackTokenInput): Promise<{ txId: string }> {
+  const log = logger.child({
+    service: 'token',
+    op: 'clawback',
+    clientId: input.clientId,
+    tokenId: input.tokenId,
+  });
+
+  const token = await resolveToken(input.clientId, input.tokenId);
+  if (!token) {
+    throw new TokenServiceError('token_not_found', 'Token not found');
+  }
+
+  let txJson: ReturnType<typeof buildMptClawback> | ReturnType<typeof buildIssuedCurrencyClawback>;
+  if (token.tokenType === 'mpt') {
+    if (!token.mptIssuanceId) {
+      throw new TokenServiceError(
+        'token_not_ready',
+        'Token issuance has not yet validated on-ledger',
+      );
+    }
+    txJson = buildMptClawback({
+      account: token.issuerAddress,
+      mptIssuanceId: token.mptIssuanceId,
+      holder: input.holder,
+      value: input.amount,
+    });
+  } else {
+    txJson = buildIssuedCurrencyClawback({
+      account: token.issuerAddress,
+      currency: token.currencyCode,
+      holder: input.holder,
+      value: input.amount,
+    });
+  }
+
+  const txInserted = await db
+    .insert(schema.transactions)
+    .values({
+      clientId: input.clientId,
+      txType: 'Clawback',
+      sourceAddress: token.issuerAddress,
+      status: 'queued',
+      requestBody: {
+        op: 'clawbackToken',
+        tokenId: input.tokenId,
+        holder: input.holder,
+        amount: input.amount,
+      },
+    })
+    .returning({ id: schema.transactions.id });
+  const txId = txInserted[0]?.id;
+  if (!txId) throw new Error('transactions insert returned no row');
+
+  await enqueueTxSubmit({ txId, sourceAddress: token.issuerAddress, txJson });
+  log.info({ txId }, 'token clawback enqueued');
+  return { txId };
 }

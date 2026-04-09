@@ -1,18 +1,48 @@
 // Token service routes.
 //
 // POST   /v1/tokens              → create (MPT default, trustline opt-in)
-// GET    /v1/tokens/:id          → TODO later this sprint
-// POST   /v1/tokens/:id/transfer → TODO later this sprint
-// PUT    /v1/tokens/:id/freeze   → TODO later this sprint
-// PUT    /v1/tokens/:id/clawback → TODO later this sprint
+// POST   /v1/tokens/:id/transfer → transfer issuer-held token to a holder
+// PUT    /v1/tokens/:id/freeze   → lock/unlock the issuance (MPT only for now)
+// PUT    /v1/tokens/:id/clawback → reclaim tokens from a holder
 
 import { zValidator } from '@hono/zod-validator';
 import { Hono } from 'hono';
-import { TokenServiceError, createToken } from '../services/token.service.ts';
+import {
+  TokenServiceError,
+  clawbackToken,
+  createToken,
+  freezeToken,
+  transferToken,
+} from '../services/token.service.ts';
 import type { AppEnv } from '../types.ts';
-import { createTokenSchema } from '../validators/schemas.ts';
+import {
+  clawbackTokenSchema,
+  createTokenSchema,
+  freezeTokenSchema,
+  transferTokenSchema,
+} from '../validators/schemas.ts';
 
 const tokens = new Hono<AppEnv>();
+
+// Map a TokenServiceError to its HTTP response. Centralized so the four
+// handlers below stay readable and we don't drift on which code returns
+// which status.
+function tokenErrorResponse(err: TokenServiceError) {
+  switch (err.code) {
+    case 'issuer_not_found':
+      return { error: 'Issuer account not found', status: 404 } as const;
+    case 'token_not_found':
+      return { error: 'Token not found', status: 404 } as const;
+    case 'token_not_ready':
+      // 409: the token row exists but the on-ledger issuance hasn't
+      // validated yet, so MPT operations can't reference it.
+      return { error: err.message, status: 409 } as const;
+    case 'trustline_missing_limit':
+      return { error: err.message, status: 400 } as const;
+    case 'invalid_input':
+      return { error: err.message, status: 400 } as const;
+  }
+}
 
 tokens.post('/', zValidator('json', createTokenSchema), async (c) => {
   const clientId = c.get('clientId');
@@ -29,6 +59,7 @@ tokens.post('/', zValidator('json', createTokenSchema), async (c) => {
       freezeEnabled: body.freeze_enabled,
       maxSupply: body.max_supply,
       metadata: body.metadata,
+      trustlineLimit: body.trustline_limit,
     });
 
     return c.json(
@@ -50,24 +81,75 @@ tokens.post('/', zValidator('json', createTokenSchema), async (c) => {
     );
   } catch (err) {
     if (err instanceof TokenServiceError) {
-      if (err.code === 'issuer_not_found') {
-        return c.json({ error: 'Issuer account not found' }, 404);
-      }
-      if (err.code === 'trustline_not_supported_yet') {
-        return c.json({ error: err.message }, 501);
-      }
-      if (err.code === 'invalid_input') {
-        return c.json({ error: err.message }, 400);
-      }
+      const r = tokenErrorResponse(err);
+      return c.json({ error: r.error }, r.status);
     }
     throw err;
   }
 });
 
-// TODO Sprint 2 follow-ups
-tokens.get('/:id', (c) => c.json({ error: 'not implemented' }, 501));
-tokens.post('/:id/transfer', (c) => c.json({ error: 'not implemented' }, 501));
-tokens.put('/:id/freeze', (c) => c.json({ error: 'not implemented' }, 501));
-tokens.put('/:id/clawback', (c) => c.json({ error: 'not implemented' }, 501));
+tokens.post('/:id/transfer', zValidator('json', transferTokenSchema), async (c) => {
+  const clientId = c.get('clientId');
+  const tokenId = c.req.param('id');
+  const body = c.req.valid('json');
+  try {
+    const result = await transferToken({
+      clientId,
+      tokenId,
+      destination: body.destination,
+      amount: body.amount,
+      destinationTag: body.destination_tag,
+    });
+    return c.json({ tx_id: result.txId, status: 'queued' }, 202);
+  } catch (err) {
+    if (err instanceof TokenServiceError) {
+      const r = tokenErrorResponse(err);
+      return c.json({ error: r.error }, r.status);
+    }
+    throw err;
+  }
+});
+
+tokens.put('/:id/freeze', zValidator('json', freezeTokenSchema), async (c) => {
+  const clientId = c.get('clientId');
+  const tokenId = c.req.param('id');
+  const body = c.req.valid('json');
+  try {
+    const result = await freezeToken({
+      clientId,
+      tokenId,
+      holder: body.holder,
+      unfreeze: body.unfreeze,
+    });
+    return c.json({ tx_id: result.txId, status: 'queued' }, 202);
+  } catch (err) {
+    if (err instanceof TokenServiceError) {
+      const r = tokenErrorResponse(err);
+      return c.json({ error: r.error }, r.status);
+    }
+    throw err;
+  }
+});
+
+tokens.put('/:id/clawback', zValidator('json', clawbackTokenSchema), async (c) => {
+  const clientId = c.get('clientId');
+  const tokenId = c.req.param('id');
+  const body = c.req.valid('json');
+  try {
+    const result = await clawbackToken({
+      clientId,
+      tokenId,
+      holder: body.holder,
+      amount: body.amount,
+    });
+    return c.json({ tx_id: result.txId, status: 'queued' }, 202);
+  } catch (err) {
+    if (err instanceof TokenServiceError) {
+      const r = tokenErrorResponse(err);
+      return c.json({ error: r.error }, r.status);
+    }
+    throw err;
+  }
+});
 
 export default tokens;

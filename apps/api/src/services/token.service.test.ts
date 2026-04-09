@@ -206,17 +206,40 @@ describe('createToken', () => {
     expect(enqueueCalls).toHaveLength(0);
   });
 
-  it('trustline type → trustline_not_supported_yet (explicit, no silent fallback)', async () => {
+  it('trustline without trustlineLimit → trustline_missing_limit', async () => {
+    // Sprint 3: trust line wiring is live; the validator enforces
+    // trustline_limit, but the service double-checks. If the limit is
+    // missing we surface a clean error code rather than building an
+    // invalid TrustSet.
     const err = await createToken(baseInput({ type: 'trustline' })).catch((e) => e);
     expect(err).toBeInstanceOf(TokenServiceError);
-    expect((err as InstanceType<typeof TokenServiceError>).code).toBe(
-      'trustline_not_supported_yet',
-    );
+    expect((err as InstanceType<typeof TokenServiceError>).code).toBe('trustline_missing_limit');
 
     // No side effects.
     expect(dbState.txInsertCalls).toHaveLength(0);
     expect(dbState.tokenInsertCalls).toHaveLength(0);
     expect(enqueueCalls).toHaveLength(0);
+  });
+
+  it('trustline with trustlineLimit → builds TrustSet, inserts tx + token, enqueues', async () => {
+    await createToken(baseInput({ type: 'trustline', trustlineLimit: '1000000' }));
+
+    // Tx row inserted with txType=TrustSet (not MPTokenIssuanceCreate).
+    expect(dbState.txInsertCalls).toHaveLength(1);
+    const txRow = dbState.txInsertCalls[0]!.values as Record<string, unknown>;
+    expect(txRow.txType).toBe('TrustSet');
+
+    // Token row inserted as trustline.
+    expect(dbState.tokenInsertCalls).toHaveLength(1);
+    const tokenRow = dbState.tokenInsertCalls[0]!.values as Record<string, unknown>;
+    expect(tokenRow.tokenType).toBe('trustline');
+
+    // Job enqueued with a TrustSet payload.
+    expect(enqueueCalls).toHaveLength(1);
+    const enqData = enqueueCalls[0]!.data as Record<string, unknown>;
+    const tx = enqData.txJson as Record<string, unknown>;
+    expect(tx.TransactionType).toBe('TrustSet');
+    expect(tx.LimitAmount).toMatchObject({ value: '1000000' });
   });
 
   it('passes transferFee and maxSupply through to the builder and DB', async () => {
