@@ -45,10 +45,16 @@ jobs:
       DATABASE_URL: postgresql://railforge:dev-password@localhost:5432/railforge
       REDIS_URL: redis://localhost:6379
       XRPL_NETWORK: testnet
+      XRPL_WS_URL: wss://s.altnet.rippletest.net:51233
       # Server-side pepper for HMAC API key hashing. Auth middleware fails-fast
       # if this is unset (see apps/api/src/middleware/auth.ts). Using a fixed
       # CI value is fine — no real keys live in this environment.
       API_KEY_SALT: ci-test-salt-not-for-production
+      # Per-commit integration test gate. Sprint 3 promotes integration tests
+      # from "manually run with this var set" to "always run in CI". The
+      # tradeoff is testnet faucet credit burn for same-day mock/prod drift
+      # detection — see PLAN.md Sprint 3 handoff notes.
+      RAILFORGE_TEST_NETWORK: testnet
 
     steps:
       - name: Checkout
@@ -73,3 +79,11 @@ jobs:
 
       - name: Unit tests
         run: bun run test
+
+      - name: Integration tests (testnet + real DB)
+        # These hit XRPL testnet via the faucet. They are slow and flaky
+        # against the public testnet on a bad day — but the cost of mock/
+        # prod divergence going undetected for a sprint is higher than the
+        # cost of the occasional retry. Same Postgres + Redis services
+        # already provisioned above; no extra setup.
+        run: bun run test:integration
