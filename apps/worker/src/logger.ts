@@ -1,5 +1,5 @@
 // Re-export of the shared logger configured for the worker process. See
-// apps/api/src/logger.ts for the rationale and CLAUDE.md rules.
+// apps/api/src/logger.ts for the rationale and rules.
 
 import { createLogger } from "@railforge/logger";
 

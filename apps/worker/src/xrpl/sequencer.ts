@@ -19,7 +19,7 @@
 //   workers then sign with the same Sequence and the second tx is rejected
 //   on-ledger (or worse, both succeed and one is replayed).
 //
-// CRITICAL (CLAUDE.md): never bypass this. Direct client.submit() calls in
+// CRITICAL: never bypass this. Direct client.submit() calls in
 // route handlers will collide on the same Sequence under load.
 
 import type { Redis } from "ioredis";

@@ -1,5 +1,5 @@
-// Verifies that the shared Pino logger redacts sensitive fields. CLAUDE.md
-// says "never log signed blobs, seeds, or HSM responses" — these tests are
+// Verifies that the shared Pino logger redacts sensitive fields.
+// "never log signed blobs, seeds, or HSM responses" — these tests are
 // the enforcement point. Writing the REDACT_PATHS list is not enough; we
 // also have to prove pino actually drops the values.
 //

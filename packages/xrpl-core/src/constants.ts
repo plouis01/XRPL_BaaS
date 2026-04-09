@@ -19,7 +19,7 @@ export const BASE_RESERVE_XRP = 10;
 export const OWNER_RESERVE_XRP = 2;
 
 // LastLedgerSequence offset — how far ahead to set tx expiration.
-// 20 ledgers ≈ 80 seconds. See CLAUDE.md implementation rules.
+// 20 ledgers ≈ 80 seconds. See implementation rules.
 export const LAST_LEDGER_OFFSET = 20;
 
 // Default tx fee in drops (12 = 0.000012 XRP).

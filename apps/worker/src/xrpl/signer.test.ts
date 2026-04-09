@@ -2,10 +2,10 @@
 // XRPL master keys from leaking. The contract MUST NOT change without
 // re-running these tests.
 
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { Wallet } from "xrpl";
 import type { Transaction } from "xrpl";
-import { DevSigner, encodeUnsigned } from "./signer.ts";
+import { DevSigner, SignerError, encodeUnsigned } from "./signer.ts";
 
 // xrpl.js validates Account/Destination as real base58-checksum r-addresses
 // before signing, so test fixtures use a real generated wallet for the
@@ -59,31 +59,57 @@ describe("DevSigner", () => {
     expect(json).not.toMatch(/secret/i);
   });
 
-  it("sign() rejects unknown addresses with a vague error (no enumeration oracle)", async () => {
+  it("sign() rejects unknown addresses with SignerError(no_key) and a vague message", async () => {
     const signer = new DevSigner();
     const known = Wallet.generate();
     signer.registerWallet(known);
 
     const unknownAddress = "rUnknownAddress00000000000000000000";
 
-    // Both should throw with the SAME error message shape so an attacker can't
-    // distinguish "address exists but tx invalid" from "address doesn't exist".
-    let unknownErr: Error | null = null;
+    let unknownErr: unknown = null;
     try {
       await signer.sign(unknownAddress, makePaymentTx(unknownAddress));
     } catch (e) {
-      unknownErr = e as Error;
+      unknownErr = e;
     }
 
-    expect(unknownErr).toBeInstanceOf(Error);
-    // Error message must NOT include hints like "wallet not found" or
-    // "address X is not managed by this signer". The current implementation
-    // says "No signing key available for <address>" — that mentions the
-    // address but doesn't reveal whether it exists in the map. Both unknown
-    // and existing-but-failing cases throw, so the format is consistent.
-    expect(unknownErr?.message).toMatch(/No signing key available/);
-    expect(unknownErr?.message).not.toMatch(/wallet/i);
-    expect(unknownErr?.message).not.toMatch(/found/i);
+    // Strong contract: it's a SignerError, the category is 'no_key', and
+    // the message does not leak whether the address exists in the wallet map.
+    expect(unknownErr).toBeInstanceOf(SignerError);
+    expect((unknownErr as SignerError).category).toBe("no_key");
+    expect((unknownErr as Error).message).toMatch(/No signing key available/);
+    expect((unknownErr as Error).message).not.toMatch(/wallet/i);
+    expect((unknownErr as Error).message).not.toMatch(/found/i);
+  });
+
+  it("sign() wraps xrpl.js ValidationError as SignerError(invalid_tx) — original tx PII is dropped", async () => {
+    const signer = new DevSigner();
+    const wallet = Wallet.generate();
+    signer.registerWallet(wallet);
+
+    // Construct a tx that xrpl.js will reject during validation by including
+    // a forbidden TxnSignature field. xrpl.js's ValidationError message would
+    // normally include "TxnSignature" — we verify it's been replaced with our
+    // generic SignerError message instead.
+    const malformed = {
+      ...makePaymentTx(wallet.classicAddress),
+      TxnSignature: "DEADBEEF_LEAKED_SIG_FIELD",
+    } as Transaction;
+
+    let err: unknown = null;
+    try {
+      await signer.sign(wallet.classicAddress, malformed);
+    } catch (e) {
+      err = e;
+    }
+
+    expect(err).toBeInstanceOf(SignerError);
+    expect((err as SignerError).category).toBe("invalid_tx");
+    // The original ValidationError message (which includes "TxnSignature")
+    // must NOT bleed through. Generic message only.
+    expect((err as Error).message).toBe("Transaction validation failed");
+    expect((err as Error).message).not.toContain("TxnSignature");
+    expect((err as Error).message).not.toContain("DEADBEEF_LEAKED_SIG_FIELD");
   });
 
   it("sign() returns ONLY tx_blob and hash, no extra fields", async () => {
@@ -138,6 +164,32 @@ describe("DevSigner", () => {
   });
 });
 
+describe("DevSigner production guard", () => {
+  let originalEnv: string | undefined;
+
+  beforeEach(() => {
+    originalEnv = process.env.NODE_ENV;
+  });
+  afterEach(() => {
+    process.env.NODE_ENV = originalEnv;
+  });
+
+  it("refuses to construct in production (forces a deliberate HsmSigner choice)", () => {
+    process.env.NODE_ENV = "production";
+    expect(() => new DevSigner()).toThrow(/refuses to start in production/);
+  });
+
+  it("constructs normally in development", () => {
+    process.env.NODE_ENV = "development";
+    expect(() => new DevSigner()).not.toThrow();
+  });
+
+  it("constructs normally in test (vitest sets NODE_ENV=test)", () => {
+    process.env.NODE_ENV = "test";
+    expect(() => new DevSigner()).not.toThrow();
+  });
+});
+
 describe("encodeUnsigned", () => {
   it("produces a hex string from a transaction", () => {
     const wallet = Wallet.generate();
@@ -145,5 +197,25 @@ describe("encodeUnsigned", () => {
     const blob = encodeUnsigned(tx);
     expect(blob).toBeTypeOf("string");
     expect(blob).toMatch(/^[0-9A-F]+$/);
+  });
+
+  it("strips TxnSignature, Signers, and SigningPubKey before encoding (so fee estimation is clean)", () => {
+    const wallet = Wallet.generate();
+    const cleanTx = makePaymentTx(wallet.classicAddress);
+
+    // Tx with stale signature material — encodeUnsigned must drop it.
+    const dirtyTx = {
+      ...cleanTx,
+      TxnSignature: "30440220AAAA",
+      SigningPubKey: "ED1234567890",
+    } as Transaction;
+
+    const cleanBlob = encodeUnsigned(cleanTx);
+    const cleanedDirtyBlob = encodeUnsigned(dirtyTx);
+
+    // Without stripping, the dirty blob would include the signature bytes
+    // and be longer than the clean blob. With stripping, both encode to the
+    // same canonical unsigned form.
+    expect(cleanedDirtyBlob).toBe(cleanBlob);
   });
 });

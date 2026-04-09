@@ -2,7 +2,7 @@
 // REDACT_PATHS list — extending it here automatically protects api, worker,
 // and indexer.
 //
-// CLAUDE.md rule: never log signed blobs, seeds, or HSM responses.
+// rule: never log signed blobs, seeds, or HSM responses.
 //
 // CRITICAL: the redact list must cover BOTH snake_case (our internal payload
 // shapes) AND camelCase (xrpl.js Wallet exposes `seed`, `privateKey`,

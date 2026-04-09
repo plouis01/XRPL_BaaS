@@ -1,7 +1,7 @@
 // Drizzle schema definitions. Mirror PLAN.md §3 SQL — but DRIZZLE is the
 // source of truth, the SQL in PLAN.md is reference.
 //
-// CRITICAL (CLAUDE.md): never edit migration files under src/migrations/ that
+// CRITICAL: never edit migration files under src/migrations/ that
 // are tracked in git. Generate a new one with `bun run db:generate`. The
 // migration-immutable hook will block edits to applied migrations.
 
@@ -119,7 +119,7 @@ export const tokens = pgTable("tokens", {
   issuerAccount: uuid("issuer_account")
     .notNull()
     .references(() => accounts.id),
-  // 'mpt' (default) or 'trustline'. CLAUDE.md design rule: MPT by default.
+  // 'mpt' (default) or 'trustline'. Design rule: MPT by default.
   tokenType: text("token_type").notNull().default("mpt"),
   currencyCode: text("currency_code").notNull(),
   mptIssuanceId: text("mpt_issuance_id"),
@@ -133,7 +133,7 @@ export const tokens = pgTable("tokens", {
 });
 
 // ── Credentials (XLS-70) ─────────────────────────────────────────────────────
-// CLAUDE.md design rule: RailForge is NEVER the credential issuer — only a
+// design rule: RailForge is NEVER the credential issuer — only a
 // marketplace broker. issuer_address comes from credential_issuers.
 
 export const credentials = pgTable(
