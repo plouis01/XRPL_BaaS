@@ -44,7 +44,10 @@ export const apiKeys = pgTable("api_keys", {
   label: text("label"),
   environment: text("environment").notNull().default("testnet"),
   rateLimit: integer("rate_limit").notNull().default(100),
-  isActive: boolean("is_active").default(true),
+  // notNull so the SQL filter `eq(isActive, true)` always evaluates to a
+  // boolean — never NULL, which would silently exclude rows from auth lookups
+  // and produce hard-to-debug auth failures.
+  isActive: boolean("is_active").notNull().default(true),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
   revokedAt: timestamp("revoked_at", { withTimezone: true }),
 });

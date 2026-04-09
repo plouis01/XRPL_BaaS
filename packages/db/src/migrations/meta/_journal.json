@@ -15,6 +15,13 @@
       "when": 1775723318360,
       "tag": "0001_loving_nighthawk",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1775724347545,
+      "tag": "0002_stormy_matthew_murdock",
+      "breakpoints": true
     }
   ]
 }
