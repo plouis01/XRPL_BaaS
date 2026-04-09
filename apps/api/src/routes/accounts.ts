@@ -16,9 +16,21 @@
 
 import { zValidator } from '@hono/zod-validator';
 import { Hono } from 'hono';
-import { AccountServiceError, createAccount, getAccount } from '../services/account.service.ts';
+import {
+  AccountServiceError,
+  configureSigners,
+  createAccount,
+  deleteAccount,
+  getAccount,
+  rotateRegularKey,
+} from '../services/account.service.ts';
 import type { AppEnv } from '../types.ts';
-import { createAccountSchema } from '../validators/schemas.ts';
+import {
+  configureSignersSchema,
+  createAccountSchema,
+  deleteAccountSchema,
+  rotateRegularKeySchema,
+} from '../validators/schemas.ts';
 
 const accounts = new Hono<AppEnv>();
 
@@ -91,9 +103,97 @@ accounts.get('/:address', async (c) => {
   });
 });
 
-// TODO Sprint 2: multi-sign, rotate-key, delete
-accounts.put('/:address/signers', (c) => c.json({ error: 'not implemented' }, 501));
-accounts.delete('/:address', (c) => c.json({ error: 'not implemented' }, 501));
-accounts.post('/:address/rotate-key', (c) => c.json({ error: 'not implemented' }, 501));
+// Map an AccountServiceError to its HTTP response. Centralized so the
+// handlers below stay readable.
+function accountErrorResponse(err: AccountServiceError) {
+  switch (err.code) {
+    case 'not_found':
+      return { error: 'Account not found', status: 404 } as const;
+    case 'account_not_funded':
+      // 409: the account row exists but the on-ledger funding payment
+      // hasn't validated yet, so subsequent ops can't reference it.
+      return { error: err.message, status: 409 } as const;
+    case 'invalid_input':
+      return { error: err.message, status: 400 } as const;
+    case 'treasury_not_configured':
+      return {
+        error: 'Account creation is currently unavailable',
+        status: 503,
+      } as const;
+    case 'enqueue_failed':
+      return {
+        error: 'Failed to enqueue — please retry',
+        status: 503,
+      } as const;
+    case 'db_conflict':
+      return {
+        error: 'Address collision — please retry',
+        status: 409,
+      } as const;
+  }
+}
+
+accounts.put('/:address/signers', zValidator('json', configureSignersSchema), async (c) => {
+  const clientId = c.get('clientId');
+  const address = c.req.param('address');
+  const body = c.req.valid('json');
+  try {
+    const result = await configureSigners({
+      clientId,
+      address,
+      quorum: body.quorum,
+      signers: body.signers,
+    });
+    return c.json({ tx_id: result.txId, status: 'queued' }, 202);
+  } catch (err) {
+    if (err instanceof AccountServiceError) {
+      const r = accountErrorResponse(err);
+      return c.json({ error: r.error }, r.status);
+    }
+    throw err;
+  }
+});
+
+accounts.post('/:address/rotate-key', zValidator('json', rotateRegularKeySchema), async (c) => {
+  const clientId = c.get('clientId');
+  const address = c.req.param('address');
+  const body = c.req.valid('json');
+  try {
+    const result = await rotateRegularKey({
+      clientId,
+      address,
+      // body.regular_key may be undefined (omitted) — treat as null (clear).
+      regularKey: body.regular_key ?? null,
+    });
+    return c.json({ tx_id: result.txId, status: 'queued' }, 202);
+  } catch (err) {
+    if (err instanceof AccountServiceError) {
+      const r = accountErrorResponse(err);
+      return c.json({ error: r.error }, r.status);
+    }
+    throw err;
+  }
+});
+
+accounts.delete('/:address', zValidator('json', deleteAccountSchema), async (c) => {
+  const clientId = c.get('clientId');
+  const address = c.req.param('address');
+  const body = c.req.valid('json');
+  try {
+    const result = await deleteAccount({
+      clientId,
+      address,
+      destination: body.destination,
+      destinationTag: body.destination_tag,
+    });
+    return c.json({ tx_id: result.txId, status: 'queued' }, 202);
+  } catch (err) {
+    if (err instanceof AccountServiceError) {
+      const r = accountErrorResponse(err);
+      return c.json({ error: r.error }, r.status);
+    }
+    throw err;
+  }
+});
 
 export default accounts;

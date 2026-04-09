@@ -32,7 +32,12 @@
 
 import { and, db, eq, isNull, schema } from '@railforge/db';
 import { enqueueTxSubmit } from '@railforge/jobs';
-import { buildXrpPayment } from '@railforge/xrpl-core';
+import {
+  buildAccountDelete,
+  buildSetRegularKey,
+  buildSignerListSet,
+  buildXrpPayment,
+} from '@railforge/xrpl-core';
 import { Wallet } from 'xrpl';
 import { logger } from '../logger.ts';
 
@@ -66,6 +71,8 @@ export class AccountServiceError extends Error {
       | 'treasury_not_configured'
       | 'enqueue_failed'
       | 'not_found'
+      | 'account_not_funded'
+      | 'invalid_input'
       | 'db_conflict',
     message: string,
   ) {
@@ -285,4 +292,258 @@ export async function getAccount(clientId: string, address: string): Promise<Acc
     fundingTxId: row.fundingTxId,
     createdAt: row.createdAt,
   };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Account operations: signers / rotate-key / delete
+//
+// Each op resolves the account scoped to the client (cross-tenant defense),
+// builds the right tx via xrpl-core, inserts a transactions row, and
+// enqueues. The pattern mirrors token.service operations.
+//
+// CROSS-TENANT CHECK: every lookup goes through `resolveOwnedAccount`,
+// which scopes by clientId AND filters out deleted_at rows. The two
+// "missing" states (no row + wrong tenant) are indistinguishable.
+// ─────────────────────────────────────────────────────────────────────────────
+
+interface ResolvedAccount {
+  id: string;
+  address: string;
+  isFunded: boolean | null;
+}
+
+async function resolveOwnedAccount(
+  clientId: string,
+  address: string,
+): Promise<ResolvedAccount | null> {
+  const rows = await db
+    .select({
+      id: schema.accounts.id,
+      address: schema.accounts.address,
+      isFunded: schema.accounts.isFunded,
+    })
+    .from(schema.accounts)
+    .where(
+      and(
+        eq(schema.accounts.clientId, clientId),
+        eq(schema.accounts.address, address),
+        isNull(schema.accounts.deletedAt),
+      ),
+    )
+    .limit(1);
+  return rows[0] ?? null;
+}
+
+export interface ConfigureSignersInput {
+  clientId: string;
+  address: string;
+  /** Quorum is the sum of weights required to authorize a tx. 0 = delete the list. */
+  quorum: number;
+  signers: Array<{ address: string; weight: number }>;
+}
+
+/**
+ * Install or update a signer list on an account. Pass quorum=0 + empty
+ * signers to delete the list entirely (matches buildSignerListSet).
+ *
+ * @throws {AccountServiceError} on not_found, account_not_funded, or invalid_input
+ */
+export async function configureSigners(input: ConfigureSignersInput): Promise<{ txId: string }> {
+  const log = logger.child({
+    service: 'account',
+    op: 'configureSigners',
+    clientId: input.clientId,
+    address: input.address,
+  });
+
+  const account = await resolveOwnedAccount(input.clientId, input.address);
+  if (!account) {
+    throw new AccountServiceError('not_found', 'Account not found');
+  }
+  if (!account.isFunded) {
+    throw new AccountServiceError(
+      'account_not_funded',
+      'Account is not yet funded — wait for the funding payment to validate',
+    );
+  }
+
+  // buildSignerListSet validates quorum + entry count internally and
+  // throws plain Error on bad inputs. Wrap so the caller sees a clean
+  // service-level error code.
+  let txJson: ReturnType<typeof buildSignerListSet>;
+  try {
+    txJson = buildSignerListSet({
+      account: account.address,
+      signerQuorum: input.quorum,
+      signerEntries: input.signers,
+    });
+  } catch (err) {
+    throw new AccountServiceError(
+      'invalid_input',
+      err instanceof Error ? err.message : 'invalid signer list',
+    );
+  }
+
+  const txInserted = await db
+    .insert(schema.transactions)
+    .values({
+      clientId: input.clientId,
+      txType: 'SignerListSet',
+      sourceAddress: account.address,
+      status: 'queued',
+      requestBody: {
+        op: 'configureSigners',
+        address: input.address,
+        quorum: input.quorum,
+        signerCount: input.signers.length,
+      },
+    })
+    .returning({ id: schema.transactions.id });
+  const txId = txInserted[0]?.id;
+  if (!txId) throw new Error('transactions insert returned no row');
+
+  await enqueueTxSubmit({
+    txId,
+    sourceAddress: account.address,
+    txJson,
+  });
+  log.info({ txId, quorum: input.quorum, signerCount: input.signers.length }, 'signers enqueued');
+  return { txId };
+}
+
+export interface RotateRegularKeyInput {
+  clientId: string;
+  address: string;
+  /** New regular key address, or null to clear the existing one. */
+  regularKey: string | null;
+}
+
+/**
+ * Rotate the regular key on an account. Pass `regularKey: null` to remove
+ * the existing key (the SetRegularKey tx form without a RegularKey field).
+ *
+ * Note: this only enqueues the on-ledger update. The accounts.regular_key
+ * column is NOT updated here — the txConfirmer will sync it on tesSUCCESS
+ * (Sprint 4 follow-up; for now the column may lag the on-ledger truth).
+ */
+export async function rotateRegularKey(input: RotateRegularKeyInput): Promise<{ txId: string }> {
+  const log = logger.child({
+    service: 'account',
+    op: 'rotateRegularKey',
+    clientId: input.clientId,
+    address: input.address,
+  });
+
+  const account = await resolveOwnedAccount(input.clientId, input.address);
+  if (!account) {
+    throw new AccountServiceError('not_found', 'Account not found');
+  }
+  if (!account.isFunded) {
+    throw new AccountServiceError(
+      'account_not_funded',
+      'Account is not yet funded — wait for the funding payment to validate',
+    );
+  }
+
+  const txJson = buildSetRegularKey({
+    account: account.address,
+    regularKey: input.regularKey,
+  });
+
+  const txInserted = await db
+    .insert(schema.transactions)
+    .values({
+      clientId: input.clientId,
+      txType: 'SetRegularKey',
+      sourceAddress: account.address,
+      status: 'queued',
+      requestBody: {
+        op: 'rotateRegularKey',
+        address: input.address,
+        // Don't log the new key publicly here — it's not secret, but
+        // the request body is fine for it.
+        regularKey: input.regularKey,
+      },
+    })
+    .returning({ id: schema.transactions.id });
+  const txId = txInserted[0]?.id;
+  if (!txId) throw new Error('transactions insert returned no row');
+
+  await enqueueTxSubmit({
+    txId,
+    sourceAddress: account.address,
+    txJson,
+  });
+  log.info({ txId, clearKey: input.regularKey === null }, 'rotate-key enqueued');
+  return { txId };
+}
+
+export interface DeleteAccountInput {
+  clientId: string;
+  address: string;
+  /** Where to send the reclaimed XRP reserve. Must be a funded account. */
+  destination: string;
+  destinationTag?: number;
+}
+
+/**
+ * Delete an account, sending the reclaimed reserve to `destination`.
+ *
+ * The accounts.deleted_at column is NOT set here — same reason as
+ * rotateRegularKey: the txConfirmer should soft-delete the row only on
+ * tesSUCCESS, not optimistically. AccountDelete on XRPL has many failure
+ * modes (recent activity within 256 ledgers, signer list, etc.) so we
+ * never want a row marked deleted before the on-ledger op confirms.
+ *
+ * @throws {AccountServiceError} on not_found or account_not_funded
+ */
+export async function deleteAccount(input: DeleteAccountInput): Promise<{ txId: string }> {
+  const log = logger.child({
+    service: 'account',
+    op: 'deleteAccount',
+    clientId: input.clientId,
+    address: input.address,
+  });
+
+  const account = await resolveOwnedAccount(input.clientId, input.address);
+  if (!account) {
+    throw new AccountServiceError('not_found', 'Account not found');
+  }
+  if (!account.isFunded) {
+    throw new AccountServiceError(
+      'account_not_funded',
+      'Account is not yet funded — nothing to delete',
+    );
+  }
+
+  const txJson = buildAccountDelete({
+    account: account.address,
+    destination: input.destination,
+    ...(input.destinationTag !== undefined ? { destinationTag: input.destinationTag } : {}),
+  });
+
+  const txInserted = await db
+    .insert(schema.transactions)
+    .values({
+      clientId: input.clientId,
+      txType: 'AccountDelete',
+      sourceAddress: account.address,
+      status: 'queued',
+      requestBody: {
+        op: 'deleteAccount',
+        address: input.address,
+        destination: input.destination,
+      },
+    })
+    .returning({ id: schema.transactions.id });
+  const txId = txInserted[0]?.id;
+  if (!txId) throw new Error('transactions insert returned no row');
+
+  await enqueueTxSubmit({
+    txId,
+    sourceAddress: account.address,
+    txJson,
+  });
+  log.info({ txId, destination: input.destination }, 'account delete enqueued');
+  return { txId };
 }
