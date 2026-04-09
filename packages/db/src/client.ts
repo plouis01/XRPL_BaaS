@@ -7,9 +7,9 @@
 // first access via the proxy below. The first time anything reads from `db`,
 // it pulls DATABASE_URL from the env and connects.
 
-import { drizzle } from "drizzle-orm/postgres-js";
-import postgres, { type Sql } from "postgres";
-import * as schema from "./schema.ts";
+import { drizzle } from 'drizzle-orm/postgres-js';
+import postgres, { type Sql } from 'postgres';
+import * as schema from './schema.ts';
 
 type DrizzleDb = ReturnType<typeof drizzle<typeof schema>>;
 
@@ -20,7 +20,7 @@ function initialize(): DrizzleDb {
   const url = process.env.DATABASE_URL;
   if (!url) {
     throw new Error(
-      "DATABASE_URL is required to use @railforge/db. Set it in .env or process.env before the first DB call.",
+      'DATABASE_URL is required to use @railforge/db. Set it in .env or process.env before the first DB call.',
     );
   }
   postgresClient = postgres(url, { max: 10 });
@@ -37,7 +37,7 @@ export const db = new Proxy({} as DrizzleDb, {
   get(_target, prop, receiver) {
     const real = drizzleClient ?? initialize();
     const value = Reflect.get(real, prop, receiver);
-    return typeof value === "function" ? value.bind(real) : value;
+    return typeof value === 'function' ? value.bind(real) : value;
   },
 });
 

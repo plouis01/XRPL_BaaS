@@ -2,13 +2,13 @@
 // real Redis. The XRPL pool is replaced with a stub that returns a fixed
 // Sequence from a fake account_info response.
 
-import type { Redis } from "ioredis";
-import RedisMock from "ioredis-mock";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { XrplClientPool } from "./client.ts";
-import { SequenceLockTimeout, TxSequencer } from "./sequencer.ts";
+import type { Redis } from 'ioredis';
+import RedisMock from 'ioredis-mock';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { XrplClientPool } from './client.ts';
+import { SequenceLockTimeout, TxSequencer } from './sequencer.ts';
 
-const ADDRESS = "rTestAccount000000000000000000000000";
+const ADDRESS = 'rTestAccount000000000000000000000000';
 
 function makeStubPool(initialSequence: number): {
   pool: XrplClientPool;
@@ -23,7 +23,7 @@ function makeStubPool(initialSequence: number): {
   return { pool, requestSpy };
 }
 
-describe("TxSequencer", () => {
+describe('TxSequencer', () => {
   // ioredis-mock satisfies the ioredis Redis interface at runtime; the cast
   // to Redis here is the only place test machinery touches production types.
   let redis: InstanceType<typeof RedisMock>;
@@ -47,16 +47,16 @@ describe("TxSequencer", () => {
     vi.clearAllMocks();
   });
 
-  it("returns the ledger Sequence on first call and increments cache", async () => {
+  it('returns the ledger Sequence on first call and increments cache', async () => {
     const first = await sequencer.getNextSequence(ADDRESS);
     expect(first).toBe(42);
     expect(requestSpy).toHaveBeenCalledTimes(1);
 
     const cached = await redis.get(`railforge:seq:${ADDRESS}`);
-    expect(cached).toBe("43");
+    expect(cached).toBe('43');
   });
 
-  it("uses the cached value on subsequent calls without re-querying rippled", async () => {
+  it('uses the cached value on subsequent calls without re-querying rippled', async () => {
     const first = await sequencer.getNextSequence(ADDRESS);
     const second = await sequencer.getNextSequence(ADDRESS);
     const third = await sequencer.getNextSequence(ADDRESS);
@@ -68,7 +68,7 @@ describe("TxSequencer", () => {
     expect(requestSpy).toHaveBeenCalledTimes(1);
   });
 
-  it("invalidate() clears the cache so the next call re-fetches", async () => {
+  it('invalidate() clears the cache so the next call re-fetches', async () => {
     await sequencer.getNextSequence(ADDRESS);
     expect(requestSpy).toHaveBeenCalledTimes(1);
 
@@ -82,7 +82,7 @@ describe("TxSequencer", () => {
     expect(requestSpy).toHaveBeenCalledTimes(2);
   });
 
-  it("serializes concurrent calls and returns distinct sequences", async () => {
+  it('serializes concurrent calls and returns distinct sequences', async () => {
     const results = await Promise.all([
       sequencer.getNextSequence(ADDRESS),
       sequencer.getNextSequence(ADDRESS),
@@ -96,24 +96,20 @@ describe("TxSequencer", () => {
     expect(sorted).toEqual([42, 43, 44, 45]);
   });
 
-  it("throws SequenceLockTimeout if the lock cannot be acquired", async () => {
+  it('throws SequenceLockTimeout if the lock cannot be acquired', async () => {
     // Hold the lock manually so the sequencer can never grab it.
-    await redis.set(`railforge:seq:lock:${ADDRESS}`, "stuck", "EX", 60);
+    await redis.set(`railforge:seq:lock:${ADDRESS}`, 'stuck', 'EX', 60);
 
-    await expect(sequencer.getNextSequence(ADDRESS)).rejects.toThrow(
-      SequenceLockTimeout,
-    );
+    await expect(sequencer.getNextSequence(ADDRESS)).rejects.toThrow(SequenceLockTimeout);
   });
 
-  it("throws if account_info returns no Sequence", async () => {
+  it('throws if account_info returns no Sequence', async () => {
     requestSpy.mockResolvedValueOnce({ result: { account_data: {} } });
 
-    await expect(sequencer.getNextSequence(ADDRESS)).rejects.toThrow(
-      /no Sequence/,
-    );
+    await expect(sequencer.getNextSequence(ADDRESS)).rejects.toThrow(/no Sequence/);
   });
 
-  it("aborts and preserves the foreign lock when our token is no longer the owner (fenced cache write)", async () => {
+  it('aborts and preserves the foreign lock when our token is no longer the owner (fenced cache write)', async () => {
     // CRITICAL safety property of the Lua FENCED_CACHE_WRITE_SCRIPT.
     //
     // Scenario: worker A acquires the lock and starts fetching a sequence
@@ -132,7 +128,7 @@ describe("TxSequencer", () => {
     // Without the fence, worker A would clobber the cache with stale state
     // and two workers would sign with the same Sequence on-ledger.
     const lockKey = `railforge:seq:lock:${ADDRESS}`;
-    const otherWorkerToken = "other-worker-stole-this";
+    const otherWorkerToken = 'other-worker-stole-this';
 
     // Slow down account_info so worker A is "still in computeAndAdvance" when
     // we overwrite the lock from underneath it.
@@ -140,8 +136,7 @@ describe("TxSequencer", () => {
     requestSpy.mockImplementationOnce(
       () =>
         new Promise((resolve) => {
-          resolveSlowRequest = () =>
-            resolve({ result: { account_data: { Sequence: 100 } } });
+          resolveSlowRequest = () => resolve({ result: { account_data: { Sequence: 100 } } });
         }),
     );
 
@@ -178,7 +173,7 @@ describe("TxSequencer", () => {
     expect(cached).toBeNull();
   });
 
-  it("releaseLock DOES delete the lock when the token matches (happy path)", async () => {
+  it('releaseLock DOES delete the lock when the token matches (happy path)', async () => {
     // Sanity check the other branch of the Lua script: when the token DOES
     // match, the lock is freed so the next caller can proceed.
     const lockKey = `railforge:seq:lock:${ADDRESS}`;

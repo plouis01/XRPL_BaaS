@@ -4,7 +4,7 @@
 // credentials issued by account X"). See PLAN.md §5.3.
 // TODO Sprint 3.
 
-import { logger } from "./logger.ts";
-import "./subscriber.ts";
+import { logger } from './logger.ts';
+import './subscriber.ts';
 
-logger.info("railforge-indexer started");
+logger.info('railforge-indexer started');

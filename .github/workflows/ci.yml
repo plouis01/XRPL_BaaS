@@ -45,6 +45,10 @@ jobs:
       DATABASE_URL: postgresql://railforge:dev-password@localhost:5432/railforge
       REDIS_URL: redis://localhost:6379
       XRPL_NETWORK: testnet
+      # Server-side pepper for HMAC API key hashing. Auth middleware fails-fast
+      # if this is unset (see apps/api/src/middleware/auth.ts). Using a fixed
+      # CI value is fine — no real keys live in this environment.
+      API_KEY_SALT: ci-test-salt-not-for-production
 
     steps:
       - name: Checkout

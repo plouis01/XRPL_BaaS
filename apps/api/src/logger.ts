@@ -5,6 +5,6 @@
 // rule: never log signed blobs, seeds, or HSM responses. To extend
 // the redact list, edit packages/logger/src/index.ts (NOT this file).
 
-import { createLogger } from "@railforge/logger";
+import { createLogger } from '@railforge/logger';
 
-export const logger = createLogger({ name: "railforge-api" });
+export const logger = createLogger({ name: 'railforge-api' });

@@ -14,8 +14,8 @@
 // AWS CloudHSM (or YubiHSM). Same contract, real key isolation.
 // TODO Sprint 1+: HsmSigner backend.
 
-import { Wallet, encode } from "xrpl";
-import type { Transaction } from "xrpl";
+import { Wallet, encode } from 'xrpl';
+import type { Transaction } from 'xrpl';
 
 export interface SignedTransaction {
   tx_blob: string;
@@ -29,11 +29,11 @@ export interface SignedTransaction {
  */
 export class SignerError extends Error {
   constructor(
-    public readonly category: "no_key" | "invalid_tx" | "sign_failed",
+    public readonly category: 'no_key' | 'invalid_tx' | 'sign_failed',
     message: string,
   ) {
     super(message);
-    this.name = "SignerError";
+    this.name = 'SignerError';
   }
 }
 
@@ -71,10 +71,10 @@ export class DevSigner implements Signer {
   private wallets = new Map<string, Wallet>();
 
   constructor() {
-    if (process.env.NODE_ENV === "production") {
+    if (process.env.NODE_ENV === 'production') {
       throw new Error(
-        "DevSigner refuses to start in production. Use HsmSigner instead. " +
-          "See ARCHITECTURE.md §5.1 (Key vault).",
+        'DevSigner refuses to start in production. Use HsmSigner instead. ' +
+          'See ARCHITECTURE.md §5.1 (Key vault).',
       );
     }
   }
@@ -108,10 +108,7 @@ export class DevSigner implements Signer {
     const wallet = this.wallets.get(address);
     if (!wallet) {
       // Intentionally vague — never reveal which addresses we hold keys for.
-      throw new SignerError(
-        "no_key",
-        `No signing key available for ${address}`,
-      );
+      throw new SignerError('no_key', `No signing key available for ${address}`);
     }
 
     // xrpl.js Wallet.sign returns { tx_blob, hash } and never exposes the
@@ -122,18 +119,17 @@ export class DevSigner implements Signer {
     // include transaction properties (Destination, Amount). If a worker logs
     // the caught error, financial PII would leak. We re-throw a SignerError
     // with only the failure category — the original message is dropped.
-    let result: ReturnType<Wallet["sign"]>;
+    let result: ReturnType<Wallet['sign']>;
     try {
-      result = wallet.sign(tx as Parameters<Wallet["sign"]>[0]);
+      result = wallet.sign(tx as Parameters<Wallet['sign']>[0]);
     } catch (err) {
       // We swallow the original error message on purpose. If you need to
       // diagnose a sign failure during dev, log the tx fields you control
       // BEFORE calling sign — never log the caught error here.
-      const isValidation =
-        err instanceof Error && err.constructor.name === "ValidationError";
+      const isValidation = err instanceof Error && err.constructor.name === 'ValidationError';
       throw new SignerError(
-        isValidation ? "invalid_tx" : "sign_failed",
-        isValidation ? "Transaction validation failed" : "Signing failed",
+        isValidation ? 'invalid_tx' : 'sign_failed',
+        isValidation ? 'Transaction validation failed' : 'Signing failed',
       );
     }
 
@@ -156,11 +152,10 @@ export function encodeUnsigned(tx: Transaction): string {
   // Drop any pre-existing signature material so the encoded blob represents
   // an unsigned tx as advertised. Without this, fee estimation on a partially
   // populated tx would include stale signature bytes in the size calculation.
-  const { TxnSignature, Signers, SigningPubKey, ...clean } =
-    tx as Transaction & {
-      TxnSignature?: string;
-      Signers?: unknown;
-      SigningPubKey?: string;
-    };
+  const { TxnSignature, Signers, SigningPubKey, ...clean } = tx as Transaction & {
+    TxnSignature?: string;
+    Signers?: unknown;
+    SigningPubKey?: string;
+  };
   return encode(clean as Transaction);
 }

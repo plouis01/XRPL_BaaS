@@ -20,9 +20,9 @@
 // Algorithm: same Redis sliding window as rateLimit.ts, but with a different
 // key namespace (`railforge:ip:` vs `railforge:rl:`) so the two don't collide.
 
-import type { MiddlewareHandler } from "hono";
-import { getRedis } from "../redis.ts";
-import type { AppEnv } from "../types.ts";
+import type { MiddlewareHandler } from 'hono';
+import { getRedis } from '../redis.ts';
+import type { AppEnv } from '../types.ts';
 
 const WINDOW_MS = 60_000; // 1 minute
 const WINDOW_SECONDS = Math.ceil(WINDOW_MS / 1000);
@@ -32,12 +32,12 @@ function clientIp(c: Parameters<MiddlewareHandler>[0]): string {
   // Trust order: dedicated proxy header → standard XFF → fallback to "unknown".
   // We deliberately do NOT parse XFF chains beyond the first entry — multi-hop
   // proxies need to be configured in front, not parsed in app code.
-  const cfIp = c.req.header("cf-connecting-ip");
+  const cfIp = c.req.header('cf-connecting-ip');
   if (cfIp) return cfIp;
 
-  const xff = c.req.header("x-forwarded-for");
+  const xff = c.req.header('x-forwarded-for');
   if (xff) {
-    const first = xff.split(",")[0]?.trim();
+    const first = xff.split(',')[0]?.trim();
     if (first) return first;
   }
 
@@ -45,7 +45,7 @@ function clientIp(c: Parameters<MiddlewareHandler>[0]): string {
   // bucket so we still rate-limit unknown sources together. This is the
   // safe-default: under attack, "unknown" gets rate-limited as one bucket
   // rather than waved through.
-  return "unknown";
+  return 'unknown';
 }
 
 export const ipRateLimit: MiddlewareHandler<AppEnv> = async (c, next) => {
@@ -74,17 +74,13 @@ export const ipRateLimit: MiddlewareHandler<AppEnv> = async (c, next) => {
   }
 
   const cardResult = result[2];
-  const count =
-    cardResult && typeof cardResult[1] === "number" ? cardResult[1] : 0;
+  const count = cardResult && typeof cardResult[1] === 'number' ? cardResult[1] : 0;
 
   // Don't expose the per-IP budget in headers — that just tells attackers
   // the threshold. Only emit a Retry-After on rejection.
   if (count > limit) {
-    c.header("Retry-After", String(WINDOW_SECONDS));
-    return c.json(
-      { error: "Too many requests", retry_after_seconds: WINDOW_SECONDS },
-      429,
-    );
+    c.header('Retry-After', String(WINDOW_SECONDS));
+    return c.json({ error: 'Too many requests', retry_after_seconds: WINDOW_SECONDS }, 429);
   }
 
   await next();

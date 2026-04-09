@@ -109,12 +109,8 @@
           "name": "accounts_client_id_clients_id_fk",
           "tableFrom": "accounts",
           "tableTo": "clients",
-          "columnsFrom": [
-            "client_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["client_id"],
+          "columnsTo": ["id"],
           "onDelete": "no action",
           "onUpdate": "no action"
         }
@@ -124,9 +120,7 @@
         "accounts_address_unique": {
           "name": "accounts_address_unique",
           "nullsNotDistinct": false,
-          "columns": [
-            "address"
-          ]
+          "columns": ["address"]
         }
       },
       "policies": {},
@@ -209,12 +203,8 @@
           "name": "api_keys_client_id_clients_id_fk",
           "tableFrom": "api_keys",
           "tableTo": "clients",
-          "columnsFrom": [
-            "client_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["client_id"],
+          "columnsTo": ["id"],
           "onDelete": "no action",
           "onUpdate": "no action"
         }
@@ -224,9 +214,7 @@
         "api_keys_key_hash_unique": {
           "name": "api_keys_key_hash_unique",
           "nullsNotDistinct": false,
-          "columns": [
-            "key_hash"
-          ]
+          "columns": ["key_hash"]
         }
       },
       "policies": {},
@@ -285,9 +273,7 @@
         "clients_email_unique": {
           "name": "clients_email_unique",
           "nullsNotDistinct": false,
-          "columns": [
-            "email"
-          ]
+          "columns": ["email"]
         }
       },
       "policies": {},
@@ -464,12 +450,8 @@
           "name": "credentials_client_id_clients_id_fk",
           "tableFrom": "credentials",
           "tableTo": "clients",
-          "columnsFrom": [
-            "client_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["client_id"],
+          "columnsTo": ["id"],
           "onDelete": "no action",
           "onUpdate": "no action"
         }
@@ -548,12 +530,8 @@
           "name": "delegations_client_id_clients_id_fk",
           "tableFrom": "delegations",
           "tableTo": "clients",
-          "columnsFrom": [
-            "client_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["client_id"],
+          "columnsTo": ["id"],
           "onDelete": "no action",
           "onUpdate": "no action"
         }
@@ -626,12 +604,8 @@
           "name": "domains_client_id_clients_id_fk",
           "tableFrom": "domains",
           "tableTo": "clients",
-          "columnsFrom": [
-            "client_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["client_id"],
+          "columnsTo": ["id"],
           "onDelete": "no action",
           "onUpdate": "no action"
         }
@@ -641,9 +615,7 @@
         "domains_domain_id_unique": {
           "name": "domains_domain_id_unique",
           "nullsNotDistinct": false,
-          "columns": [
-            "domain_id"
-          ]
+          "columns": ["domain_id"]
         }
       },
       "policies": {},
@@ -700,12 +672,8 @@
           "name": "signer_lists_account_id_accounts_id_fk",
           "tableFrom": "signer_lists",
           "tableTo": "accounts",
-          "columnsFrom": [
-            "account_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["account_id"],
+          "columnsTo": ["id"],
           "onDelete": "no action",
           "onUpdate": "no action"
         }
@@ -806,12 +774,8 @@
           "name": "tokens_client_id_clients_id_fk",
           "tableFrom": "tokens",
           "tableTo": "clients",
-          "columnsFrom": [
-            "client_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["client_id"],
+          "columnsTo": ["id"],
           "onDelete": "no action",
           "onUpdate": "no action"
         },
@@ -819,12 +783,8 @@
           "name": "tokens_issuer_account_accounts_id_fk",
           "tableFrom": "tokens",
           "tableTo": "accounts",
-          "columnsFrom": [
-            "issuer_account"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["issuer_account"],
+          "columnsTo": ["id"],
           "onDelete": "no action",
           "onUpdate": "no action"
         }
@@ -1009,12 +969,8 @@
           "name": "transactions_client_id_clients_id_fk",
           "tableFrom": "transactions",
           "tableTo": "clients",
-          "columnsFrom": [
-            "client_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["client_id"],
+          "columnsTo": ["id"],
           "onDelete": "no action",
           "onUpdate": "no action"
         }
@@ -1024,10 +980,7 @@
         "uniq_client_idempotency": {
           "name": "uniq_client_idempotency",
           "nullsNotDistinct": false,
-          "columns": [
-            "client_id",
-            "idempotency_key"
-          ]
+          "columns": ["client_id", "idempotency_key"]
         }
       },
       "policies": {},
@@ -1125,12 +1078,8 @@
           "name": "webhook_deliveries_endpoint_id_webhook_endpoints_id_fk",
           "tableFrom": "webhook_deliveries",
           "tableTo": "webhook_endpoints",
-          "columnsFrom": [
-            "endpoint_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["endpoint_id"],
+          "columnsTo": ["id"],
           "onDelete": "no action",
           "onUpdate": "no action"
         }
@@ -1197,12 +1146,8 @@
           "name": "webhook_endpoints_client_id_clients_id_fk",
           "tableFrom": "webhook_endpoints",
           "tableTo": "clients",
-          "columnsFrom": [
-            "client_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["client_id"],
+          "columnsTo": ["id"],
           "onDelete": "no action",
           "onUpdate": "no action"
         }

@@ -11,35 +11,35 @@
 // `'wallet'` and `'*.wallet'` wildcards are belt-and-braces — they redact
 // the entire wallet object regardless of which fields it contains.
 
-import pino from "pino";
+import pino from 'pino';
 
 export const REDACT_PATHS = [
   // Top-level wallet object — redact wholesale.
-  "wallet",
-  "*.wallet",
-  "wallets",
-  "*.wallets",
+  'wallet',
+  '*.wallet',
+  'wallets',
+  '*.wallets',
 
   // snake_case (our internal types)
-  "*.seed",
-  "*.master_key",
-  "*.master_key_ref",
-  "*.private_key",
-  "*.tx_blob",
-  "*.signing_key",
-  "*.hsm_response",
+  '*.seed',
+  '*.master_key',
+  '*.master_key_ref',
+  '*.private_key',
+  '*.tx_blob',
+  '*.signing_key',
+  '*.hsm_response',
 
   // camelCase (xrpl.js Wallet + future code)
-  "*.privateKey",
-  "*.publicKey",
-  "*.txBlob",
-  "*.signingKey",
-  "*.hsmResponse",
-  "*.masterKey",
-  "*.masterKeyRef",
+  '*.privateKey',
+  '*.publicKey',
+  '*.txBlob',
+  '*.signingKey',
+  '*.hsmResponse',
+  '*.masterKey',
+  '*.masterKeyRef',
 
   // HTTP headers
-  "req.headers.authorization",
+  'req.headers.authorization',
   'req.headers["x-api-key"]',
 ];
 
@@ -51,18 +51,18 @@ export interface LoggerOptions {
 }
 
 export function createLogger(opts: LoggerOptions): pino.Logger {
-  const isProd = process.env.NODE_ENV === "production";
+  const isProd = process.env.NODE_ENV === 'production';
   return pino({
     name: opts.name,
-    level: opts.level ?? process.env.LOG_LEVEL ?? "info",
+    level: opts.level ?? process.env.LOG_LEVEL ?? 'info',
     redact: {
       paths: REDACT_PATHS,
-      censor: "[REDACTED]",
+      censor: '[REDACTED]',
     },
     ...(isProd
       ? {}
       : {
-          transport: { target: "pino-pretty", options: { colorize: true } },
+          transport: { target: 'pino-pretty', options: { colorize: true } },
         }),
   });
 }

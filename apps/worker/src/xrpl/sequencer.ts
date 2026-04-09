@@ -22,8 +22,8 @@
 // CRITICAL: never bypass this. Direct client.submit() calls in
 // route handlers will collide on the same Sequence under load.
 
-import type { Redis } from "ioredis";
-import type { XrplClientPool } from "./client.ts";
+import type { Redis } from 'ioredis';
+import type { XrplClientPool } from './client.ts';
 
 const LOCK_TTL_SECONDS = 5;
 const CACHE_TTL_SECONDS = 30;
@@ -39,14 +39,14 @@ const LEDGER_FETCH_TIMEOUT_MS = 3_000;
 export class SequenceLockTimeout extends Error {
   constructor(address: string) {
     super(`Timed out acquiring sequence lock for ${address}`);
-    this.name = "SequenceLockTimeout";
+    this.name = 'SequenceLockTimeout';
   }
 }
 
 export class LedgerFetchTimeout extends Error {
   constructor(address: string) {
     super(`Timed out fetching account_info for ${address}`);
-    this.name = "LedgerFetchTimeout";
+    this.name = 'LedgerFetchTimeout';
   }
 }
 
@@ -105,21 +105,10 @@ export class TxSequencer {
     // Acquire lock with bounded retry. Lock contention is expected under load
     // and should not throw immediately — but it must not loop forever.
     for (let attempt = 0; attempt < LOCK_MAX_RETRIES; attempt++) {
-      const acquired = await this.redis.set(
-        lockKey,
-        lockToken,
-        "EX",
-        LOCK_TTL_SECONDS,
-        "NX",
-      );
-      if (acquired === "OK") {
+      const acquired = await this.redis.set(lockKey, lockToken, 'EX', LOCK_TTL_SECONDS, 'NX');
+      if (acquired === 'OK') {
         try {
-          return await this.computeAndAdvance(
-            address,
-            lockKey,
-            cacheKey,
-            lockToken,
-          );
+          return await this.computeAndAdvance(address, lockKey, cacheKey, lockToken);
         } finally {
           await this.releaseLock(lockKey, lockToken);
         }
@@ -188,9 +177,9 @@ export class TxSequencer {
   private async fetchSequenceFromLedger(address: string): Promise<number> {
     const client = this.xrplPool.getClient();
     const requestPromise = client.request({
-      command: "account_info",
+      command: 'account_info',
       account: address,
-      ledger_index: "current",
+      ledger_index: 'current',
     });
 
     // Hard timeout at LEDGER_FETCH_TIMEOUT_MS — must be strictly less than
@@ -198,15 +187,12 @@ export class TxSequencer {
     const info = await Promise.race([
       requestPromise,
       new Promise<never>((_, reject) =>
-        setTimeout(
-          () => reject(new LedgerFetchTimeout(address)),
-          LEDGER_FETCH_TIMEOUT_MS,
-        ),
+        setTimeout(() => reject(new LedgerFetchTimeout(address)), LEDGER_FETCH_TIMEOUT_MS),
       ),
     ]);
 
     const seq = info.result.account_data.Sequence;
-    if (typeof seq !== "number") {
+    if (typeof seq !== 'number') {
       throw new Error(`account_info returned no Sequence for ${address}`);
     }
     return seq;
