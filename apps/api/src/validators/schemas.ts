@@ -52,5 +52,23 @@ export const createTokenSchema = z.object({
   metadata: z.record(z.unknown()).optional(),
 });
 
+// ── Webhooks ─────────────────────────────────────────────────────────────────
+//
+// The supported event types are intentionally a closed set. Adding a new
+// event means adding it here AND adding a fan-out site for it (currently
+// only `transaction.validated` is wired, in apps/worker/src/jobs/txConfirmer).
+// Letting clients subscribe to events that nothing emits is just confusing.
+export const WEBHOOK_EVENT_TYPES = [
+  "transaction.validated",
+  "transaction.failed",
+] as const;
+
+export const createWebhookEndpointSchema = z.object({
+  url: z.string().url("webhook url must be a valid URL"),
+  events: z
+    .array(z.enum(WEBHOOK_EVENT_TYPES))
+    .min(1, "subscribe to at least one event"),
+});
+
 // ── Credentials, Payments, etc. ──────────────────────────────────────────────
 // TODO later sprints: add schemas for each resource as routes are implemented.
