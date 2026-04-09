@@ -14,8 +14,8 @@
 // AWS CloudHSM (or YubiHSM). Same contract, real key isolation.
 // TODO Sprint 1+: HsmSigner backend.
 
-import { Wallet, encode } from 'xrpl';
-import type { Transaction } from 'xrpl';
+import { Wallet, encode } from "xrpl";
+import type { Transaction } from "xrpl";
 
 export interface SignedTransaction {
   tx_blob: string;
@@ -29,11 +29,11 @@ export interface SignedTransaction {
  */
 export class SignerError extends Error {
   constructor(
-    public readonly category: 'no_key' | 'invalid_tx' | 'sign_failed',
+    public readonly category: "no_key" | "invalid_tx" | "sign_failed",
     message: string,
   ) {
     super(message);
-    this.name = 'SignerError';
+    this.name = "SignerError";
   }
 }
 
@@ -44,6 +44,22 @@ export interface Signer {
    * leak which addresses RailForge manages.
    */
   hasKey(address: string): Promise<boolean>;
+
+  /**
+   * Lazy-load a key for `address` from a persistence-layer reference.
+   *
+   * `ref` is whatever the API process wrote to `accounts.master_key_ref`
+   * when the account was created. The format is implementation-specific:
+   *   - DevSigner: an xrpl.js seed string
+   *   - HsmSigner: an opaque CloudHSM key handle
+   *
+   * The worker calls this when `hasKey(address)` returns false, since the
+   * signer state lives in-process and doesn't survive worker restarts. After
+   * a successful load, `hasKey(address)` returns true.
+   *
+   * MUST be a no-op if the address is already loaded.
+   */
+  loadKey(address: string, ref: string): Promise<void>;
 
   /**
    * Signs a transaction. The transaction must be fully populated (Sequence,
@@ -71,10 +87,10 @@ export class DevSigner implements Signer {
   private wallets = new Map<string, Wallet>();
 
   constructor() {
-    if (process.env.NODE_ENV === 'production') {
+    if (process.env.NODE_ENV === "production") {
       throw new Error(
-        'DevSigner refuses to start in production. Use HsmSigner instead. ' +
-          'See ARCHITECTURE.md §5.1 (Key vault).',
+        "DevSigner refuses to start in production. Use HsmSigner instead. " +
+          "See ARCHITECTURE.md §5.1 (Key vault).",
       );
     }
   }
@@ -119,12 +135,16 @@ export class DevSigner implements Signer {
    * explicitly as belt-and-braces.
    */
   generateWalletWithSeed(): { address: string; seed: string } {
-    if (process.env.NODE_ENV === 'production') {
-      throw new Error('generateWalletWithSeed() is dev-only and unreachable in production');
+    if (process.env.NODE_ENV === "production") {
+      throw new Error(
+        "generateWalletWithSeed() is dev-only and unreachable in production",
+      );
     }
     const wallet = Wallet.generate();
     if (!wallet.seed) {
-      throw new Error('xrpl.js Wallet.generate() returned no seed (should never happen)');
+      throw new Error(
+        "xrpl.js Wallet.generate() returned no seed (should never happen)",
+      );
     }
     this.registerWallet(wallet);
     return { address: wallet.classicAddress, seed: wallet.seed };
@@ -138,8 +158,10 @@ export class DevSigner implements Signer {
    * as generateWalletWithSeed().
    */
   loadFromSeed(seed: string): { address: string } {
-    if (process.env.NODE_ENV === 'production') {
-      throw new Error('loadFromSeed() is dev-only and unreachable in production');
+    if (process.env.NODE_ENV === "production") {
+      throw new Error(
+        "loadFromSeed() is dev-only and unreachable in production",
+      );
     }
     const wallet = Wallet.fromSeed(seed);
     this.registerWallet(wallet);
@@ -150,11 +172,37 @@ export class DevSigner implements Signer {
     return this.wallets.has(address);
   }
 
+  /**
+   * Implements Signer.loadKey by treating `ref` as an xrpl.js seed string
+   * and reconstructing the Wallet via {@link loadFromSeed}. No-op if the
+   * address is already loaded.
+   *
+   * If `ref` decodes to a different address than the one we were asked to
+   * load, that's a serious DB corruption bug — throw rather than silently
+   * register a wallet for a different address.
+   */
+  async loadKey(address: string, ref: string): Promise<void> {
+    if (this.wallets.has(address)) return;
+    const { address: derivedAddress } = this.loadFromSeed(ref);
+    if (derivedAddress !== address) {
+      // Drop the just-registered wrong address so we don't leave dangling
+      // state, then refuse the load.
+      this.wallets.delete(derivedAddress);
+      throw new SignerError(
+        "no_key",
+        "master_key_ref does not derive to the requested address",
+      );
+    }
+  }
+
   async sign(address: string, tx: Transaction): Promise<SignedTransaction> {
     const wallet = this.wallets.get(address);
     if (!wallet) {
       // Intentionally vague — never reveal which addresses we hold keys for.
-      throw new SignerError('no_key', `No signing key available for ${address}`);
+      throw new SignerError(
+        "no_key",
+        `No signing key available for ${address}`,
+      );
     }
 
     // xrpl.js Wallet.sign returns { tx_blob, hash } and never exposes the
@@ -165,17 +213,18 @@ export class DevSigner implements Signer {
     // include transaction properties (Destination, Amount). If a worker logs
     // the caught error, financial PII would leak. We re-throw a SignerError
     // with only the failure category — the original message is dropped.
-    let result: ReturnType<Wallet['sign']>;
+    let result: ReturnType<Wallet["sign"]>;
     try {
-      result = wallet.sign(tx as Parameters<Wallet['sign']>[0]);
+      result = wallet.sign(tx as Parameters<Wallet["sign"]>[0]);
     } catch (err) {
       // We swallow the original error message on purpose. If you need to
       // diagnose a sign failure during dev, log the tx fields you control
       // BEFORE calling sign — never log the caught error here.
-      const isValidation = err instanceof Error && err.constructor.name === 'ValidationError';
+      const isValidation =
+        err instanceof Error && err.constructor.name === "ValidationError";
       throw new SignerError(
-        isValidation ? 'invalid_tx' : 'sign_failed',
-        isValidation ? 'Transaction validation failed' : 'Signing failed',
+        isValidation ? "invalid_tx" : "sign_failed",
+        isValidation ? "Transaction validation failed" : "Signing failed",
       );
     }
 
@@ -198,10 +247,11 @@ export function encodeUnsigned(tx: Transaction): string {
   // Drop any pre-existing signature material so the encoded blob represents
   // an unsigned tx as advertised. Without this, fee estimation on a partially
   // populated tx would include stale signature bytes in the size calculation.
-  const { TxnSignature, Signers, SigningPubKey, ...clean } = tx as Transaction & {
-    TxnSignature?: string;
-    Signers?: unknown;
-    SigningPubKey?: string;
-  };
+  const { TxnSignature, Signers, SigningPubKey, ...clean } =
+    tx as Transaction & {
+      TxnSignature?: string;
+      Signers?: unknown;
+      SigningPubKey?: string;
+    };
   return encode(clean as Transaction);
 }
