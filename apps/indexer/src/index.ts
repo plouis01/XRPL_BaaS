@@ -4,7 +4,7 @@
 // credentials issued by account X"). See PLAN.md §5.3.
 // TODO Sprint 3.
 
-import './subscriber.ts';
+import { logger } from "./logger.ts";
+import "./subscriber.ts";
 
-// biome-ignore lint/suspicious/noConsoleLog: bootstrap log before pino is wired
-console.log('railforge-indexer started');
+logger.info("railforge-indexer started");

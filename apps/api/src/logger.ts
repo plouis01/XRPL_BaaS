@@ -1,26 +1,10 @@
-import pino from 'pino';
+// Re-export of the shared logger configured for the API process. The actual
+// REDACT_PATHS list lives in @railforge/logger so api/worker/indexer all
+// share one source of truth — see SETUP.md note about the logger.
+//
+// CLAUDE.md rule: never log signed blobs, seeds, or HSM responses. To extend
+// the redact list, edit packages/logger/src/index.ts (NOT this file).
 
-// Pino redact paths — extend this list when new sensitive fields are introduced.
-// Per CLAUDE.md: never log signed blobs, seeds, or HSM responses.
-const REDACT_PATHS = [
-  '*.seed',
-  '*.master_key',
-  '*.master_key_ref',
-  '*.private_key',
-  '*.tx_blob',
-  '*.signing_key',
-  '*.hsm_response',
-  'req.headers.authorization',
-  'req.headers["x-api-key"]',
-];
+import { createLogger } from "@railforge/logger";
 
-export const logger = pino({
-  level: process.env.LOG_LEVEL ?? 'info',
-  redact: {
-    paths: REDACT_PATHS,
-    censor: '[REDACTED]',
-  },
-  ...(process.env.NODE_ENV !== 'production' && {
-    transport: { target: 'pino-pretty', options: { colorize: true } },
-  }),
-});
+export const logger = createLogger({ name: "railforge-api" });

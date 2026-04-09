@@ -13,6 +13,7 @@
   },
   "dependencies": {
     "@railforge/db": "workspace:*",
+    "@railforge/logger": "workspace:*",
     "@railforge/xrpl-core": "workspace:*",
     "pino": "^9.5.0",
     "xrpl": "^4.6.0"
