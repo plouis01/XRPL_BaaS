@@ -9,7 +9,7 @@
     "build": "echo 'no build step (Bun runs .ts directly)'",
     "start": "bun run src/index.ts",
     "test": "vitest run --passWithNoTests",
-    "test:integration": "vitest run --config vitest.integration.config.ts",
+    "test:integration": "vitest run --passWithNoTests --config vitest.integration.config.ts",
     "typecheck": "tsc"
   },
   "dependencies": {
