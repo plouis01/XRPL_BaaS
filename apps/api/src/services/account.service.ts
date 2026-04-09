@@ -1,21 +1,28 @@
 // Account service — create and read managed XRPL accounts.
 //
-// Sprint 2 scope: create (faucet-funded) + get by address. Future sprints
-// add multi-sign, rotate-key, delete, and treasury-funded creation.
+// Sprint 3 scope: treasury-funded creation + get by address.
 //
 // Architecture notes:
 //
-// - The API process does NOT sign transactions. It only (a) generates a
-//   wallet, (b) funds it via the testnet faucet, and (c) persists the seed
-//   into accounts.master_key_ref. Signing happens in the worker process,
-//   which loads the seed from master_key_ref when needed.
+// - The API process does NOT sign transactions. It (a) generates a wallet,
+//   (b) persists the seed into accounts.master_key_ref, (c) inserts a
+//   queued Payment tx from the treasury to the new address, (d) enqueues
+//   it on the tx-submit queue. The worker signs and submits. The confirmer
+//   flips accounts.is_funded=true when the payment validates.
 //
-// - `master_key_ref` is named for its production meaning: an HSM key
-//   handle. In dev (Sprint 2), it holds the raw seed. Sprint 3 replaces
-//   this with CloudHSM handles; the column name doesn't change.
+// - Treasury funding replaces the direct testnet-faucet call that Sprint 2
+//   used. The faucet is a testnet-only path with different error modes;
+//   routing through the same txSubmitter pipeline that every other tx uses
+//   means account creation exercises the prod sign+submit path from day
+//   one. It's also the shape XLS-68 sponsored reserves will take on
+//   mainnet — different funding mechanism, same pipeline.
 //
-// - The faucet is a testnet-only funding path. Production uses a treasury
-//   wallet pattern (Sprint 3) or XLS-68 sponsored reserves (Sprint 4+).
+// - `master_key_ref` holds the raw xrpl.js seed in dev. Sprint 4+ replaces
+//   this with CloudHSM key handles; the column name doesn't change.
+//
+// - createAccount returns is_funded=false. Clients poll the returned
+//   funding_tx_id until the worker confirms the payment (~4s under normal
+//   conditions). This is an API contract change from Sprint 2.
 //
 // SECURITY: this service handles seed material. The seed NEVER leaves this
 // file via a return value, log line, or API response. It goes directly into
@@ -23,18 +30,22 @@
 // `*.seed` and `*.master_key_ref` in both snake_case and camelCase — see
 // packages/logger/src/index.ts.
 
-import { and, db, eq, isNull, schema } from '@railforge/db';
-import { Wallet } from 'xrpl';
-import { logger } from '../logger.ts';
+import { and, db, eq, isNull, schema } from "@railforge/db";
+import { enqueueTxSubmit } from "@railforge/jobs";
+import { buildXrpPayment } from "@railforge/xrpl-core";
+import { Wallet } from "xrpl";
+import { logger } from "../logger.ts";
 
-// Testnet faucet endpoint. Mainnet has no faucet — Sprint 3's treasury
-// pattern replaces this.
-const TESTNET_FAUCET_URL = 'https://faucet.altnet.rippletest.net/accounts';
+// Amount sent from the treasury to each new account. 20 XRP covers the
+// 10 XRP base reserve with 10 XRP headroom for object reserves (trust
+// lines, signer lists, offers) the account may create later. Sprint 4+
+// will make this configurable per-client plan.
+const FUNDING_AMOUNT_DROPS = "20000000";
 
 export interface CreateAccountInput {
   clientId: string;
   label?: string;
-  custodyMode?: 'semi' | 'non_custodial';
+  custodyMode?: "semi" | "non_custodial";
 }
 
 export interface AccountView {
@@ -45,160 +56,196 @@ export interface AccountView {
   label: string | null;
   isFunded: boolean;
   reserveBalance: string;
+  fundingTxId: string | null;
   createdAt: Date | null;
 }
 
 export class AccountServiceError extends Error {
   constructor(
     public readonly code:
-      | 'faucet_failed'
-      | 'faucet_bad_response'
-      | 'faucet_zero_balance'
-      | 'not_found'
-      | 'db_conflict',
+      | "treasury_not_configured"
+      | "enqueue_failed"
+      | "not_found"
+      | "db_conflict",
     message: string,
   ) {
     super(message);
-    this.name = 'AccountServiceError';
+    this.name = "AccountServiceError";
   }
 }
 
 /**
- * Generate a new wallet, fund it via the testnet faucet, and persist it.
+ * Generate a new wallet, persist it, and enqueue a treasury-funded Payment.
  * Returns a redacted AccountView — the seed is NEVER in the response.
  *
- * @throws {AccountServiceError} on faucet failure or DB conflict
+ * The returned `isFunded` is always false at creation time. The funding
+ * payment is validated asynchronously by the worker; clients poll via
+ * GET /v1/accounts/:address to observe the flip.
+ *
+ * @throws {AccountServiceError} on treasury misconfiguration, DB conflict,
+ *   or enqueue failure
  */
-export async function createAccount(input: CreateAccountInput): Promise<AccountView> {
+export async function createAccount(
+  input: CreateAccountInput,
+): Promise<AccountView> {
   const log = logger.child({
-    service: 'account',
-    op: 'create',
+    service: "account",
+    op: "create",
     clientId: input.clientId,
   });
 
-  // 1. Generate a wallet. We use xrpl.js's Wallet.generate() directly so
-  // the API doesn't depend on the worker's signer module. The seed lives
-  // on this stack frame briefly, goes into master_key_ref, and disappears.
-  const wallet = Wallet.generate();
-  if (!wallet.seed) {
-    throw new Error('Wallet.generate() returned no seed — should never happen');
-  }
-  const address = wallet.classicAddress;
-
-  // 2. Fund via the testnet faucet. The faucet takes a `destination` in
-  // its POST body to fund an existing address rather than generating a
-  // fresh one, which is what we want since we need the seed.
-  let reserveBalance = '0';
-  let isFunded = false;
-  try {
-    const response = await fetch(TESTNET_FAUCET_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ destination: address }),
-      // 30s timeout — the faucet is occasionally slow but shouldn't hang.
-      signal: AbortSignal.timeout(30_000),
-    });
-
-    if (!response.ok) {
-      // Deliberately do NOT log the response body — faucet error responses
-      // can include the requested destination address (i.e. our just-generated
-      // address). The status code is enough to triage; the address pollutes
-      // logs with PII without aiding diagnosis.
-      log.error({ status: response.status }, 'faucet non-200');
-      // Drain the body so the connection can be reused, but discard it.
-      await response.text().catch(() => '');
-      throw new AccountServiceError('faucet_failed', `Faucet returned ${response.status}`);
-    }
-
-    const body = (await response.json()) as {
-      account?: { address?: string };
-      balance?: number;
-    };
-
-    // Sanity check the address matches — defends against a faucet bug
-    // that would otherwise leave us with a seed for a different account.
-    if (body.account?.address && body.account.address !== address) {
-      throw new AccountServiceError(
-        'faucet_bad_response',
-        'Faucet returned an address that does not match the one we requested',
-      );
-    }
-
-    // Validate the faucet actually credited the account. A 200 with balance=0
-    // (or no balance field at all) means the faucet thinks it funded us but
-    // the destination has no XRP — we'd persist isFunded=true incorrectly and
-    // every later transaction would fail with tecINSUFFICIENT_RESERVE. Treat
-    // it as a faucet failure so the caller can retry.
-    if (typeof body.balance !== 'number' || body.balance <= 0) {
-      log.error({ balance: body.balance }, 'faucet returned non-positive balance');
-      throw new AccountServiceError(
-        'faucet_zero_balance',
-        'Faucet returned a non-positive balance',
-      );
-    }
-
-    isFunded = true;
-    // Faucet returns balance in XRP. Store as drops-string for consistency
-    // with reserve_balance elsewhere. 1 XRP = 1_000_000 drops.
-    reserveBalance = String(Math.round(body.balance * 1_000_000));
-    log.info({ address, balance: body.balance }, 'faucet funded');
-  } catch (err) {
-    if (err instanceof AccountServiceError) throw err;
-    log.error({ err }, 'faucet request failed');
+  // 1. Treasury must be configured. The address lives in env because the
+  // API process doesn't hold the seed (only the worker does — see
+  // apps/worker/src/index.ts). We need the address here to set it as the
+  // sourceAddress on the Payment tx.
+  const treasuryAddress = process.env.TREASURY_ADDRESS;
+  if (!treasuryAddress) {
     throw new AccountServiceError(
-      'faucet_failed',
-      err instanceof Error ? err.message : 'unknown faucet error',
+      "treasury_not_configured",
+      "TREASURY_ADDRESS env var is not set — account creation is disabled",
     );
   }
 
-  // 3. Persist. master_key_ref holds the seed (see file-level comment).
-  // The UNIQUE constraint on accounts.address is the collision detector
-  // — astronomically unlikely (2^-128) but we handle it cleanly if it ever
-  // happens (e.g. a test re-generating with a seeded PRNG).
-  let insertedId: string;
-  try {
-    const inserted = await db
-      .insert(schema.accounts)
-      .values({
-        clientId: input.clientId,
-        address,
-        masterKeyRef: wallet.seed,
-        regularKey: null,
-        custodyMode: input.custodyMode ?? 'semi',
-        label: input.label ?? null,
-        isFunded,
-        reserveBalance,
-        metadata: {},
-      })
-      .returning({ id: schema.accounts.id });
+  // 2. Generate a fresh wallet. Wallet.generate() produces a keypair with
+  // a non-null seed; we assert it for the type system.
+  const wallet = Wallet.generate();
+  if (!wallet.seed) {
+    throw new Error("Wallet.generate() returned no seed — should never happen");
+  }
+  const address = wallet.classicAddress;
 
-    const row = inserted[0];
-    if (!row) {
-      throw new AccountServiceError('db_conflict', 'insert returned no row');
-    }
-    insertedId = row.id;
+  // 3. Build the funding Payment. This is the same builder the token
+  // service uses for any XRP payment — treasury funding is just a
+  // Payment tx with specific source and destination.
+  const txJson = buildXrpPayment({
+    account: treasuryAddress,
+    destination: address,
+    amountDrops: FUNDING_AMOUNT_DROPS,
+  });
+
+  // 4. Persist account + transactions row in a single DB transaction.
+  //
+  // Order matters: we insert the tx row first to get its id, then insert
+  // the account row with funding_tx_id already populated. Doing it the
+  // other way would require an UPDATE to backfill funding_tx_id, which
+  // would leave a brief window where the account row exists without a
+  // link to its funding tx. One atomic write is cleaner.
+  //
+  // If the wallet address collides with an existing row (2^-128 odds,
+  // but we handle it cleanly), Postgres returns 23505 which we translate
+  // to AccountServiceError('db_conflict').
+  let accountId: string;
+  let txId: string;
+  try {
+    const result = await db.transaction(async (tx) => {
+      // a. Insert the queued transactions row. sourceAddress is the
+      // treasury's address — the worker's signer must hold that key, or
+      // the job will fail with SIGNER_NO_KEY at submission time.
+      const txInserted = await tx
+        .insert(schema.transactions)
+        .values({
+          clientId: input.clientId,
+          txType: "Payment",
+          sourceAddress: treasuryAddress,
+          status: "queued",
+          // request_body is jsonb NOT NULL. Stash enough context for a
+          // debugging operator to understand why this tx exists without
+          // having to join other tables.
+          requestBody: {
+            purpose: "account_funding",
+            destination: address,
+            amountDrops: FUNDING_AMOUNT_DROPS,
+          },
+        })
+        .returning({ id: schema.transactions.id });
+      const txRow = txInserted[0];
+      if (!txRow) {
+        throw new AccountServiceError(
+          "db_conflict",
+          "transactions insert returned no row",
+        );
+      }
+
+      // b. Insert the account row, pre-linked to the funding tx. The
+      // txConfirmer will flip is_funded=true when the Payment validates.
+      const acctInserted = await tx
+        .insert(schema.accounts)
+        .values({
+          clientId: input.clientId,
+          address,
+          masterKeyRef: wallet.seed as string,
+          regularKey: null,
+          custodyMode: input.custodyMode ?? "semi",
+          label: input.label ?? null,
+          isFunded: false,
+          reserveBalance: "0",
+          fundingTxId: txRow.id,
+          metadata: {},
+        })
+        .returning({ id: schema.accounts.id });
+      const acctRow = acctInserted[0];
+      if (!acctRow) {
+        throw new AccountServiceError(
+          "db_conflict",
+          "accounts insert returned no row",
+        );
+      }
+
+      return { accountId: acctRow.id, txId: txRow.id };
+    });
+    accountId = result.accountId;
+    txId = result.txId;
   } catch (err) {
-    // Postgres unique-violation error code 23505.
+    // Postgres unique-violation — either the wallet address collided
+    // (astronomically unlikely) or the idempotency-key unique constraint
+    // hit. Treat both as db_conflict; the client retries with a new
+    // idempotency key.
     if (
       err &&
-      typeof err === 'object' &&
-      'code' in err &&
-      (err as { code: string }).code === '23505'
+      typeof err === "object" &&
+      "code" in err &&
+      (err as { code: string }).code === "23505"
     ) {
-      throw new AccountServiceError('db_conflict', 'Address collision (retry)');
+      throw new AccountServiceError("db_conflict", "Address collision (retry)");
     }
     throw err;
   }
 
-  // 4. Return a redacted view — seed is NEVER in the response.
+  // 5. Enqueue the tx-submit job. Done AFTER the DB commit so we never
+  // enqueue a job that references an uncommitted row. If the enqueue
+  // itself fails (Redis down, BullMQ error), the DB rows exist but no
+  // job is queued — an orphan state. A future reconciliation job can
+  // sweep orphaned 'queued' rows. For Sprint 3 we surface the failure
+  // to the client and accept the orphan; the alternative (rolling back
+  // the DB write) would require a second write and doesn't eliminate
+  // the race anyway.
+  try {
+    await enqueueTxSubmit({
+      txId,
+      sourceAddress: treasuryAddress,
+      txJson,
+    });
+  } catch (err) {
+    log.error({ err }, "enqueueTxSubmit failed after DB commit");
+    throw new AccountServiceError(
+      "enqueue_failed",
+      "Failed to enqueue funding transaction — account row exists but is unfunded",
+    );
+  }
+
+  log.info({ address, txId }, "account created, funding enqueued");
+
+  // 6. Return a redacted view. is_funded is FALSE — the client polls to
+  // observe the flip after the worker confirms the payment (~4s).
   return {
-    id: insertedId,
+    id: accountId,
     address,
     regularKey: null,
-    custodyMode: input.custodyMode ?? 'semi',
+    custodyMode: input.custodyMode ?? "semi",
     label: input.label ?? null,
-    isFunded,
-    reserveBalance,
+    isFunded: false,
+    reserveBalance: "0",
+    fundingTxId: txId,
     createdAt: new Date(),
   };
 }
@@ -209,7 +256,10 @@ export async function createAccount(input: CreateAccountInput): Promise<AccountV
  * are indistinguishable to the caller, which is intentional (no cross-
  * tenant enumeration).
  */
-export async function getAccount(clientId: string, address: string): Promise<AccountView | null> {
+export async function getAccount(
+  clientId: string,
+  address: string,
+): Promise<AccountView | null> {
   const rows = await db
     .select({
       id: schema.accounts.id,
@@ -219,6 +269,7 @@ export async function getAccount(clientId: string, address: string): Promise<Acc
       label: schema.accounts.label,
       isFunded: schema.accounts.isFunded,
       reserveBalance: schema.accounts.reserveBalance,
+      fundingTxId: schema.accounts.fundingTxId,
       createdAt: schema.accounts.createdAt,
     })
     .from(schema.accounts)
@@ -241,7 +292,8 @@ export async function getAccount(clientId: string, address: string): Promise<Acc
     custodyMode: row.custodyMode,
     label: row.label,
     isFunded: row.isFunded ?? false,
-    reserveBalance: row.reserveBalance ?? '0',
+    reserveBalance: row.reserveBalance ?? "0",
+    fundingTxId: row.fundingTxId,
     createdAt: row.createdAt,
   };
 }
