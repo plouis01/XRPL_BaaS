@@ -8,6 +8,13 @@
       "when": 1775676544232,
       "tag": "0000_daffy_justice",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1775723318360,
+      "tag": "0001_loving_nighthawk",
+      "breakpoints": true
     }
   ]
 }

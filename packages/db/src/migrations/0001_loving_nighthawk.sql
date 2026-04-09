@@ -1,0 +1,1 @@
+CREATE INDEX "idx_transactions_idempotency" ON "transactions" USING btree ("client_id","idempotency_key");
