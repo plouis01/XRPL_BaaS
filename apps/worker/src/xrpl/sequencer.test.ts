@@ -113,19 +113,24 @@ describe("TxSequencer", () => {
     );
   });
 
-  it("releaseLock does NOT delete a lock owned by another worker (token mismatch)", async () => {
-    // This is the core safety property of the Lua compare-and-delete script.
-    // Scenario: worker A's getNextSequence stalls past LOCK_TTL_SECONDS, the
-    // lock auto-expires, worker B grabs the lock and writes its own token.
-    // When worker A finally finishes and tries to release, it must NOT delete
-    // worker B's lock — otherwise a third worker could grab it concurrently
-    // with worker B, causing a Sequence collision.
+  it("aborts and preserves the foreign lock when our token is no longer the owner (fenced cache write)", async () => {
+    // CRITICAL safety property of the Lua FENCED_CACHE_WRITE_SCRIPT.
     //
-    // We exercise this by:
-    //   1. Letting worker A acquire the lock normally.
-    //   2. Forcing the lock value to a different token (simulating B took over).
-    //   3. Letting worker A's getNextSequence finish (try/finally → release).
-    //   4. Verifying the lock value is STILL worker B's token, not deleted.
+    // Scenario: worker A acquires the lock and starts fetching a sequence
+    // from rippled. The fetch stalls past LOCK_TTL_SECONDS, the lock
+    // auto-expires, worker B acquires it and writes its own token. Worker A
+    // finally finishes the fetch and attempts to write the cache.
+    //
+    // CORRECT behavior (post-fence):
+    //   1. The fenced cache write checks GET lockKey == ARGV[1] and returns 0
+    //      because worker B's token is now there.
+    //   2. computeAndAdvance throws SequenceLockTimeout — worker A's stale
+    //      `next` value is NEVER returned to the caller.
+    //   3. releaseLock runs in the finally and does NOT delete worker B's
+    //      lock (token mismatch in compare-and-delete).
+    //
+    // Without the fence, worker A would clobber the cache with stale state
+    // and two workers would sign with the same Sequence on-ledger.
     const lockKey = `railforge:seq:lock:${ADDRESS}`;
     const otherWorkerToken = "other-worker-stole-this";
 
@@ -157,13 +162,20 @@ describe("TxSequencer", () => {
     // Simulate the lock expiring and another worker grabbing it.
     await redis.set(lockKey, otherWorkerToken);
 
-    // Now let worker A's slow request resolve. Its finally block calls
-    // releaseLock, which must NOT delete otherWorkerToken.
+    // Now let worker A's slow request resolve. The fence in computeAndAdvance
+    // must reject the cache write and surface SequenceLockTimeout to the
+    // caller — worker A's stale Sequence MUST NOT be returned.
     resolveSlowRequest();
-    await seqPromise;
+    await expect(seqPromise).rejects.toThrow(SequenceLockTimeout);
 
+    // And the lock value must STILL be worker B's token — releaseLock's
+    // compare-and-delete refused to delete the foreign lock.
     const finalValue = await redis.get(lockKey);
     expect(finalValue).toBe(otherWorkerToken);
+
+    // And the cache MUST NOT contain worker A's stale increment.
+    const cached = await redis.get(`railforge:seq:${ADDRESS}`);
+    expect(cached).toBeNull();
   });
 
   it("releaseLock DOES delete the lock when the token matches (happy path)", async () => {
