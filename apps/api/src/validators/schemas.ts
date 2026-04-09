@@ -4,6 +4,12 @@ import { z } from 'zod';
 // Each route imports its schemas from here. Keep them grouped by resource.
 
 // ── Accounts ─────────────────────────────────────────────────────────────────
+
+// Re-used XRPL r-address shape (24-34 base58 chars after 'r').
+const xrplAddressSchema = z
+  .string()
+  .regex(/^r[1-9A-HJ-NP-Za-km-z]{24,34}$/, 'invalid XRPL address');
+
 export const createAccountSchema = z.object({
   label: z.string().optional(),
   custody_mode: z.enum(['semi', 'non_custodial']).default('semi'),
@@ -22,6 +28,36 @@ export const createAccountSchema = z.object({
         .max(32),
     })
     .optional(),
+});
+
+// PUT /v1/accounts/:address/signers — multi-sign list configuration.
+// quorum=0 + empty signers is the documented "delete signer list" path
+// (matches buildSignerListSet's behavior).
+export const configureSignersSchema = z.object({
+  quorum: z.number().int().min(0),
+  signers: z
+    .array(
+      z.object({
+        address: xrplAddressSchema,
+        weight: z.number().int().min(1).max(65535),
+      }),
+    )
+    .max(32),
+});
+
+// POST /v1/accounts/:address/rotate-key — install or remove a regular key.
+// `regular_key: null` clears the existing key (the SetRegularKey w/o
+// RegularKey field). Omitting the field is the same as null — defensive
+// against clients that don't serialize null cleanly.
+export const rotateRegularKeySchema = z.object({
+  regular_key: xrplAddressSchema.nullable().optional(),
+});
+
+// DELETE /v1/accounts/:address — body carries the destination for the
+// reclaimed reserve. The destination MUST be a funded account.
+export const deleteAccountSchema = z.object({
+  destination: xrplAddressSchema,
+  destination_tag: z.number().int().min(0).optional(),
 });
 
 // ── Tokens ───────────────────────────────────────────────────────────────────
@@ -50,6 +86,36 @@ export const createTokenSchema = z.object({
   max_supply: z.string().optional(),
   /** Optional metadata (key/value JSON). Merged into tokens.metadata. */
   metadata: z.record(z.unknown()).optional(),
+  /**
+   * Trust line opt-in only: the limit a trust line will hold. Required when
+   * type='trustline'. The Zod refine below enforces this so we never reach
+   * the service with a half-configured trust line request.
+   */
+  trustline_limit: z.string().optional(),
+});
+
+// POST /v1/tokens/:id/transfer — value is decimal string for both MPT
+// and trustline tokens. The service uses tokens.tokenType to pick the
+// right builder (buildMptPayment vs buildIssuedCurrencyPayment).
+export const transferTokenSchema = z.object({
+  destination: xrplAddressSchema,
+  amount: z.string().min(1),
+  destination_tag: z.number().int().min(0).optional(),
+});
+
+// PUT /v1/tokens/:id/freeze — locks the entire issuance, or just one
+// holder if `holder` is supplied. Set `unfreeze: true` to clear the lock.
+export const freezeTokenSchema = z.object({
+  holder: xrplAddressSchema.optional(),
+  unfreeze: z.boolean().default(false),
+});
+
+// PUT /v1/tokens/:id/clawback — must specify which holder to claw from
+// and how much. Both MPT and issued-currency tokens use this same shape;
+// the service picks the right builder based on tokenType.
+export const clawbackTokenSchema = z.object({
+  holder: xrplAddressSchema,
+  amount: z.string().min(1),
 });
 
 // ── Webhooks ─────────────────────────────────────────────────────────────────
