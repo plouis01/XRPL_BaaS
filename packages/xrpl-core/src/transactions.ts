@@ -18,8 +18,11 @@
 import type {
   AccountDelete,
   AccountSet,
+  Clawback,
   MPTokenIssuanceCreate,
+  MPTokenIssuanceSet,
   Payment,
+  SetRegularKey,
   SignerEntry,
   SignerListSet,
   TrustSet,
@@ -237,5 +240,161 @@ export function buildTrustSet(input: BuildTrustSetInput): TrustSet {
   };
   if (input.qualityIn !== undefined) tx.QualityIn = input.qualityIn;
   if (input.qualityOut !== undefined) tx.QualityOut = input.qualityOut;
+  return tx;
+}
+
+// ── MPT payment (XLS-33 token transfer) ─────────────────────────────────────
+//
+// Payment.Amount is `string | IssuedCurrencyAmount | MPTAmount` per xrpl.js's
+// type union. The MPT shape is `{ mpt_issuance_id, value }` — same value
+// space as IssuedCurrencyAmount, just keyed by the issuance id rather than
+// (currency, issuer).
+
+export interface BuildMptPaymentInput {
+  account: string;
+  destination: string;
+  /** The MPT issuance id (hex). Returned by the issuance create's metadata. */
+  mptIssuanceId: string;
+  /** Amount in the smallest unit of the MPT, as a decimal string. */
+  value: string;
+  destinationTag?: number;
+}
+
+export function buildMptPayment(input: BuildMptPaymentInput): Payment {
+  const tx: Payment = {
+    TransactionType: 'Payment',
+    Account: input.account,
+    Destination: input.destination,
+    Amount: {
+      mpt_issuance_id: input.mptIssuanceId,
+      value: input.value,
+    },
+  };
+  if (input.destinationTag !== undefined) {
+    tx.DestinationTag = input.destinationTag;
+  }
+  return tx;
+}
+
+// ── MPT freeze / unfreeze (XLS-33) ──────────────────────────────────────────
+//
+// MPTokenIssuanceSet has two flag values for freezing:
+//   tfMPTLock   = 0x00000001  → freeze
+//   tfMPTUnlock = 0x00000002  → unfreeze
+//
+// Optional Holder address: if set, ONLY that holder is locked/unlocked.
+// If omitted, the entire issuance is locked (issuer-wide freeze).
+
+export const MPT_LOCK_FLAG = 0x00000001;
+export const MPT_UNLOCK_FLAG = 0x00000002;
+
+export interface BuildMptIssuanceSetInput {
+  account: string;
+  /** The MPT issuance id (hex). */
+  mptIssuanceId: string;
+  /** 'lock' to freeze, 'unlock' to unfreeze. */
+  action: 'lock' | 'unlock';
+  /** Optional holder — when set, freeze only this holder, not the whole issuance. */
+  holder?: string;
+}
+
+export function buildMptIssuanceSet(input: BuildMptIssuanceSetInput): MPTokenIssuanceSet {
+  const tx: MPTokenIssuanceSet = {
+    TransactionType: 'MPTokenIssuanceSet',
+    Account: input.account,
+    MPTokenIssuanceID: input.mptIssuanceId,
+    Flags: input.action === 'lock' ? MPT_LOCK_FLAG : MPT_UNLOCK_FLAG,
+  };
+  if (input.holder !== undefined) {
+    tx.Holder = input.holder;
+  }
+  return tx;
+}
+
+// ── Clawback (issued currency + MPT) ────────────────────────────────────────
+//
+// Two amount shapes are accepted by xrpl.js's Clawback:
+//   { currency, issuer, value }       — issued currency
+//   { mpt_issuance_id, value }        — MPT
+//
+// We expose two builder helpers (one per shape) so callers can't accidentally
+// mix the two field sets. Both produce the same Transaction type — the
+// difference is purely in how the Amount field is shaped.
+
+export interface BuildIssuedCurrencyClawbackInput {
+  /** The issuer reclaiming the funds. */
+  account: string;
+  /** Currency code (3-char ISO or 40-char hex). */
+  currency: string;
+  /** The holder address whose funds are being clawed back. */
+  holder: string;
+  /** Decimal string. */
+  value: string;
+}
+
+export function buildIssuedCurrencyClawback(input: BuildIssuedCurrencyClawbackInput): Clawback {
+  const tx: Clawback = {
+    TransactionType: 'Clawback',
+    Account: input.account,
+    // Per the XRPL Clawback spec: the Amount.issuer field carries the
+    // HOLDER address being clawed back, NOT the issuer of the currency
+    // (the issuer is implicit — it's the Account submitting the tx).
+    // This is counter-intuitive but matches the protocol.
+    Amount: {
+      currency: input.currency,
+      issuer: input.holder,
+      value: input.value,
+    },
+  };
+  return tx;
+}
+
+export interface BuildMptClawbackInput {
+  /** The issuer reclaiming the funds. */
+  account: string;
+  /** The MPT issuance id (hex). */
+  mptIssuanceId: string;
+  /** The holder address whose funds are being clawed back. */
+  holder: string;
+  /** Decimal string. */
+  value: string;
+}
+
+export function buildMptClawback(input: BuildMptClawbackInput): Clawback {
+  const tx: Clawback = {
+    TransactionType: 'Clawback',
+    Account: input.account,
+    Amount: {
+      mpt_issuance_id: input.mptIssuanceId,
+      value: input.value,
+    },
+    // For MPT clawback the Holder field on the tx itself carries the
+    // address (not on the Amount, unlike the issued-currency case).
+    Holder: input.holder,
+  };
+  return tx;
+}
+
+// ── SetRegularKey (regular key rotation) ────────────────────────────────────
+//
+// RegularKey is optional: omit it (or pass null) to remove the regular
+// key entirely. Setting a new value installs/replaces it. We model the
+// "remove" case explicitly via `null` instead of `undefined` so callers
+// can't get it wrong by forgetting to pass the field.
+
+export interface BuildSetRegularKeyInput {
+  account: string;
+  /** New regular key address, or null to clear. */
+  regularKey: string | null;
+}
+
+export function buildSetRegularKey(input: BuildSetRegularKeyInput): SetRegularKey {
+  const tx: SetRegularKey = {
+    TransactionType: 'SetRegularKey',
+    Account: input.account,
+  };
+  if (input.regularKey !== null) {
+    tx.RegularKey = input.regularKey;
+  }
   return tx;
 }

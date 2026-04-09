@@ -9,14 +9,24 @@ import { describe, expect, it } from 'vitest';
 import { Wallet, decode, encode } from 'xrpl';
 import type { Transaction } from 'xrpl';
 import {
+  MPT_LOCK_FLAG,
+  MPT_UNLOCK_FLAG,
   buildAccountDelete,
   buildAccountSet,
+  buildIssuedCurrencyClawback,
   buildIssuedCurrencyPayment,
+  buildMptClawback,
   buildMptIssuanceCreate,
+  buildMptIssuanceSet,
+  buildMptPayment,
+  buildSetRegularKey,
   buildSignerListSet,
   buildTrustSet,
   buildXrpPayment,
 } from './transactions.ts';
+
+// Reasonably-formatted hex MPT issuance id (24 bytes = 48 hex chars).
+const MPT_ID = '00000ABC1234567890ABCDEF1234567890ABCDEF12345678';
 
 // Real r-addresses for test fixtures. xrpl.js validates these on encode,
 // so we can't use placeholder strings.
@@ -326,5 +336,135 @@ describe('buildTrustSet', () => {
       issuer: ACCOUNT_B,
       value: '100',
     });
+  });
+});
+
+describe('buildMptPayment', () => {
+  it('produces a Payment with MPT amount shape', () => {
+    const tx = buildMptPayment({
+      account: ACCOUNT_A,
+      destination: ACCOUNT_B,
+      mptIssuanceId: MPT_ID,
+      value: '100',
+    });
+    expect(tx.TransactionType).toBe('Payment');
+    expect(tx.Account).toBe(ACCOUNT_A);
+    expect(tx.Destination).toBe(ACCOUNT_B);
+    expect(tx.Amount).toEqual({
+      mpt_issuance_id: MPT_ID,
+      value: '100',
+    });
+  });
+
+  it('includes DestinationTag when provided', () => {
+    const tx = buildMptPayment({
+      account: ACCOUNT_A,
+      destination: ACCOUNT_B,
+      mptIssuanceId: MPT_ID,
+      value: '1',
+      destinationTag: 99,
+    });
+    expect(tx.DestinationTag).toBe(99);
+  });
+});
+
+describe('buildMptIssuanceSet', () => {
+  it('produces a lock tx with tfMPTLock flag', () => {
+    const tx = buildMptIssuanceSet({
+      account: ACCOUNT_A,
+      mptIssuanceId: MPT_ID,
+      action: 'lock',
+    });
+    expect(tx.TransactionType).toBe('MPTokenIssuanceSet');
+    expect(tx.MPTokenIssuanceID).toBe(MPT_ID);
+    expect(tx.Flags).toBe(MPT_LOCK_FLAG);
+    expect(tx.Holder).toBeUndefined();
+  });
+
+  it('produces an unlock tx with tfMPTUnlock flag', () => {
+    const tx = buildMptIssuanceSet({
+      account: ACCOUNT_A,
+      mptIssuanceId: MPT_ID,
+      action: 'unlock',
+    });
+    expect(tx.Flags).toBe(MPT_UNLOCK_FLAG);
+  });
+
+  it('includes Holder when freezing a single holder (not the whole issuance)', () => {
+    const tx = buildMptIssuanceSet({
+      account: ACCOUNT_A,
+      mptIssuanceId: MPT_ID,
+      action: 'lock',
+      holder: ACCOUNT_B,
+    });
+    expect(tx.Holder).toBe(ACCOUNT_B);
+  });
+});
+
+describe('buildIssuedCurrencyClawback', () => {
+  it('produces a Clawback with the holder address in Amount.issuer', () => {
+    // Note the counter-intuitive shape: Amount.issuer is the HOLDER, not
+    // the currency issuer. The XRPL Clawback spec defines it this way.
+    const tx = buildIssuedCurrencyClawback({
+      account: ACCOUNT_A, // issuer reclaiming
+      currency: 'USD',
+      holder: ACCOUNT_B, // holder being clawed back
+      value: '10',
+    });
+    expect(tx.TransactionType).toBe('Clawback');
+    expect(tx.Account).toBe(ACCOUNT_A);
+    expect(tx.Amount).toEqual({
+      currency: 'USD',
+      issuer: ACCOUNT_B,
+      value: '10',
+    });
+  });
+});
+
+describe('buildMptClawback', () => {
+  it('produces a Clawback with MPT amount + Holder field', () => {
+    const tx = buildMptClawback({
+      account: ACCOUNT_A,
+      mptIssuanceId: MPT_ID,
+      holder: ACCOUNT_B,
+      value: '10',
+    });
+    expect(tx.TransactionType).toBe('Clawback');
+    expect(tx.Account).toBe(ACCOUNT_A);
+    expect(tx.Amount).toEqual({
+      mpt_issuance_id: MPT_ID,
+      value: '10',
+    });
+    expect(tx.Holder).toBe(ACCOUNT_B);
+  });
+});
+
+describe('buildSetRegularKey', () => {
+  it('sets a new regular key', () => {
+    const tx = buildSetRegularKey({
+      account: ACCOUNT_A,
+      regularKey: ACCOUNT_B,
+    });
+    expect(tx.TransactionType).toBe('SetRegularKey');
+    expect(tx.Account).toBe(ACCOUNT_A);
+    expect(tx.RegularKey).toBe(ACCOUNT_B);
+  });
+
+  it('clears the regular key when null is passed (omits RegularKey field)', () => {
+    const tx = buildSetRegularKey({
+      account: ACCOUNT_A,
+      regularKey: null,
+    });
+    expect(tx.TransactionType).toBe('SetRegularKey');
+    expect(tx.RegularKey).toBeUndefined();
+  });
+
+  it('round-trips through encode/decode (set)', () => {
+    const tx = buildSetRegularKey({
+      account: ACCOUNT_A,
+      regularKey: ACCOUNT_B,
+    });
+    const rt = roundTrip(tx);
+    expect(rt.RegularKey).toBe(ACCOUNT_B);
   });
 });
