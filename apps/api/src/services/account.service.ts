@@ -50,7 +50,12 @@ export interface AccountView {
 
 export class AccountServiceError extends Error {
   constructor(
-    public readonly code: 'faucet_failed' | 'faucet_bad_response' | 'not_found' | 'db_conflict',
+    public readonly code:
+      | 'faucet_failed'
+      | 'faucet_bad_response'
+      | 'faucet_zero_balance'
+      | 'not_found'
+      | 'db_conflict',
     message: string,
   ) {
     super(message);
@@ -95,8 +100,13 @@ export async function createAccount(input: CreateAccountInput): Promise<AccountV
     });
 
     if (!response.ok) {
-      const bodyText = await response.text().catch(() => '');
-      log.error({ status: response.status, body: bodyText }, 'faucet non-200');
+      // Deliberately do NOT log the response body — faucet error responses
+      // can include the requested destination address (i.e. our just-generated
+      // address). The status code is enough to triage; the address pollutes
+      // logs with PII without aiding diagnosis.
+      log.error({ status: response.status }, 'faucet non-200');
+      // Drain the body so the connection can be reused, but discard it.
+      await response.text().catch(() => '');
       throw new AccountServiceError('faucet_failed', `Faucet returned ${response.status}`);
     }
 
@@ -114,12 +124,23 @@ export async function createAccount(input: CreateAccountInput): Promise<AccountV
       );
     }
 
+    // Validate the faucet actually credited the account. A 200 with balance=0
+    // (or no balance field at all) means the faucet thinks it funded us but
+    // the destination has no XRP — we'd persist isFunded=true incorrectly and
+    // every later transaction would fail with tecINSUFFICIENT_RESERVE. Treat
+    // it as a faucet failure so the caller can retry.
+    if (typeof body.balance !== 'number' || body.balance <= 0) {
+      log.error({ balance: body.balance }, 'faucet returned non-positive balance');
+      throw new AccountServiceError(
+        'faucet_zero_balance',
+        'Faucet returned a non-positive balance',
+      );
+    }
+
     isFunded = true;
     // Faucet returns balance in XRP. Store as drops-string for consistency
     // with reserve_balance elsewhere. 1 XRP = 1_000_000 drops.
-    if (typeof body.balance === 'number') {
-      reserveBalance = String(Math.round(body.balance * 1_000_000));
-    }
+    reserveBalance = String(Math.round(body.balance * 1_000_000));
     log.info({ address, balance: body.balance }, 'faucet funded');
   } catch (err) {
     if (err instanceof AccountServiceError) throw err;

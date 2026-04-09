@@ -44,7 +44,11 @@ accounts.post('/', zValidator('json', createAccountSchema), async (c) => {
     );
   } catch (err) {
     if (err instanceof AccountServiceError) {
-      if (err.code === 'faucet_failed' || err.code === 'faucet_bad_response') {
+      if (
+        err.code === 'faucet_failed' ||
+        err.code === 'faucet_bad_response' ||
+        err.code === 'faucet_zero_balance'
+      ) {
         return c.json({ error: 'Failed to fund account from testnet faucet' }, 503);
       }
       if (err.code === 'db_conflict') {
