@@ -7,13 +7,13 @@
 // wires its BullMQ worker to the shared Redis. On SIGTERM/SIGINT we close
 // everything gracefully so in-flight jobs finish before the process exits.
 
-import { Redis } from "ioredis";
-import { startTxConfirmWorker } from "./jobs/txConfirmer.ts";
-import { startTxSubmitWorker } from "./jobs/txSubmitter.ts";
-import { logger } from "./logger.ts";
-import { disconnectWorker, getSigner } from "./queues.ts";
+import { Redis } from 'ioredis';
+import { startTxConfirmWorker } from './jobs/txConfirmer.ts';
+import { startTxSubmitWorker } from './jobs/txSubmitter.ts';
+import { logger } from './logger.ts';
+import { disconnectWorker, getSigner } from './queues.ts';
 
-const redisUrl = process.env.REDIS_URL ?? "redis://localhost:6379";
+const redisUrl = process.env.REDIS_URL ?? 'redis://localhost:6379';
 const workerRedis = new Redis(redisUrl, {
   maxRetriesPerRequest: null,
 });
@@ -53,27 +53,23 @@ if (treasurySeed) {
     // address means we can't verify the seed decodes to the account the
     // operator thinks it does. Silent mismatch would route funding
     // payments from the wrong account.
-    throw new Error(
-      "TREASURY_SEED is set but TREASURY_ADDRESS is not — refusing to start",
-    );
+    throw new Error('TREASURY_SEED is set but TREASURY_ADDRESS is not — refusing to start');
   }
   try {
     await getSigner().loadKey(treasuryAddress, treasurySeed);
-    logger.info({ treasuryAddress }, "treasury wallet loaded into signer");
+    logger.info({ treasuryAddress }, 'treasury wallet loaded into signer');
   } catch (err) {
     // loadKey throws SignerError('no_key') on address mismatch — see
     // DevSigner.loadKey. Re-throw without the original message (it's
     // already sanitized) so startup fails loudly.
-    logger.error({ err }, "treasury wallet load failed");
-    throw new Error(
-      "treasury wallet load failed — check TREASURY_SEED/TREASURY_ADDRESS",
-    );
+    logger.error({ err }, 'treasury wallet load failed');
+    throw new Error('treasury wallet load failed — check TREASURY_SEED/TREASURY_ADDRESS');
   }
 } else {
   // Starting without a treasury is allowed (for the non-custodial path
   // or for test environments that don't create accounts via the API),
   // but we log it so operators don't wonder why createAccount is 503ing.
-  logger.warn("TREASURY_SEED not set — account creation via the API will fail");
+  logger.warn('TREASURY_SEED not set — account creation via the API will fail');
 }
 
 const txSubmitWorker = startTxSubmitWorker(workerRedis);
@@ -81,21 +77,21 @@ const txConfirmWorker = startTxConfirmWorker(workerRedis);
 
 logger.info(
   {
-    queues: ["tx-submit", "tx-confirm"],
+    queues: ['tx-submit', 'tx-confirm'],
     redis: redisUrl,
-    network: process.env.XRPL_NETWORK ?? "testnet",
+    network: process.env.XRPL_NETWORK ?? 'testnet',
     treasuryLoaded: !!treasurySeed,
   },
-  "railforge-worker started",
+  'railforge-worker started',
 );
 
 async function shutdown(signal: string): Promise<void> {
-  logger.info({ signal }, "railforge-worker shutting down");
+  logger.info({ signal }, 'railforge-worker shutting down');
   await Promise.all([txSubmitWorker.close(), txConfirmWorker.close()]);
   await disconnectWorker();
   await workerRedis.quit();
   process.exit(0);
 }
 
-process.on("SIGTERM", () => void shutdown("SIGTERM"));
-process.on("SIGINT", () => void shutdown("SIGINT"));
+process.on('SIGTERM', () => void shutdown('SIGTERM'));
+process.on('SIGINT', () => void shutdown('SIGINT'));

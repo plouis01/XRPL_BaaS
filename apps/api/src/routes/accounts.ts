@@ -14,21 +14,17 @@
 // a funding_tx_id. Clients poll GET /v1/accounts/:address to observe the
 // flip once the treasury payment validates (~4s under normal load).
 
-import { zValidator } from "@hono/zod-validator";
-import { Hono } from "hono";
-import {
-  AccountServiceError,
-  createAccount,
-  getAccount,
-} from "../services/account.service.ts";
-import type { AppEnv } from "../types.ts";
-import { createAccountSchema } from "../validators/schemas.ts";
+import { zValidator } from '@hono/zod-validator';
+import { Hono } from 'hono';
+import { AccountServiceError, createAccount, getAccount } from '../services/account.service.ts';
+import type { AppEnv } from '../types.ts';
+import { createAccountSchema } from '../validators/schemas.ts';
 
 const accounts = new Hono<AppEnv>();
 
-accounts.post("/", zValidator("json", createAccountSchema), async (c) => {
-  const clientId = c.get("clientId");
-  const body = c.req.valid("json");
+accounts.post('/', zValidator('json', createAccountSchema), async (c) => {
+  const clientId = c.get('clientId');
+  const body = c.req.valid('json');
 
   try {
     const account = await createAccount({
@@ -53,39 +49,33 @@ accounts.post("/", zValidator("json", createAccountSchema), async (c) => {
     );
   } catch (err) {
     if (err instanceof AccountServiceError) {
-      if (err.code === "treasury_not_configured") {
+      if (err.code === 'treasury_not_configured') {
         // 503: the server is temporarily unable to service the request
         // because its treasury isn't configured. This is an operator
         // problem, not a client problem, so we don't surface details.
-        return c.json(
-          { error: "Account creation is currently unavailable" },
-          503,
-        );
+        return c.json({ error: 'Account creation is currently unavailable' }, 503);
       }
-      if (err.code === "enqueue_failed") {
+      if (err.code === 'enqueue_failed') {
         // 503: the DB row exists but we couldn't queue the funding tx.
         // The client should retry; the orphaned account row will be
         // cleaned up by a future reconciliation job.
-        return c.json(
-          { error: "Failed to enqueue account funding — please retry" },
-          503,
-        );
+        return c.json({ error: 'Failed to enqueue account funding — please retry' }, 503);
       }
-      if (err.code === "db_conflict") {
-        return c.json({ error: "Address collision — please retry" }, 409);
+      if (err.code === 'db_conflict') {
+        return c.json({ error: 'Address collision — please retry' }, 409);
       }
     }
     throw err; // let the global error handler deal with unexpected failures
   }
 });
 
-accounts.get("/:address", async (c) => {
-  const clientId = c.get("clientId");
-  const address = c.req.param("address");
+accounts.get('/:address', async (c) => {
+  const clientId = c.get('clientId');
+  const address = c.req.param('address');
 
   const account = await getAccount(clientId, address);
   if (!account) {
-    return c.json({ error: "Account not found" }, 404);
+    return c.json({ error: 'Account not found' }, 404);
   }
 
   return c.json({
@@ -102,12 +92,8 @@ accounts.get("/:address", async (c) => {
 });
 
 // TODO Sprint 2: multi-sign, rotate-key, delete
-accounts.put("/:address/signers", (c) =>
-  c.json({ error: "not implemented" }, 501),
-);
-accounts.delete("/:address", (c) => c.json({ error: "not implemented" }, 501));
-accounts.post("/:address/rotate-key", (c) =>
-  c.json({ error: "not implemented" }, 501),
-);
+accounts.put('/:address/signers', (c) => c.json({ error: 'not implemented' }, 501));
+accounts.delete('/:address', (c) => c.json({ error: 'not implemented' }, 501));
+accounts.post('/:address/rotate-key', (c) => c.json({ error: 'not implemented' }, 501));
 
 export default accounts;

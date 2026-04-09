@@ -24,17 +24,15 @@
 // Run with:
 //   RAILFORGE_TEST_NETWORK=testnet bun run --filter @railforge/worker test:integration
 
-import { db, eq, schema } from "@railforge/db";
-import { buildXrpPayment } from "@railforge/xrpl-core";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { Wallet } from "xrpl";
-import { disconnectWorker, getSigner, getXrplPool } from "../queues.ts";
-import type { TxSubmitJobData } from "../queues.ts";
-import { processTxSubmitJob } from "./txSubmitter.ts";
+import { db, eq, schema } from '@railforge/db';
+import { buildXrpPayment } from '@railforge/xrpl-core';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { Wallet } from 'xrpl';
+import { disconnectWorker, getSigner, getXrplPool } from '../queues.ts';
+import type { TxSubmitJobData } from '../queues.ts';
+import { processTxSubmitJob } from './txSubmitter.ts';
 
-const SHOULD_RUN =
-  process.env.RAILFORGE_TEST_NETWORK === "testnet" &&
-  !!process.env.DATABASE_URL;
+const SHOULD_RUN = process.env.RAILFORGE_TEST_NETWORK === 'testnet' && !!process.env.DATABASE_URL;
 const describeOrSkip = SHOULD_RUN ? describe : describe.skip;
 
 // Disposable test state. Cleaned up in afterAll.
@@ -43,16 +41,16 @@ let treasuryWallet: Wallet;
 let destAccountId: string;
 let testTxId: string;
 
-describeOrSkip("treasury-funded account creation (testnet + real DB)", () => {
+describeOrSkip('treasury-funded account creation (testnet + real DB)', () => {
   beforeAll(async () => {
     // 1. Create a disposable client row.
     const suffix = Math.random().toString(36).slice(2, 10);
     const inserted = await db
       .insert(schema.clients)
       .values({
-        name: "treasury-integration-test",
+        name: 'treasury-integration-test',
         email: `treasury-${suffix}@test.local`,
-        plan: "free",
+        plan: 'free',
       })
       .returning({ id: schema.clients.id });
     testClientId = inserted[0]!.id;
@@ -62,13 +60,10 @@ describeOrSkip("treasury-funded account creation (testnet + real DB)", () => {
     // CI we mint one per run so the test is hermetic and doesn't depend on
     // a stable secret. The faucet gives us 1000 XRP — plenty to fund many
     // accounts in a single test run.
-    const faucetRes = await fetch(
-      "https://faucet.altnet.rippletest.net/accounts",
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-      },
-    );
+    const faucetRes = await fetch('https://faucet.altnet.rippletest.net/accounts', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+    });
     if (!faucetRes.ok) {
       throw new Error(`treasury faucet failed: ${faucetRes.status}`);
     }
@@ -77,7 +72,7 @@ describeOrSkip("treasury-funded account creation (testnet + real DB)", () => {
       seed?: string;
     };
     const seed = faucetBody.account.secret ?? faucetBody.seed;
-    if (!seed) throw new Error("faucet returned no seed for treasury");
+    if (!seed) throw new Error('faucet returned no seed for treasury');
     treasuryWallet = Wallet.fromSeed(seed);
 
     // 3. Wait for the treasury account to land on-ledger. The faucet
@@ -89,9 +84,9 @@ describeOrSkip("treasury-funded account creation (testnet + real DB)", () => {
     for (let i = 0; i < 15; i++) {
       try {
         await xrplClient.request({
-          command: "account_info",
+          command: 'account_info',
           account: treasuryWallet.classicAddress,
-          ledger_index: "current",
+          ledger_index: 'current',
         });
         funded = true;
         break;
@@ -99,7 +94,7 @@ describeOrSkip("treasury-funded account creation (testnet + real DB)", () => {
         await new Promise((r) => setTimeout(r, 2000));
       }
     }
-    if (!funded) throw new Error("treasury account never appeared on-ledger");
+    if (!funded) throw new Error('treasury account never appeared on-ledger');
 
     // 4. Load the treasury into the worker's signer via the same path the
     // worker bootstrap uses (signer.loadKey). This is the bit that
@@ -121,13 +116,13 @@ describeOrSkip("treasury-funded account creation (testnet + real DB)", () => {
       .values({
         clientId: testClientId,
         idempotencyKey: `treasury-${suffix}`,
-        txType: "Payment",
+        txType: 'Payment',
         sourceAddress: treasuryWallet.classicAddress,
-        status: "queued",
+        status: 'queued',
         requestBody: {
-          purpose: "account_funding",
+          purpose: 'account_funding',
           destination: destWallet.classicAddress,
-          amountDrops: "20000000",
+          amountDrops: '20000000',
         },
       })
       .returning({ id: schema.transactions.id });
@@ -141,9 +136,9 @@ describeOrSkip("treasury-funded account creation (testnet + real DB)", () => {
         // The destination's seed — what account.service would persist.
         // Not used in this test but the schema requires it (NOT NULL).
         masterKeyRef: destWallet.seed as string,
-        custodyMode: "semi",
+        custodyMode: 'semi',
         isFunded: false,
-        reserveBalance: "0",
+        reserveBalance: '0',
         fundingTxId: testTxId,
       })
       .returning({ id: schema.accounts.id });
@@ -171,11 +166,11 @@ describeOrSkip("treasury-funded account creation (testnet + real DB)", () => {
         .catch(() => {});
     }
     await disconnectWorker().catch(() => {});
-    const { disconnectDb } = await import("@railforge/db");
+    const { disconnectDb } = await import('@railforge/db');
     await disconnectDb().catch(() => {});
   }, 30_000);
 
-  it("treasury Payment funds a new account on-ledger end-to-end", async () => {
+  it('treasury Payment funds a new account on-ledger end-to-end', async () => {
     // Re-derive the destination address from the inserted account row so
     // we don't depend on closed-over state from beforeAll.
     const acctRows = await db
@@ -189,7 +184,7 @@ describeOrSkip("treasury-funded account creation (testnet + real DB)", () => {
     const txJson = buildXrpPayment({
       account: treasuryWallet.classicAddress,
       destination: destAddress,
-      amountDrops: "20000000",
+      amountDrops: '20000000',
     });
 
     const jobData: TxSubmitJobData = {
@@ -203,7 +198,7 @@ describeOrSkip("treasury-funded account creation (testnet + real DB)", () => {
     // submits to rippled, and updates the transactions row.
     await processTxSubmitJob({
       data: jobData,
-      id: "treasury-integration-1",
+      id: 'treasury-integration-1',
       // biome-ignore lint/suspicious/noExplicitAny: minimal Job stub
     } as any);
 
@@ -222,8 +217,8 @@ describeOrSkip("treasury-funded account creation (testnet + real DB)", () => {
       .limit(1);
     const txRow = txRows[0];
     expect(txRow).toBeDefined();
-    expect(txRow?.status).not.toBe("queued");
-    expect(txRow?.resultCode).toBe("tesSUCCESS");
+    expect(txRow?.status).not.toBe('queued');
+    expect(txRow?.resultCode).toBe('tesSUCCESS');
     expect(txRow?.txHash).toMatch(/^[A-F0-9]{64}$/);
 
     // Most important assertion: the destination account should now exist
@@ -235,9 +230,9 @@ describeOrSkip("treasury-funded account creation (testnet + real DB)", () => {
     for (let i = 0; i < 15; i++) {
       try {
         const info = (await xrplClient.request({
-          command: "account_info",
+          command: 'account_info',
           account: destAddress,
-          ledger_index: "validated",
+          ledger_index: 'validated',
         })) as { result: { account_data: { Balance: string } } };
         onLedgerBalance = info.result.account_data.Balance;
         break;
@@ -251,6 +246,6 @@ describeOrSkip("treasury-funded account creation (testnet + real DB)", () => {
     // deduction on the destination side: 0 (the destination only
     // receives — fees are paid by the sender). So balance should be
     // exactly 20_000_000.
-    expect(onLedgerBalance).toBe("20000000");
+    expect(onLedgerBalance).toBe('20000000');
   }, 90_000);
 });

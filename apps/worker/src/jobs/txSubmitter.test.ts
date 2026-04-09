@@ -16,20 +16,19 @@
 //      loadKey is called and the job continues
 //   7. ledger_current failure → sequencer.invalidate() called + retry
 
-import type { Job } from "bullmq";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { TxSubmitJobData } from "../queues.ts";
+import type { Job } from 'bullmq';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { TxSubmitJobData } from '../queues.ts';
 
 // ── Mocks ───────────────────────────────────────────────────────────────────
 
 // DB mock — chain ends in .where() which records the update payload. The
 // select() chain is for the cold-start seed lookup added in task 50.
-const dbUpdateCalls: Array<{ table: unknown; set: unknown; where: unknown }> =
-  [];
+const dbUpdateCalls: Array<{ table: unknown; set: unknown; where: unknown }> = [];
 const dbSelectResult = {
   current: [] as Array<{ masterKeyRef: string }>,
 };
-vi.mock("@railforge/db", () => {
+vi.mock('@railforge/db', () => {
   const update = vi.fn((table: unknown) => ({
     set: vi.fn((payload: unknown) => ({
       where: vi.fn((cond: unknown) => {
@@ -48,8 +47,8 @@ vi.mock("@railforge/db", () => {
   return {
     db: { update, select },
     schema: {
-      transactions: { id: "id" },
-      accounts: { address: "address", masterKeyRef: "masterKeyRef" },
+      transactions: { id: 'id' },
+      accounts: { address: 'address', masterKeyRef: 'masterKeyRef' },
     },
     eq: vi.fn((col: unknown, val: unknown) => ({ col, val })),
   };
@@ -67,8 +66,8 @@ const stubs = {
   confirmQueueAdd: vi.fn(),
 };
 
-vi.mock("../queues.ts", () => ({
-  TX_SUBMIT_QUEUE: "railforge-tx-submit",
+vi.mock('../queues.ts', () => ({
+  TX_SUBMIT_QUEUE: 'railforge-tx-submit',
   getSequencer: async () => ({
     getNextSequence: stubs.sequencerNext,
     invalidate: stubs.sequencerInvalidate,
@@ -87,30 +86,30 @@ vi.mock("../queues.ts", () => ({
 }));
 
 // Import AFTER the mocks are registered.
-const { processTxSubmitJob } = await import("./txSubmitter.ts");
+const { processTxSubmitJob } = await import('./txSubmitter.ts');
 
 // ── Test helpers ────────────────────────────────────────────────────────────
 
 function makeJob(data: TxSubmitJobData): Job<TxSubmitJobData> {
-  return { data, id: "job-1" } as unknown as Job<TxSubmitJobData>;
+  return { data, id: 'job-1' } as unknown as Job<TxSubmitJobData>;
 }
 
 function baseJobData(): TxSubmitJobData {
   return {
-    txId: "tx-uuid-1",
-    sourceAddress: "rSource00000000000000000000000000",
+    txId: 'tx-uuid-1',
+    sourceAddress: 'rSource00000000000000000000000000',
     txJson: {
-      TransactionType: "Payment",
-      Account: "rSource00000000000000000000000000",
-      Destination: "rDest0000000000000000000000000000",
-      Amount: "1000000",
+      TransactionType: 'Payment',
+      Account: 'rSource00000000000000000000000000',
+      Destination: 'rDest0000000000000000000000000000',
+      Amount: '1000000',
     },
   };
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────────
 
-describe("processTxSubmitJob", () => {
+describe('processTxSubmitJob', () => {
   beforeEach(() => {
     dbUpdateCalls.length = 0;
     dbSelectResult.current = [];
@@ -120,15 +119,15 @@ describe("processTxSubmitJob", () => {
     stubs.signerHasKey.mockResolvedValue(true);
     stubs.signerLoadKey.mockResolvedValue(undefined);
     stubs.signerSign.mockResolvedValue({
-      tx_blob: "DEADBEEF",
-      hash: "ABC123",
+      tx_blob: 'DEADBEEF',
+      hash: 'ABC123',
     });
     stubs.clientRequest.mockImplementation(async (req: { command: string }) => {
-      if (req.command === "ledger_current") {
+      if (req.command === 'ledger_current') {
         return { result: { ledger_current_index: 100 } };
       }
-      if (req.command === "submit") {
-        return { result: { engine_result: "tesSUCCESS" } };
+      if (req.command === 'submit') {
+        return { result: { engine_result: 'tesSUCCESS' } };
       }
       throw new Error(`unexpected command ${req.command}`);
     });
@@ -139,13 +138,11 @@ describe("processTxSubmitJob", () => {
     vi.clearAllMocks();
   });
 
-  it("happy path: fetches sequence, signs, submits, updates DB, enqueues confirmation", async () => {
+  it('happy path: fetches sequence, signs, submits, updates DB, enqueues confirmation', async () => {
     await processTxSubmitJob(makeJob(baseJobData()));
 
     // Sequencer consulted exactly once.
-    expect(stubs.sequencerNext).toHaveBeenCalledWith(
-      "rSource00000000000000000000000000",
-    );
+    expect(stubs.sequencerNext).toHaveBeenCalledWith('rSource00000000000000000000000000');
     expect(stubs.sequencerNext).toHaveBeenCalledTimes(1);
 
     // Sequencer NOT invalidated on success.
@@ -154,43 +151,41 @@ describe("processTxSubmitJob", () => {
     // Signer called with Sequence/LastLedgerSequence/Fee filled in.
     expect(stubs.signerSign).toHaveBeenCalledTimes(1);
     const signArgs = stubs.signerSign.mock.calls[0]!;
-    expect(signArgs[0]).toBe("rSource00000000000000000000000000");
+    expect(signArgs[0]).toBe('rSource00000000000000000000000000');
     const signedTx = signArgs[1];
     expect(signedTx.Sequence).toBe(42);
     expect(signedTx.LastLedgerSequence).toBe(120); // 100 + LAST_LEDGER_OFFSET(20)
-    expect(signedTx.Fee).toBe("12"); // DEFAULT_FEE_DROPS
+    expect(signedTx.Fee).toBe('12'); // DEFAULT_FEE_DROPS
 
     // Submit called with the signed blob.
-    const submitCall = stubs.clientRequest.mock.calls.find(
-      (c) => c[0].command === "submit",
-    );
-    expect(submitCall?.[0]).toEqual({ command: "submit", tx_blob: "DEADBEEF" });
+    const submitCall = stubs.clientRequest.mock.calls.find((c) => c[0].command === 'submit');
+    expect(submitCall?.[0]).toEqual({ command: 'submit', tx_blob: 'DEADBEEF' });
 
     // DB updated with submitted status + hash. The signed blob is
     // INTENTIONALLY not persisted — the hash alone is enough to look up
     // the tx on-ledger and the blob is signature material we don't keep.
     expect(dbUpdateCalls).toHaveLength(1);
     const update = dbUpdateCalls[0]!.set as Record<string, unknown>;
-    expect(update.status).toBe("submitted");
-    expect(update.txHash).toBe("ABC123");
+    expect(update.status).toBe('submitted');
+    expect(update.txHash).toBe('ABC123');
     expect(update.txBlob).toBeUndefined();
-    expect(update.resultCode).toBe("tesSUCCESS");
-    expect(update.feeDrops).toBe("12");
+    expect(update.resultCode).toBe('tesSUCCESS');
+    expect(update.feeDrops).toBe('12');
     expect(update.submittedAt).toBeInstanceOf(Date);
     expect(update.errorMessage).toBeUndefined();
 
     // Confirmation enqueued with the correct horizon.
     expect(stubs.confirmQueueAdd).toHaveBeenCalledTimes(1);
     const confirmArgs = stubs.confirmQueueAdd.mock.calls[0]!;
-    expect(confirmArgs[0]).toBe("confirm");
+    expect(confirmArgs[0]).toBe('confirm');
     expect(confirmArgs[1]).toEqual({
-      txId: "tx-uuid-1",
-      txHash: "ABC123",
+      txId: 'tx-uuid-1',
+      txHash: 'ABC123',
       lastLedger: 120,
     });
   });
 
-  it("signer missing key AND no master_key_ref in DB: marks failed pre-submit, does NOT touch sequencer", async () => {
+  it('signer missing key AND no master_key_ref in DB: marks failed pre-submit, does NOT touch sequencer', async () => {
     stubs.signerHasKey.mockResolvedValue(false);
     dbSelectResult.current = []; // no row in accounts for this address
 
@@ -207,11 +202,11 @@ describe("processTxSubmitJob", () => {
     // DB updated with failed status and a generic error code.
     expect(dbUpdateCalls).toHaveLength(1);
     const update = dbUpdateCalls[0]!.set as Record<string, unknown>;
-    expect(update.status).toBe("failed");
-    expect(update.resultCode).toBe("SIGNER_NO_KEY");
+    expect(update.status).toBe('failed');
+    expect(update.resultCode).toBe('SIGNER_NO_KEY');
   });
 
-  it("cold-start lazy load: signer hasKey=false but DB has master_key_ref → loadKey called and pipeline continues", async () => {
+  it('cold-start lazy load: signer hasKey=false but DB has master_key_ref → loadKey called and pipeline continues', async () => {
     // Simulate a worker process that just booted: the in-memory signer
     // has no wallets, but the DB has the seed from when the API created
     // the account. Without task 50's fix, every first submission for an
@@ -222,29 +217,29 @@ describe("processTxSubmitJob", () => {
     stubs.signerLoadKey.mockImplementation(async () => {
       loaded = true;
     });
-    dbSelectResult.current = [{ masterKeyRef: "sFAKE_SEED_PLACEHOLDER" }];
+    dbSelectResult.current = [{ masterKeyRef: 'sFAKE_SEED_PLACEHOLDER' }];
 
     await processTxSubmitJob(makeJob(baseJobData()));
 
     // loadKey was called with the address + the persisted ref.
     expect(stubs.signerLoadKey).toHaveBeenCalledWith(
-      "rSource00000000000000000000000000",
-      "sFAKE_SEED_PLACEHOLDER",
+      'rSource00000000000000000000000000',
+      'sFAKE_SEED_PLACEHOLDER',
     );
 
     // Pipeline proceeded all the way to sign + submit + DB update.
     expect(stubs.signerSign).toHaveBeenCalledTimes(1);
     expect(stubs.confirmQueueAdd).toHaveBeenCalledTimes(1);
     const update = dbUpdateCalls[0]!.set as Record<string, unknown>;
-    expect(update.status).toBe("submitted");
+    expect(update.status).toBe('submitted');
   });
 
-  it("loadKey throws but signer still has no key: marks failed without consuming sequence", async () => {
+  it('loadKey throws but signer still has no key: marks failed without consuming sequence', async () => {
     stubs.signerHasKey.mockResolvedValue(false);
     stubs.signerLoadKey.mockRejectedValue(
-      new Error("master_key_ref does not derive to the requested address"),
+      new Error('master_key_ref does not derive to the requested address'),
     );
-    dbSelectResult.current = [{ masterKeyRef: "sCORRUPTED" }];
+    dbSelectResult.current = [{ masterKeyRef: 'sCORRUPTED' }];
 
     await processTxSubmitJob(makeJob(baseJobData()));
 
@@ -255,44 +250,38 @@ describe("processTxSubmitJob", () => {
     expect(stubs.sequencerInvalidate).not.toHaveBeenCalled();
     // Row marked failed.
     const update = dbUpdateCalls[0]!.set as Record<string, unknown>;
-    expect(update.status).toBe("failed");
-    expect(update.resultCode).toBe("SIGNER_NO_KEY");
+    expect(update.status).toBe('failed');
+    expect(update.resultCode).toBe('SIGNER_NO_KEY');
   });
 
-  it("tefPAST_SEQ: invalidates sequencer and marks failed", async () => {
+  it('tefPAST_SEQ: invalidates sequencer and marks failed', async () => {
     stubs.clientRequest.mockImplementation(async (req: { command: string }) => {
-      if (req.command === "ledger_current")
-        return { result: { ledger_current_index: 100 } };
-      if (req.command === "submit")
-        return { result: { engine_result: "tefPAST_SEQ" } };
-      throw new Error("unexpected");
+      if (req.command === 'ledger_current') return { result: { ledger_current_index: 100 } };
+      if (req.command === 'submit') return { result: { engine_result: 'tefPAST_SEQ' } };
+      throw new Error('unexpected');
     });
 
     await processTxSubmitJob(makeJob(baseJobData()));
 
     // Sequencer invalidated — closes PLAN.md §9.2 #3.
-    expect(stubs.sequencerInvalidate).toHaveBeenCalledWith(
-      "rSource00000000000000000000000000",
-    );
+    expect(stubs.sequencerInvalidate).toHaveBeenCalledWith('rSource00000000000000000000000000');
     expect(stubs.sequencerInvalidate).toHaveBeenCalledTimes(1);
 
     // DB row marked failed with the engine result code.
     const update = dbUpdateCalls[0]!.set as Record<string, unknown>;
-    expect(update.status).toBe("failed");
-    expect(update.resultCode).toBe("tefPAST_SEQ");
+    expect(update.status).toBe('failed');
+    expect(update.resultCode).toBe('tefPAST_SEQ');
     expect(update.errorMessage).toMatch(/tefPAST_SEQ/);
 
     // Confirmation NOT enqueued (tx never accepted).
     expect(stubs.confirmQueueAdd).not.toHaveBeenCalled();
   });
 
-  it("terPRE_SEQ: also invalidates sequencer (sequence gap)", async () => {
+  it('terPRE_SEQ: also invalidates sequencer (sequence gap)', async () => {
     stubs.clientRequest.mockImplementation(async (req: { command: string }) => {
-      if (req.command === "ledger_current")
-        return { result: { ledger_current_index: 100 } };
-      if (req.command === "submit")
-        return { result: { engine_result: "terPRE_SEQ" } };
-      throw new Error("unexpected");
+      if (req.command === 'ledger_current') return { result: { ledger_current_index: 100 } };
+      if (req.command === 'submit') return { result: { engine_result: 'terPRE_SEQ' } };
+      throw new Error('unexpected');
     });
 
     await processTxSubmitJob(makeJob(baseJobData()));
@@ -300,38 +289,34 @@ describe("processTxSubmitJob", () => {
     expect(stubs.sequencerInvalidate).toHaveBeenCalledTimes(1);
   });
 
-  it("non-sequence tec error: marks failed but does NOT invalidate sequencer", async () => {
+  it('non-sequence tec error: marks failed but does NOT invalidate sequencer', async () => {
     // tecUNFUNDED_PAYMENT is a tx failure but NOT a sequence problem —
     // the sequence was consumed, cache is correct, no invalidation needed.
     stubs.clientRequest.mockImplementation(async (req: { command: string }) => {
-      if (req.command === "ledger_current")
-        return { result: { ledger_current_index: 100 } };
-      if (req.command === "submit")
-        return { result: { engine_result: "tecUNFUNDED_PAYMENT" } };
-      throw new Error("unexpected");
+      if (req.command === 'ledger_current') return { result: { ledger_current_index: 100 } };
+      if (req.command === 'submit') return { result: { engine_result: 'tecUNFUNDED_PAYMENT' } };
+      throw new Error('unexpected');
     });
 
     await processTxSubmitJob(makeJob(baseJobData()));
 
     expect(stubs.sequencerInvalidate).not.toHaveBeenCalled();
     const update = dbUpdateCalls[0]!.set as Record<string, unknown>;
-    expect(update.status).toBe("failed");
-    expect(update.resultCode).toBe("tecUNFUNDED_PAYMENT");
+    expect(update.status).toBe('failed');
+    expect(update.resultCode).toBe('tecUNFUNDED_PAYMENT');
   });
 
-  it("ledger_current failure: invalidates sequencer (rolls back consumed seq) and rethrows", async () => {
+  it('ledger_current failure: invalidates sequencer (rolls back consumed seq) and rethrows', async () => {
     // ledger_current is fetched AFTER getNextSequence, so a failure here
     // means the cache has been advanced but no tx will be sent. Without
     // task 54's fix the cache would stay advanced and the next submission
     // for this address would fail with terPRE_SEQ.
     stubs.clientRequest.mockImplementation(async (req: { command: string }) => {
-      if (req.command === "ledger_current") throw new Error("ECONNREFUSED");
+      if (req.command === 'ledger_current') throw new Error('ECONNREFUSED');
       throw new Error(`unexpected command ${req.command}`);
     });
 
-    await expect(processTxSubmitJob(makeJob(baseJobData()))).rejects.toThrow(
-      /ECONNREFUSED/,
-    );
+    await expect(processTxSubmitJob(makeJob(baseJobData()))).rejects.toThrow(/ECONNREFUSED/);
 
     // Sequencer was consulted (the cache advanced), then invalidated.
     expect(stubs.sequencerNext).toHaveBeenCalledTimes(1);
@@ -342,42 +327,36 @@ describe("processTxSubmitJob", () => {
 
     // DB row marked failed with NETWORK_ERROR.
     const update = dbUpdateCalls[0]!.set as Record<string, unknown>;
-    expect(update.status).toBe("failed");
-    expect(update.resultCode).toBe("NETWORK_ERROR");
+    expect(update.status).toBe('failed');
+    expect(update.resultCode).toBe('NETWORK_ERROR');
   });
 
-  it("sign failure: invalidates sequencer (rolls back consumed seq) and rethrows", async () => {
+  it('sign failure: invalidates sequencer (rolls back consumed seq) and rethrows', async () => {
     // sign() is called AFTER getNextSequence + ledger_current, so a sign
     // failure also means the cache has been advanced but no tx will be sent.
-    stubs.signerSign.mockRejectedValue(new Error("invalid_tx"));
+    stubs.signerSign.mockRejectedValue(new Error('invalid_tx'));
 
-    await expect(processTxSubmitJob(makeJob(baseJobData()))).rejects.toThrow(
-      /invalid_tx/,
-    );
+    await expect(processTxSubmitJob(makeJob(baseJobData()))).rejects.toThrow(/invalid_tx/);
 
     expect(stubs.sequencerNext).toHaveBeenCalledTimes(1);
     expect(stubs.sequencerInvalidate).toHaveBeenCalledTimes(1);
 
     // submit was never reached.
-    const submitCall = stubs.clientRequest.mock.calls.find(
-      (c) => c[0].command === "submit",
-    );
+    const submitCall = stubs.clientRequest.mock.calls.find((c) => c[0].command === 'submit');
     expect(submitCall).toBeUndefined();
 
     const update = dbUpdateCalls[0]!.set as Record<string, unknown>;
-    expect(update.status).toBe("failed");
-    expect(update.resultCode).toBe("SIGN_FAILED");
+    expect(update.status).toBe('failed');
+    expect(update.resultCode).toBe('SIGN_FAILED');
   });
 
-  it("terQUEUED is NOT a sequence error: cache stays warm", async () => {
+  it('terQUEUED is NOT a sequence error: cache stays warm', async () => {
     // terQUEUED means rippled accepted the tx into its own queue for a
     // future ledger — Sequence is correct, no invalidation needed. Task 55.
     stubs.clientRequest.mockImplementation(async (req: { command: string }) => {
-      if (req.command === "ledger_current")
-        return { result: { ledger_current_index: 100 } };
-      if (req.command === "submit")
-        return { result: { engine_result: "terQUEUED" } };
-      throw new Error("unexpected");
+      if (req.command === 'ledger_current') return { result: { ledger_current_index: 100 } };
+      if (req.command === 'submit') return { result: { engine_result: 'terQUEUED' } };
+      throw new Error('unexpected');
     });
 
     await processTxSubmitJob(makeJob(baseJobData()));
@@ -385,25 +364,22 @@ describe("processTxSubmitJob", () => {
     expect(stubs.sequencerInvalidate).not.toHaveBeenCalled();
   });
 
-  it("network failure during submit: invalidates sequencer and rethrows for BullMQ retry", async () => {
+  it('network failure during submit: invalidates sequencer and rethrows for BullMQ retry', async () => {
     stubs.clientRequest.mockImplementation(async (req: { command: string }) => {
-      if (req.command === "ledger_current")
-        return { result: { ledger_current_index: 100 } };
-      if (req.command === "submit") throw new Error("ECONNREFUSED");
-      throw new Error("unexpected");
+      if (req.command === 'ledger_current') return { result: { ledger_current_index: 100 } };
+      if (req.command === 'submit') throw new Error('ECONNREFUSED');
+      throw new Error('unexpected');
     });
 
-    await expect(processTxSubmitJob(makeJob(baseJobData()))).rejects.toThrow(
-      /ECONNREFUSED/,
-    );
+    await expect(processTxSubmitJob(makeJob(baseJobData()))).rejects.toThrow(/ECONNREFUSED/);
 
     // Sequencer invalidated because we don't know if rippled consumed the seq.
     expect(stubs.sequencerInvalidate).toHaveBeenCalledTimes(1);
 
     // DB row marked failed with NETWORK_ERROR.
     const update = dbUpdateCalls[0]!.set as Record<string, unknown>;
-    expect(update.status).toBe("failed");
-    expect(update.resultCode).toBe("NETWORK_ERROR");
+    expect(update.status).toBe('failed');
+    expect(update.resultCode).toBe('NETWORK_ERROR');
   });
 
   // Note: the "signed tx_blob never appears in logs" invariant is enforced

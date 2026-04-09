@@ -30,22 +30,22 @@
 // `*.seed` and `*.master_key_ref` in both snake_case and camelCase — see
 // packages/logger/src/index.ts.
 
-import { and, db, eq, isNull, schema } from "@railforge/db";
-import { enqueueTxSubmit } from "@railforge/jobs";
-import { buildXrpPayment } from "@railforge/xrpl-core";
-import { Wallet } from "xrpl";
-import { logger } from "../logger.ts";
+import { and, db, eq, isNull, schema } from '@railforge/db';
+import { enqueueTxSubmit } from '@railforge/jobs';
+import { buildXrpPayment } from '@railforge/xrpl-core';
+import { Wallet } from 'xrpl';
+import { logger } from '../logger.ts';
 
 // Amount sent from the treasury to each new account. 20 XRP covers the
 // 10 XRP base reserve with 10 XRP headroom for object reserves (trust
 // lines, signer lists, offers) the account may create later. Sprint 4+
 // will make this configurable per-client plan.
-const FUNDING_AMOUNT_DROPS = "20000000";
+const FUNDING_AMOUNT_DROPS = '20000000';
 
 export interface CreateAccountInput {
   clientId: string;
   label?: string;
-  custodyMode?: "semi" | "non_custodial";
+  custodyMode?: 'semi' | 'non_custodial';
 }
 
 export interface AccountView {
@@ -63,14 +63,14 @@ export interface AccountView {
 export class AccountServiceError extends Error {
   constructor(
     public readonly code:
-      | "treasury_not_configured"
-      | "enqueue_failed"
-      | "not_found"
-      | "db_conflict",
+      | 'treasury_not_configured'
+      | 'enqueue_failed'
+      | 'not_found'
+      | 'db_conflict',
     message: string,
   ) {
     super(message);
-    this.name = "AccountServiceError";
+    this.name = 'AccountServiceError';
   }
 }
 
@@ -85,12 +85,10 @@ export class AccountServiceError extends Error {
  * @throws {AccountServiceError} on treasury misconfiguration, DB conflict,
  *   or enqueue failure
  */
-export async function createAccount(
-  input: CreateAccountInput,
-): Promise<AccountView> {
+export async function createAccount(input: CreateAccountInput): Promise<AccountView> {
   const log = logger.child({
-    service: "account",
-    op: "create",
+    service: 'account',
+    op: 'create',
     clientId: input.clientId,
   });
 
@@ -101,8 +99,8 @@ export async function createAccount(
   const treasuryAddress = process.env.TREASURY_ADDRESS;
   if (!treasuryAddress) {
     throw new AccountServiceError(
-      "treasury_not_configured",
-      "TREASURY_ADDRESS env var is not set — account creation is disabled",
+      'treasury_not_configured',
+      'TREASURY_ADDRESS env var is not set — account creation is disabled',
     );
   }
 
@@ -110,7 +108,7 @@ export async function createAccount(
   // a non-null seed; we assert it for the type system.
   const wallet = Wallet.generate();
   if (!wallet.seed) {
-    throw new Error("Wallet.generate() returned no seed — should never happen");
+    throw new Error('Wallet.generate() returned no seed — should never happen');
   }
   const address = wallet.classicAddress;
 
@@ -145,14 +143,14 @@ export async function createAccount(
         .insert(schema.transactions)
         .values({
           clientId: input.clientId,
-          txType: "Payment",
+          txType: 'Payment',
           sourceAddress: treasuryAddress,
-          status: "queued",
+          status: 'queued',
           // request_body is jsonb NOT NULL. Stash enough context for a
           // debugging operator to understand why this tx exists without
           // having to join other tables.
           requestBody: {
-            purpose: "account_funding",
+            purpose: 'account_funding',
             destination: address,
             amountDrops: FUNDING_AMOUNT_DROPS,
           },
@@ -160,10 +158,7 @@ export async function createAccount(
         .returning({ id: schema.transactions.id });
       const txRow = txInserted[0];
       if (!txRow) {
-        throw new AccountServiceError(
-          "db_conflict",
-          "transactions insert returned no row",
-        );
+        throw new AccountServiceError('db_conflict', 'transactions insert returned no row');
       }
 
       // b. Insert the account row, pre-linked to the funding tx. The
@@ -175,20 +170,17 @@ export async function createAccount(
           address,
           masterKeyRef: wallet.seed as string,
           regularKey: null,
-          custodyMode: input.custodyMode ?? "semi",
+          custodyMode: input.custodyMode ?? 'semi',
           label: input.label ?? null,
           isFunded: false,
-          reserveBalance: "0",
+          reserveBalance: '0',
           fundingTxId: txRow.id,
           metadata: {},
         })
         .returning({ id: schema.accounts.id });
       const acctRow = acctInserted[0];
       if (!acctRow) {
-        throw new AccountServiceError(
-          "db_conflict",
-          "accounts insert returned no row",
-        );
+        throw new AccountServiceError('db_conflict', 'accounts insert returned no row');
       }
 
       return { accountId: acctRow.id, txId: txRow.id };
@@ -202,11 +194,11 @@ export async function createAccount(
     // idempotency key.
     if (
       err &&
-      typeof err === "object" &&
-      "code" in err &&
-      (err as { code: string }).code === "23505"
+      typeof err === 'object' &&
+      'code' in err &&
+      (err as { code: string }).code === '23505'
     ) {
-      throw new AccountServiceError("db_conflict", "Address collision (retry)");
+      throw new AccountServiceError('db_conflict', 'Address collision (retry)');
     }
     throw err;
   }
@@ -226,14 +218,14 @@ export async function createAccount(
       txJson,
     });
   } catch (err) {
-    log.error({ err }, "enqueueTxSubmit failed after DB commit");
+    log.error({ err }, 'enqueueTxSubmit failed after DB commit');
     throw new AccountServiceError(
-      "enqueue_failed",
-      "Failed to enqueue funding transaction — account row exists but is unfunded",
+      'enqueue_failed',
+      'Failed to enqueue funding transaction — account row exists but is unfunded',
     );
   }
 
-  log.info({ address, txId }, "account created, funding enqueued");
+  log.info({ address, txId }, 'account created, funding enqueued');
 
   // 6. Return a redacted view. is_funded is FALSE — the client polls to
   // observe the flip after the worker confirms the payment (~4s).
@@ -241,10 +233,10 @@ export async function createAccount(
     id: accountId,
     address,
     regularKey: null,
-    custodyMode: input.custodyMode ?? "semi",
+    custodyMode: input.custodyMode ?? 'semi',
     label: input.label ?? null,
     isFunded: false,
-    reserveBalance: "0",
+    reserveBalance: '0',
     fundingTxId: txId,
     createdAt: new Date(),
   };
@@ -256,10 +248,7 @@ export async function createAccount(
  * are indistinguishable to the caller, which is intentional (no cross-
  * tenant enumeration).
  */
-export async function getAccount(
-  clientId: string,
-  address: string,
-): Promise<AccountView | null> {
+export async function getAccount(clientId: string, address: string): Promise<AccountView | null> {
   const rows = await db
     .select({
       id: schema.accounts.id,
@@ -292,7 +281,7 @@ export async function getAccount(
     custodyMode: row.custodyMode,
     label: row.label,
     isFunded: row.isFunded ?? false,
-    reserveBalance: row.reserveBalance ?? "0",
+    reserveBalance: row.reserveBalance ?? '0',
     fundingTxId: row.fundingTxId,
     createdAt: row.createdAt,
   };
