@@ -79,6 +79,10 @@ dex.post('/offers', zValidator('json', createOfferSchema), async (c) => {
 dex.delete('/offers/:id', zValidator('json', cancelOfferSchema), async (c) => {
   const clientId = c.get('clientId');
   const body = c.req.valid('json');
+  const urlId = Number(c.req.param('id'));
+  if (Number.isNaN(urlId) || urlId !== body.offer_sequence) {
+    return c.json({ error: 'URL :id must match body offer_sequence' }, 400);
+  }
   try {
     const result = await cancelOffer({
       clientId,
