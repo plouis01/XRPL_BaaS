@@ -1,6 +1,8 @@
 import { useState } from 'react';
 import { BrowserRouter, NavLink, Navigate, Route, Routes } from 'react-router-dom';
 import { ApiKeys } from './pages/ApiKeys.tsx';
+import { Credentials } from './pages/Credentials.tsx';
+import { Domains } from './pages/Domains.tsx';
 import { Transactions } from './pages/Transactions.tsx';
 import type { Network } from './types.ts';
 
@@ -67,7 +69,7 @@ export function App() {
                 API Keys
               </NavLink>
             </li>
-            <li>
+            <li style={{ marginBottom: 8 }}>
               <NavLink
                 to="/transactions"
                 style={({ isActive }) => ({
@@ -79,6 +81,30 @@ export function App() {
                 Transactions
               </NavLink>
             </li>
+            <li style={{ marginBottom: 8 }}>
+              <NavLink
+                to="/credentials"
+                style={({ isActive }) => ({
+                  textDecoration: 'none',
+                  color: isActive ? '#2563eb' : '#334155',
+                  fontWeight: isActive ? 600 : 400,
+                })}
+              >
+                Credentials
+              </NavLink>
+            </li>
+            <li>
+              <NavLink
+                to="/domains"
+                style={({ isActive }) => ({
+                  textDecoration: 'none',
+                  color: isActive ? '#2563eb' : '#334155',
+                  fontWeight: isActive ? 600 : 400,
+                })}
+              >
+                Domains
+              </NavLink>
+            </li>
           </ul>
         </nav>
 
@@ -86,6 +112,8 @@ export function App() {
           <Routes>
             <Route path="/keys" element={<ApiKeys network={network} />} />
             <Route path="/transactions" element={<Transactions network={network} />} />
+            <Route path="/credentials" element={<Credentials network={network} />} />
+            <Route path="/domains" element={<Domains network={network} />} />
             <Route path="*" element={<Navigate to="/keys" replace />} />
           </Routes>
         </main>

@@ -20,3 +20,23 @@ export interface Transaction {
   created_at: string;
   confirmed_at: string | null;
 }
+
+export interface Credential {
+  id: string;
+  issuer_address: string;
+  subject_address: string;
+  credential_type: string;
+  status: string;
+  expires_at: string | null;
+  accepted_at: string | null;
+  created_at: string | null;
+}
+
+export interface Domain {
+  id: string;
+  owner_address: string;
+  domain_id: string;
+  accepted_credentials: Array<{ issuer: string; credential_type: string }>;
+  created_at: string | null;
+  updated_at: string | null;
+}
