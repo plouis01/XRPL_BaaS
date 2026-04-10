@@ -41,8 +41,11 @@ export const auditLog: MiddlewareHandler<AppEnv> = async (c, next) => {
     // Body may not be readable (e.g., already consumed). Skip hash.
   }
 
+  // Same trust order as ipRateLimit.ts: CF-Connecting-IP → XFF → null.
   const ip =
-    c.req.header('x-forwarded-for')?.split(',')[0]?.trim() ?? c.req.header('x-real-ip') ?? null;
+    c.req.header('cf-connecting-ip') ??
+    c.req.header('x-forwarded-for')?.split(',')[0]?.trim() ??
+    null;
 
   // Fire-and-forget — don't await in the response path.
   db.insert(schema.auditLog)

@@ -48,9 +48,10 @@ function safeEqual(a: string, b: string): boolean {
 
 export const auth: MiddlewareHandler<AppEnv> = async (c, next) => {
   const apiKey = c.req.header('x-api-key');
+  // Same trust order as ipRateLimit.ts: CF-Connecting-IP → XFF → unknown.
   const ip =
+    c.req.header('cf-connecting-ip') ??
     c.req.header('x-forwarded-for')?.split(',')[0]?.trim() ??
-    c.req.header('x-real-ip') ??
     'unknown';
 
   if (!apiKey) {
