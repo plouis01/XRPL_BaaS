@@ -2,6 +2,7 @@ import { Hono } from 'hono';
 import { logger } from './logger.ts';
 import { auditLog } from './middleware/auditLog.ts';
 import { auth } from './middleware/auth.ts';
+import { corsMiddleware } from './middleware/cors.ts';
 import { envGuard } from './middleware/envGuard.ts';
 import { errorHandler } from './middleware/errorHandler.ts';
 import { idempotency } from './middleware/idempotency.ts';
@@ -20,6 +21,10 @@ import type { AppEnv } from './types.ts';
 const app = new Hono<AppEnv>();
 
 app.onError(errorHandler);
+
+// CORS — allows dashboard origin (DASHBOARD_ORIGIN env var, defaults to localhost:5173).
+// Applied app-wide so OPTIONS preflight succeeds before auth runs.
+app.use('*', corsMiddleware);
 
 // Public health check
 app.get('/health', (c) => c.json({ status: 'ok' }));
