@@ -181,6 +181,8 @@ export const delegations = pgTable('delegations', {
   delegateAddress: text('delegate_address').notNull(),
   // Array of XLS-75 permission strings
   permissions: text('permissions').array().notNull(),
+  /** Signer weight for this delegate on the signer list. */
+  weight: integer('weight').notNull().default(1),
   status: text('status').notNull().default('active'),
   ledgerIndex: text('ledger_index'),
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),

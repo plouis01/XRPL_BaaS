@@ -73,6 +73,7 @@ async function getActiveDelegations(
     id: string;
     delegateAddress: string;
     permissions: string[];
+    weight: number;
     status: string;
     createdAt: Date | null;
     revokedAt: Date | null;
@@ -83,6 +84,7 @@ async function getActiveDelegations(
       id: schema.delegations.id,
       delegateAddress: schema.delegations.delegateAddress,
       permissions: schema.delegations.permissions,
+      weight: schema.delegations.weight,
       status: schema.delegations.status,
       createdAt: schema.delegations.createdAt,
       revokedAt: schema.delegations.revokedAt,
@@ -156,7 +158,7 @@ export async function grantPermission(
   // Build a new signer list that includes all existing delegates + the new one.
   const signerEntries = existing.map((d) => ({
     address: d.delegateAddress,
-    weight: 1,
+    weight: d.weight,
   }));
   signerEntries.push({ address: input.delegateAddress, weight: input.weight });
 
@@ -199,6 +201,7 @@ export async function grantPermission(
           delegatorAddress: input.delegatorAddress,
           delegateAddress: input.delegateAddress,
           permissions: input.permissions,
+          weight: input.weight,
           status: 'active',
         })
         .returning({ id: schema.delegations.id });
@@ -270,7 +273,7 @@ export async function revokePermission(input: RevokePermissionInput): Promise<{ 
   // Rebuild the signer list without the revoked delegate.
   const remainingSigners = existing
     .filter((d) => d.delegateAddress !== input.delegateAddress)
-    .map((d) => ({ address: d.delegateAddress, weight: 1 }));
+    .map((d) => ({ address: d.delegateAddress, weight: d.weight }));
 
   // If no signers remain, quorum=0 + empty list deletes the signer list.
   const txJson = buildSignerListSet({

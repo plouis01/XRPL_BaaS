@@ -43,6 +43,13 @@
       "when": 1775807854940,
       "tag": "0005_next_lyja",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1775844977460,
+      "tag": "0006_smiling_northstar",
+      "breakpoints": true
     }
   ]
 }
