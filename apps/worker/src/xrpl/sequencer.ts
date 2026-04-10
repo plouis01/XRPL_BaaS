@@ -27,8 +27,9 @@ import type { XrplClientPool } from './client.ts';
 
 const LOCK_TTL_SECONDS = 5;
 const CACHE_TTL_SECONDS = 30;
-const LOCK_RETRY_DELAY_MS = 50;
-const LOCK_MAX_RETRIES = 40; // ~2s total wait
+const LOCK_RETRY_BASE_MS = 50;
+const LOCK_RETRY_MAX_MS = 500;
+const LOCK_MAX_RETRIES = 20; // ~2-3s total with exponential backoff + jitter
 
 // Hard cap on the rippled account_info call. MUST be strictly less than
 // LOCK_TTL_SECONDS so that any in-flight request is guaranteed to either
@@ -113,7 +114,10 @@ export class TxSequencer {
           await this.releaseLock(lockKey, lockToken);
         }
       }
-      await sleep(LOCK_RETRY_DELAY_MS);
+      // Exponential backoff with jitter: base * 2^attempt * (0.5 + random())
+      // capped at LOCK_RETRY_MAX_MS. Prevents thundering herd under contention.
+      const backoff = Math.min(LOCK_RETRY_BASE_MS * 2 ** attempt, LOCK_RETRY_MAX_MS);
+      await sleep(backoff * (0.5 + Math.random()));
     }
 
     throw new SequenceLockTimeout(address);
