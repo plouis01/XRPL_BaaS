@@ -1,6 +1,6 @@
-// @railforge/sdk — TypeScript client SDK.
-// See PLAN.md §4.6 for the target client API shape.
-// TODO Sprint 4.
+// @railforge/sdk — TypeScript client SDK for the RailForge API.
 
-export * from './client.ts';
+export { RailForge } from './client.ts';
+export type { RailForgeOptions } from './client.ts';
+export { RailForgeError } from './http.ts';
 export * from './types.ts';
