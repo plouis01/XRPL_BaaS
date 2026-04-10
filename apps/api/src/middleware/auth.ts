@@ -51,6 +51,13 @@ export const auth: MiddlewareHandler<AppEnv> = async (c, next) => {
     return c.json({ error: 'Missing API key' }, 401);
   }
 
+  // Header smuggling defense (PLAN.md §9.2 #5): proxies can split on
+  // duplicate headers or commas. Reject any value that looks like
+  // multiple keys concatenated — this is never a legitimate use.
+  if (apiKey.includes(',')) {
+    return c.json({ error: 'Invalid API key' }, 401);
+  }
+
   const keyHash = hashApiKey(apiKey);
 
   // CRITICAL: filter `isActive = true` IN THE SQL, not in app code below.
