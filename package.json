@@ -14,7 +14,8 @@
     "format": "biome check --write .",
     "db:generate": "cd packages/db && bunx drizzle-kit generate",
     "db:migrate": "cd packages/db && bunx drizzle-kit migrate",
-    "db:studio": "cd packages/db && bunx drizzle-kit studio"
+    "db:studio": "cd packages/db && bunx drizzle-kit studio",
+    "test:load": "k6 run scripts/k6/load-test.js"
   },
   "devDependencies": {
     "@biomejs/biome": "^1.9.4",
