@@ -1,5 +1,6 @@
 import { Hono } from 'hono';
 import { logger } from './logger.ts';
+import { auditLog } from './middleware/auditLog.ts';
 import { auth } from './middleware/auth.ts';
 import { envGuard } from './middleware/envGuard.ts';
 import { errorHandler } from './middleware/errorHandler.ts';
@@ -33,12 +34,14 @@ app.get('/health', (c) => c.json({ status: 'ok' }));
 //   3. envGuard    — rejects keys whose environment doesn't match the server's XRPL_NETWORK.
 //   4. rateLimit   — per-API-key sliding window, sets X-RateLimit-* headers.
 //   5. idempotency — enforces Idempotency-Key on state-changing methods.
+//   6. auditLog    — logs POST/PUT/DELETE to audit_log table (fire-and-forget).
 const v1 = new Hono<AppEnv>();
 v1.use('*', ipRateLimit);
 v1.use('*', auth);
 v1.use('*', envGuard);
 v1.use('*', rateLimit);
 v1.use('*', idempotency);
+v1.use('*', auditLog);
 
 v1.route('/accounts', accountsRoute);
 v1.route('/tokens', tokensRoute);

@@ -242,6 +242,32 @@ export const transactions = pgTable(
   }),
 );
 
+// ── Audit log ───────────────────────────────────────────────────────────────
+// PLAN.md §9.2 #2: every state-changing /v1/* call is logged here.
+
+export const auditLog = pgTable(
+  'audit_log',
+  {
+    id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+    clientId: uuid('client_id')
+      .notNull()
+      .references(() => clients.id),
+    apiKeyId: uuid('api_key_id')
+      .notNull()
+      .references(() => apiKeys.id),
+    method: text('method').notNull(),
+    path: text('path').notNull(),
+    statusCode: integer('status_code').notNull(),
+    ip: text('ip'),
+    requestHash: text('request_hash'),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
+  },
+  (t) => ({
+    clientIdx: index('idx_audit_log_client').on(t.clientId, t.createdAt),
+    apiKeyIdx: index('idx_audit_log_api_key').on(t.apiKeyId, t.createdAt),
+  }),
+);
+
 // ── Webhook deliveries ───────────────────────────────────────────────────────
 
 export const webhookDeliveries = pgTable(
