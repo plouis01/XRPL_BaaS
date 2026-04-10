@@ -1,11 +1,17 @@
 import { cors } from 'hono/cors';
 
 // CORS middleware — restricts browser requests to the dashboard origin.
-// Security backlog item #13.
 //
 // DASHBOARD_ORIGIN env var controls the allowed origin.
-// Defaults to localhost:5173 (Vite dev server) when unset.
-// In production, set to the real dashboard URL (e.g. https://dashboard.railforge.dev).
+// In production, DASHBOARD_ORIGIN must be explicitly set — falling back to
+// localhost would silently allow any local dev server to make credentialed
+// cross-origin requests against a production API.
+
+if (process.env.NODE_ENV === 'production' && !process.env.DASHBOARD_ORIGIN) {
+  throw new Error(
+    'DASHBOARD_ORIGIN must be set in production (e.g. https://dashboard.railforge.dev)',
+  );
+}
 
 const dashboardOrigin = process.env.DASHBOARD_ORIGIN ?? 'http://localhost:5173';
 
