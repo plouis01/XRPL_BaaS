@@ -141,6 +141,10 @@ export async function grantPermission(
     clientId: input.clientId,
   });
 
+  if (input.delegatorAddress === input.delegateAddress) {
+    throw new PermissionServiceError('invalid_input', 'Cannot delegate to self');
+  }
+
   const delegatorAccount = await resolveOwnedAccount(input.clientId, input.delegatorAddress);
   if (!delegatorAccount) {
     throw new PermissionServiceError('not_managed', 'Delegator address is not a managed account');

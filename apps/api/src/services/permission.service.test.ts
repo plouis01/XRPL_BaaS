@@ -134,6 +134,18 @@ describe('PermissionService', () => {
       ).rejects.toThrow(/not a managed account/);
     });
 
+    it('throws invalid_input for self-delegation', async () => {
+      await expect(
+        grantPermission({
+          clientId: 'client-1',
+          delegatorAddress: 'rDelegator',
+          delegateAddress: 'rDelegator',
+          permissions: ['Payment'],
+          weight: 1,
+        }),
+      ).rejects.toThrow(/Cannot delegate to self/);
+    });
+
     it('throws already_exists for duplicate delegation', async () => {
       dbSelectResults.delegations = [
         {
