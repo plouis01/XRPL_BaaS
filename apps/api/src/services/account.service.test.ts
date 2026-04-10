@@ -110,7 +110,7 @@ describe('createAccount (treasury flow)', () => {
     dbInsertShouldThrow.table = '';
     dbInsertShouldThrow.err = null;
     enqueueShouldThrow.err = null;
-    process.env.TREASURY_ADDRESS = 'rTreasury000000000000000000000000';
+    process.env.TREASURY_ADDRESS = 'rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh';
   });
 
   afterEach(() => {
@@ -149,7 +149,7 @@ describe('createAccount (treasury flow)', () => {
     const txValues = dbInsertCalls[0]!.values as Record<string, unknown>;
     expect(txValues.clientId).toBe('client-1');
     expect(txValues.txType).toBe('Payment');
-    expect(txValues.sourceAddress).toBe('rTreasury000000000000000000000000');
+    expect(txValues.sourceAddress).toBe('rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh');
     expect(txValues.status).toBe('queued');
     const reqBody = txValues.requestBody as Record<string, unknown>;
     expect(reqBody.purpose).toBe('account_funding');
@@ -170,10 +170,10 @@ describe('createAccount (treasury flow)', () => {
     expect(enqueueCalls).toHaveLength(1);
     const job = enqueueCalls[0] as Record<string, unknown>;
     expect(job.txId).toBe('tx-uuid-1');
-    expect(job.sourceAddress).toBe('rTreasury000000000000000000000000');
+    expect(job.sourceAddress).toBe('rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh');
     const txJson = job.txJson as Record<string, unknown>;
     expect(txJson.TransactionType).toBe('Payment');
-    expect(txJson.Account).toBe('rTreasury000000000000000000000000');
+    expect(txJson.Account).toBe('rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh');
     expect(txJson.Destination).toBe(result.address);
     expect(txJson.Amount).toBe('20000000');
   });
