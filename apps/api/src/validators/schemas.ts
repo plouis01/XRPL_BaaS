@@ -131,5 +131,82 @@ export const createWebhookEndpointSchema = z.object({
   events: z.array(z.enum(WEBHOOK_EVENT_TYPES)).min(1, 'subscribe to at least one event'),
 });
 
-// ── Credentials, Payments, etc. ──────────────────────────────────────────────
+// ── Payments ────────────────────────────────────────────────────────────────
+//
+// The send-payment schema is polymorphic: the client supplies one of three
+// amount shapes (XRP drops, MPT, or issued currency). We validate them
+// into a discriminated union so the service can pick the right builder.
+
+export const sendPaymentSchema = z
+  .object({
+    /** Source XRPL account. Must belong to the authenticated client. */
+    source: xrplAddressSchema,
+    destination: xrplAddressSchema,
+    destination_tag: z.number().int().min(0).optional(),
+    memo: z.string().optional(),
+
+    // ── Amount shape: exactly one of these three groups ──
+
+    /** XRP payment: amount in drops as a string. */
+    amount_drops: z.string().optional(),
+
+    /** MPT payment. */
+    mpt_issuance_id: z.string().optional(),
+    /** MPT or issued-currency value as a decimal string. */
+    value: z.string().optional(),
+
+    /** Issued-currency payment. */
+    currency: z.string().optional(),
+    issuer: xrplAddressSchema.optional(),
+  })
+  .refine(
+    (d) => {
+      // Exactly one of: XRP (amount_drops), MPT (mpt_issuance_id+value), or
+      // issued currency (currency+issuer+value).
+      const hasXrp = !!d.amount_drops;
+      const hasMpt = !!d.mpt_issuance_id && !!d.value;
+      const hasIssued = !!d.currency && !!d.issuer && !!d.value;
+      return [hasXrp, hasMpt, hasIssued].filter(Boolean).length === 1;
+    },
+    {
+      message:
+        'Provide exactly one of: amount_drops (XRP), mpt_issuance_id+value (MPT), or currency+issuer+value (issued currency)',
+    },
+  );
+
+export const createEscrowSchema = z
+  .object({
+    source: xrplAddressSchema,
+    destination: xrplAddressSchema,
+    /** Amount in drops (XRP only — escrow doesn't support tokens yet on mainnet). */
+    amount_drops: z.string().min(1),
+    /** XRPL epoch seconds. At least one of finish_after / cancel_after is required. */
+    finish_after: z.number().int().optional(),
+    cancel_after: z.number().int().optional(),
+    /** PREIMAGE-SHA-256 crypto-condition (hex). */
+    condition: z.string().optional(),
+    destination_tag: z.number().int().min(0).optional(),
+  })
+  .refine((d) => d.finish_after !== undefined || d.cancel_after !== undefined, {
+    message: 'At least one of finish_after or cancel_after is required',
+  });
+
+export const finishEscrowSchema = z.object({
+  /** The account finishing the escrow (pays the tx fee). */
+  source: xrplAddressSchema,
+  /** The account that created the escrow. */
+  owner: xrplAddressSchema,
+  /** The Sequence number of the EscrowCreate tx. */
+  offer_sequence: z.number().int().min(0),
+  condition: z.string().optional(),
+  fulfillment: z.string().optional(),
+});
+
+export const cancelEscrowSchema = z.object({
+  source: xrplAddressSchema,
+  owner: xrplAddressSchema,
+  offer_sequence: z.number().int().min(0),
+});
+
+// ── Credentials, etc. ──────────────────────────────────────────────────────
 // TODO later sprints: add schemas for each resource as routes are implemented.
