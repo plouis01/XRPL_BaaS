@@ -124,7 +124,17 @@ export const clawbackTokenSchema = z.object({
 // event means adding it here AND adding a fan-out site for it (currently
 // only `transaction.validated` is wired, in apps/worker/src/jobs/txConfirmer).
 // Letting clients subscribe to events that nothing emits is just confusing.
-export const WEBHOOK_EVENT_TYPES = ['transaction.validated', 'transaction.failed'] as const;
+export const WEBHOOK_EVENT_TYPES = [
+  'transaction.validated',
+  'transaction.failed',
+  'credential.issued',
+  'credential.accepted',
+  'credential.revoked',
+  'credential.expiring',
+  'domain.created',
+  'domain.updated',
+  'domain.deleted',
+] as const;
 
 export const createWebhookEndpointSchema = z.object({
   url: z.string().url('webhook url must be a valid URL'),
@@ -208,5 +218,67 @@ export const cancelEscrowSchema = z.object({
   offer_sequence: z.number().int().min(0),
 });
 
-// ── Credentials, etc. ──────────────────────────────────────────────────────
-// TODO Sprint 5: add schemas for credentials, domains, permissions, DEX as those routes are implemented.
+// ── Credentials (XLS-70) ────────────────────────────────────────────────────
+//
+// Hex-encoded credential type: 1-128 hex chars (up to 64 bytes).
+const hexCredentialTypeSchema = z
+  .string()
+  .min(1)
+  .max(128)
+  .regex(/^[0-9a-fA-F]+$/, 'credential_type must be hex-encoded');
+
+export const issueCredentialSchema = z.object({
+  /** The managed account that will issue the credential (Account field). */
+  issuer_address: xrplAddressSchema,
+  /** The account receiving the credential. */
+  subject_address: xrplAddressSchema,
+  /** Hex-encoded credential type (up to 64 bytes). */
+  credential_type: hexCredentialTypeSchema,
+  /** XRPL epoch expiration. Optional. */
+  expiration: z.number().int().min(0).optional(),
+  /** Hex-encoded URI (optional metadata pointer). */
+  uri: z
+    .string()
+    .regex(/^[0-9a-fA-F]*$/, 'uri must be hex-encoded')
+    .optional(),
+  /** Optional metadata (key/value JSON). */
+  metadata: z.record(z.unknown()).optional(),
+});
+
+export const acceptCredentialSchema = z.object({
+  /** The managed subject account accepting the credential. */
+  subject_address: xrplAddressSchema,
+});
+
+export const verifyCredentialSchema = z.object({
+  subject_address: xrplAddressSchema,
+  issuer_address: xrplAddressSchema,
+  credential_type: hexCredentialTypeSchema,
+});
+
+// ── Domains (XLS-80) ───────────────────────────────────────────────────────
+
+const acceptedCredentialEntrySchema = z.object({
+  issuer: xrplAddressSchema,
+  credential_type: hexCredentialTypeSchema,
+});
+
+export const createDomainSchema = z.object({
+  /** The managed account that owns the domain. */
+  owner_address: xrplAddressSchema,
+  /** 1-10 accepted credential entries. */
+  accepted_credentials: z.array(acceptedCredentialEntrySchema).min(1).max(10),
+});
+
+export const updateDomainSchema = z.object({
+  /** Updated accepted credential entries (replaces the existing list). */
+  accepted_credentials: z.array(acceptedCredentialEntrySchema).min(1).max(10),
+});
+
+export const checkDomainMembershipSchema = z.object({
+  /** The account to check membership for. */
+  subject_address: xrplAddressSchema,
+});
+
+// ── Permissions, DEX ─────────────────────────────────────────────────────
+// TODO Sprint 6: add schemas for permissions and DEX as those routes are implemented.
