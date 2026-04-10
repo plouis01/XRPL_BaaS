@@ -11,6 +11,7 @@
 
 import { zValidator } from '@hono/zod-validator';
 import { Hono } from 'hono';
+import { revocationCheck } from '../middleware/revocationCheck.ts';
 import {
   PaymentServiceError,
   cancelEscrow,
@@ -28,6 +29,9 @@ import {
 } from '../validators/schemas.ts';
 
 const payments = new Hono<AppEnv>();
+
+// Re-verify API key not revoked before enqueuing real transactions.
+payments.use('*', revocationCheck);
 
 function paymentErrorResponse(err: PaymentServiceError) {
   switch (err.code) {

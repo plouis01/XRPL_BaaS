@@ -16,6 +16,7 @@
 
 import { zValidator } from '@hono/zod-validator';
 import { Hono } from 'hono';
+import { revocationCheck } from '../middleware/revocationCheck.ts';
 import {
   AccountServiceError,
   configureSigners,
@@ -33,6 +34,9 @@ import {
 } from '../validators/schemas.ts';
 
 const accounts = new Hono<AppEnv>();
+
+// Re-verify API key not revoked before enqueuing real transactions.
+accounts.use('*', revocationCheck);
 
 accounts.post('/', zValidator('json', createAccountSchema), async (c) => {
   const clientId = c.get('clientId');
