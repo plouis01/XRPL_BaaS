@@ -13,6 +13,9 @@ import {
   MPT_UNLOCK_FLAG,
   buildAccountDelete,
   buildAccountSet,
+  buildCredentialAccept,
+  buildCredentialCreate,
+  buildCredentialDelete,
   buildEscrowCancel,
   buildEscrowCreate,
   buildEscrowFinish,
@@ -22,6 +25,8 @@ import {
   buildMptIssuanceCreate,
   buildMptIssuanceSet,
   buildMptPayment,
+  buildPermissionedDomainDelete,
+  buildPermissionedDomainSet,
   buildSetRegularKey,
   buildSignerListSet,
   buildTrustSet,
@@ -573,5 +578,164 @@ describe('buildEscrowCancel', () => {
     expect(tx.TransactionType).toBe('EscrowCancel');
     expect(tx.Owner).toBe(ACCOUNT_B);
     expect(tx.OfferSequence).toBe(42);
+  });
+});
+
+// ── Credential builders (XLS-70) ──────────────────────────────────────────
+
+describe('buildCredentialCreate', () => {
+  it('produces a minimal CredentialCreate', () => {
+    const tx = buildCredentialCreate({
+      account: ACCOUNT_A,
+      subject: ACCOUNT_B,
+      credentialType: '4B5943',
+    });
+    expect(tx.TransactionType).toBe('CredentialCreate');
+    expect(tx.Account).toBe(ACCOUNT_A);
+    expect(tx.Subject).toBe(ACCOUNT_B);
+    expect(tx.CredentialType).toBe('4B5943');
+    expect(tx.Expiration).toBeUndefined();
+    expect(tx.URI).toBeUndefined();
+  });
+
+  it('includes Expiration and URI when provided', () => {
+    const tx = buildCredentialCreate({
+      account: ACCOUNT_A,
+      subject: ACCOUNT_B,
+      credentialType: '4b5943',
+      expiration: 800000000,
+      uri: '68747470733a2f2f',
+    });
+    expect(tx.Expiration).toBe(800000000);
+    expect(tx.URI).toBe('68747470733A2F2F');
+    expect(tx.CredentialType).toBe('4B5943');
+  });
+
+  it('throws on empty credential type', () => {
+    expect(() =>
+      buildCredentialCreate({
+        account: ACCOUNT_A,
+        subject: ACCOUNT_B,
+        credentialType: '',
+      }),
+    ).toThrow(/1-128 hex chars/);
+  });
+
+  it('throws on oversized credential type (>128 hex chars)', () => {
+    expect(() =>
+      buildCredentialCreate({
+        account: ACCOUNT_A,
+        subject: ACCOUNT_B,
+        credentialType: 'AB'.repeat(65),
+      }),
+    ).toThrow(/1-128 hex chars/);
+  });
+});
+
+describe('buildCredentialAccept', () => {
+  it('produces a CredentialAccept', () => {
+    const tx = buildCredentialAccept({
+      account: ACCOUNT_B,
+      issuer: ACCOUNT_A,
+      credentialType: '4b5943',
+    });
+    expect(tx.TransactionType).toBe('CredentialAccept');
+    expect(tx.Account).toBe(ACCOUNT_B);
+    expect(tx.Issuer).toBe(ACCOUNT_A);
+    expect(tx.CredentialType).toBe('4B5943');
+  });
+});
+
+describe('buildCredentialDelete', () => {
+  it('produces a CredentialDelete with subject (issuer-initiated)', () => {
+    const tx = buildCredentialDelete({
+      account: ACCOUNT_A,
+      credentialType: '4B5943',
+      subject: ACCOUNT_B,
+    });
+    expect(tx.TransactionType).toBe('CredentialDelete');
+    expect(tx.Account).toBe(ACCOUNT_A);
+    expect(tx.Subject).toBe(ACCOUNT_B);
+    expect(tx.Issuer).toBeUndefined();
+  });
+
+  it('produces a CredentialDelete with issuer (subject-initiated)', () => {
+    const tx = buildCredentialDelete({
+      account: ACCOUNT_B,
+      credentialType: '4B5943',
+      issuer: ACCOUNT_A,
+    });
+    expect(tx.Issuer).toBe(ACCOUNT_A);
+    expect(tx.Subject).toBeUndefined();
+  });
+
+  it('throws when neither subject nor issuer is provided', () => {
+    expect(() => buildCredentialDelete({ account: ACCOUNT_A, credentialType: '4B5943' })).toThrow(
+      /requires either subject or issuer/,
+    );
+  });
+});
+
+// ── Permissioned Domain builders (XLS-80) ──────────────────────────────────
+
+describe('buildPermissionedDomainSet', () => {
+  it('produces a create (no DomainID)', () => {
+    const tx = buildPermissionedDomainSet({
+      account: ACCOUNT_A,
+      acceptedCredentials: [{ issuer: ACCOUNT_B, credentialType: '4B5943' }],
+    });
+    expect(tx.TransactionType).toBe('PermissionedDomainSet');
+    expect(tx.Account).toBe(ACCOUNT_A);
+    expect(tx.DomainID).toBeUndefined();
+    expect(tx.AcceptedCredentials).toHaveLength(1);
+    expect(tx.AcceptedCredentials[0]!.Credential.Issuer).toBe(ACCOUNT_B);
+    expect(tx.AcceptedCredentials[0]!.Credential.CredentialType).toBe('4B5943');
+  });
+
+  it('produces an update (with DomainID)', () => {
+    const tx = buildPermissionedDomainSet({
+      account: ACCOUNT_A,
+      domainId: 'ABCDEF1234567890ABCDEF1234567890ABCDEF1234567890ABCDEF1234567890',
+      acceptedCredentials: [
+        { issuer: ACCOUNT_B, credentialType: '4B5943' },
+        { issuer: ACCOUNT_C, credentialType: '414D4C' },
+      ],
+    });
+    expect(tx.DomainID).toBe('ABCDEF1234567890ABCDEF1234567890ABCDEF1234567890ABCDEF1234567890');
+    expect(tx.AcceptedCredentials).toHaveLength(2);
+  });
+
+  it('throws on empty accepted credentials', () => {
+    expect(() =>
+      buildPermissionedDomainSet({
+        account: ACCOUNT_A,
+        acceptedCredentials: [],
+      }),
+    ).toThrow(/1-10 entries/);
+  });
+
+  it('throws on >10 accepted credentials', () => {
+    const entries = Array.from({ length: 11 }, (_, i) => ({
+      issuer: ACCOUNT_B,
+      credentialType: `4B594${i.toString(16).toUpperCase()}`,
+    }));
+    expect(() =>
+      buildPermissionedDomainSet({
+        account: ACCOUNT_A,
+        acceptedCredentials: entries,
+      }),
+    ).toThrow(/1-10 entries/);
+  });
+});
+
+describe('buildPermissionedDomainDelete', () => {
+  it('produces a PermissionedDomainDelete', () => {
+    const tx = buildPermissionedDomainDelete({
+      account: ACCOUNT_A,
+      domainId: 'ABCDEF1234567890ABCDEF1234567890ABCDEF1234567890ABCDEF1234567890',
+    });
+    expect(tx.TransactionType).toBe('PermissionedDomainDelete');
+    expect(tx.Account).toBe(ACCOUNT_A);
+    expect(tx.DomainID).toBe('ABCDEF1234567890ABCDEF1234567890ABCDEF1234567890ABCDEF1234567890');
   });
 });
