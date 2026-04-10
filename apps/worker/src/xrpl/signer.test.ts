@@ -190,6 +190,41 @@ describe('DevSigner production guard', () => {
   });
 });
 
+describe('DevSigner.loadKey', () => {
+  it('loads a seed and makes the address available for signing', async () => {
+    const signer = new DevSigner();
+    const wallet = Wallet.generate();
+    await signer.loadKey(wallet.classicAddress, wallet.seed!);
+    expect(await signer.hasKey(wallet.classicAddress)).toBe(true);
+  });
+
+  it('is a no-op when the address is already loaded', async () => {
+    const signer = new DevSigner();
+    const wallet = Wallet.generate();
+    signer.registerWallet(wallet);
+    await signer.loadKey(wallet.classicAddress, wallet.seed!);
+    expect(await signer.hasKey(wallet.classicAddress)).toBe(true);
+  });
+
+  it('throws SignerError(no_key) when seed decodes to a different address', async () => {
+    const signer = new DevSigner();
+    const walletA = Wallet.generate();
+    const walletB = Wallet.generate();
+    // Load walletA's seed but claim it belongs to walletB's address
+    await expect(signer.loadKey(walletB.classicAddress, walletA.seed!)).rejects.toThrow(
+      SignerError,
+    );
+    // The mismatched wallet must NOT remain registered
+    expect(await signer.hasKey(walletA.classicAddress)).toBe(false);
+    expect(await signer.hasKey(walletB.classicAddress)).toBe(false);
+  });
+
+  it('throws on an invalid seed string', async () => {
+    const signer = new DevSigner();
+    await expect(signer.loadKey('rSomeAddr', 'not-a-valid-seed')).rejects.toThrow();
+  });
+});
+
 describe('encodeUnsigned', () => {
   it('produces a hex string from a transaction', () => {
     const wallet = Wallet.generate();
