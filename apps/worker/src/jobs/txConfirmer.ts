@@ -105,7 +105,7 @@ export async function processTxConfirmJob(job: Job<TxConfirmJobData>): Promise<v
     throw new TxNotYetValidated(txHash);
   }
 
-  // 3. Validated. Update the DB row and (TODO Sprint 3) enqueue webhook.
+  // 3. Validated. Update the DB row and enqueue webhook fan-out.
   const ledgerIndex = txResponse.result.ledger_index;
   // The tx meta's TransactionResult is the definitive result code.
   const meta = txResponse.result.meta as { TransactionResult?: string } | undefined;

@@ -96,9 +96,8 @@ export class TokenServiceError extends Error {
 }
 
 /**
- * Create a new token. MPT by default, trustline opt-in (Sprint 2 defers
- * the trustline path — throws trustline_not_supported_yet until the
- * TrustSet flow lands).
+ * Create a new token. MPT by default, trustline opt-in via explicit
+ * `type: "trustline"` (requires trustlineLimit).
  *
  * @throws {TokenServiceError} on issuer lookup failure or unsupported type
  */
