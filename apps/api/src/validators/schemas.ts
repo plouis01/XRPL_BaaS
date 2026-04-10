@@ -209,4 +209,4 @@ export const cancelEscrowSchema = z.object({
 });
 
 // ── Credentials, etc. ──────────────────────────────────────────────────────
-// TODO later sprints: add schemas for each resource as routes are implemented.
+// TODO Sprint 5: add schemas for credentials, domains, permissions, DEX as those routes are implemented.

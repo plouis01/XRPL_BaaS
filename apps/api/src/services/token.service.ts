@@ -25,7 +25,7 @@
 //    tokens table row with the on-chain mpt_issuance_id. For Sprint 2 we
 //    write the tokens row EAGERLY during create() so clients see the
 //    token ID immediately; the mpt_issuance_id is backfilled when the
-//    txConfirmer lands on validated — TODO in a later task.
+//    txConfirmer validates the tx (see txConfirmer.ts backfillMptIssuanceId).
 //
 // CROSS-TENANT CHECK: the issuer lookup is scoped by clientId. If a
 // malicious client passes an issuer address belonging to another tenant,

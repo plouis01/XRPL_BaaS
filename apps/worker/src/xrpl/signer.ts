@@ -12,7 +12,7 @@
 //
 // In prod, this interface is implemented by an HsmSigner that delegates to
 // AWS CloudHSM (or YubiHSM). Same contract, real key isolation.
-// TODO Sprint 1+: HsmSigner backend.
+// HsmSigner backend: see apps/worker/src/xrpl/HsmSigner.ts (Sprint 3).
 
 import { Wallet, encode } from 'xrpl';
 import type { Transaction } from 'xrpl';

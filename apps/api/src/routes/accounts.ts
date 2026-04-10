@@ -2,9 +2,9 @@
 //
 // POST   /v1/accounts             → create (treasury-funded via tx-submit queue)
 // GET    /v1/accounts/:address    → read
-// PUT    /v1/accounts/:address/signers       → TODO later this sprint
-// DELETE /v1/accounts/:address                → TODO later this sprint
-// POST   /v1/accounts/:address/rotate-key     → TODO later this sprint
+// PUT    /v1/accounts/:address/signers       → configure multi-sign
+// DELETE /v1/accounts/:address                → delete account
+// POST   /v1/accounts/:address/rotate-key     → rotate regular key
 //
 // Middleware order (set in apps/api/src/index.ts):
 //   ipRateLimit → auth → rateLimit → idempotency → this handler
