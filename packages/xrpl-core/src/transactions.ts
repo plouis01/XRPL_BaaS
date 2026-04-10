@@ -16,6 +16,8 @@
 // decisions, and makes each builder trivially unit-testable.
 
 import type {
+  AMMDeposit,
+  AMMWithdraw,
   AccountDelete,
   AccountSet,
   AuthorizeCredential,
@@ -23,11 +25,14 @@ import type {
   CredentialAccept,
   CredentialCreate,
   CredentialDelete,
+  Currency,
   EscrowCancel,
   EscrowCreate,
   EscrowFinish,
   MPTokenIssuanceCreate,
   MPTokenIssuanceSet,
+  OfferCancel,
+  OfferCreate,
   Payment,
   PermissionedDomainDelete,
   PermissionedDomainSet,
@@ -36,6 +41,7 @@ import type {
   SignerListSet,
   TrustSet,
 } from 'xrpl';
+import type { Amount, IssuedCurrencyAmount } from 'xrpl/dist/npm/models/common';
 
 // ── Payment (XRP or issued currency) ────────────────────────────────────────
 
@@ -640,4 +646,156 @@ export function buildPermissionedDomainDelete(
     Account: input.account,
     DomainID: input.domainId,
   };
+}
+
+// ── DEX: OfferCreate / OfferCancel ─────────────────────────────────────────
+//
+// OfferCreate places an order on the XRPL DEX orderbook.
+// TakerGets = what the offer owner gives up (what a taker "gets").
+// TakerPays = what the offer owner receives (what a taker "pays").
+// Both are xrpl.js Amount: string (XRP drops) | IssuedCurrencyAmount.
+
+/** Describes an asset on the XRPL DEX (XRP, issued currency, or MPT). */
+export interface AssetAmount {
+  /** XRP drops as a string. Mutually exclusive with currency/issuer and mptIssuanceId. */
+  drops?: string;
+  /** Issued-currency code (3-char or 40-char hex). */
+  currency?: string;
+  /** Issued-currency issuer. */
+  issuer?: string;
+  /** Decimal value for issued-currency or MPT. */
+  value?: string;
+  /** MPT issuance ID (hex). */
+  mptIssuanceId?: string;
+}
+
+/** Convert our AssetAmount to the xrpl.js Amount type. */
+export function assetAmountToXrpl(a: AssetAmount): Amount {
+  if (a.drops !== undefined) return a.drops;
+  if (a.currency && a.issuer && a.value) {
+    return { currency: a.currency, issuer: a.issuer, value: a.value };
+  }
+  throw new Error(
+    'AssetAmount must specify either drops (XRP) or currency+issuer+value (issued currency)',
+  );
+}
+
+/** Convert our AssetAmount to the xrpl.js Currency type (no value). */
+export function assetToCurrency(a: AssetAmount): Currency {
+  if (a.drops !== undefined) return { currency: 'XRP' };
+  if (a.mptIssuanceId) return { mpt_issuance_id: a.mptIssuanceId };
+  if (a.currency && a.issuer) return { currency: a.currency, issuer: a.issuer };
+  throw new Error('AssetAmount must specify drops, mptIssuanceId, or currency+issuer');
+}
+
+export interface BuildOfferCreateInput {
+  account: string;
+  /** What the offer creator gives up. */
+  takerGets: AssetAmount;
+  /** What the offer creator receives. */
+  takerPays: AssetAmount;
+  /** Optional expiration (XRPL epoch seconds). */
+  expiration?: number;
+  /** Optional: replace this existing offer. */
+  offerSequence?: number;
+  /** Optional flags: tfPassive (65536), tfImmediateOrCancel (131072), tfFillOrKill (262144), tfSell (524288). */
+  flags?: number;
+  /** Optional DomainID for permissioned DEX (XLS-81). */
+  domainId?: string;
+}
+
+export function buildOfferCreate(input: BuildOfferCreateInput): OfferCreate {
+  const tx: OfferCreate = {
+    TransactionType: 'OfferCreate',
+    Account: input.account,
+    TakerGets: assetAmountToXrpl(input.takerGets),
+    TakerPays: assetAmountToXrpl(input.takerPays),
+  };
+  if (input.expiration !== undefined) tx.Expiration = input.expiration;
+  if (input.offerSequence !== undefined) tx.OfferSequence = input.offerSequence;
+  if (input.flags !== undefined) tx.Flags = input.flags;
+  if (input.domainId !== undefined) tx.DomainID = input.domainId;
+  return tx;
+}
+
+export interface BuildOfferCancelInput {
+  account: string;
+  /** Sequence number of the offer to cancel. */
+  offerSequence: number;
+}
+
+export function buildOfferCancel(input: BuildOfferCancelInput): OfferCancel {
+  return {
+    TransactionType: 'OfferCancel',
+    Account: input.account,
+    OfferSequence: input.offerSequence,
+  };
+}
+
+// ── DEX: AMMDeposit / AMMWithdraw ─────────────────────────────────────────
+//
+// AMM operations require Asset + Asset2 (the pool pair, as Currency objects),
+// plus optional amounts/LP tokens depending on the deposit/withdraw mode.
+
+export interface BuildAmmDepositInput {
+  account: string;
+  /** First asset in the AMM pool. */
+  asset: AssetAmount;
+  /** Second asset in the AMM pool. */
+  asset2: AssetAmount;
+  /** Amount of the first asset to deposit. */
+  amount?: AssetAmount;
+  /** Amount of the second asset to deposit. */
+  amount2?: AssetAmount;
+  /** Effective price cap. */
+  ePrice?: AssetAmount;
+  /** Desired LP tokens to receive. */
+  lpTokenOut?: { currency: string; issuer: string; value: string };
+  /** AMMDeposit flags (tfLPToken, tfSingleAsset, tfTwoAsset, etc). */
+  flags?: number;
+}
+
+export function buildAmmDeposit(input: BuildAmmDepositInput): AMMDeposit {
+  const tx: AMMDeposit = {
+    TransactionType: 'AMMDeposit',
+    Account: input.account,
+    Asset: assetToCurrency(input.asset),
+    Asset2: assetToCurrency(input.asset2),
+  };
+  if (input.amount) tx.Amount = assetAmountToXrpl(input.amount);
+  if (input.amount2) tx.Amount2 = assetAmountToXrpl(input.amount2);
+  if (input.ePrice) tx.EPrice = assetAmountToXrpl(input.ePrice);
+  if (input.lpTokenOut) {
+    tx.LPTokenOut = input.lpTokenOut as IssuedCurrencyAmount;
+  }
+  if (input.flags !== undefined) tx.Flags = input.flags;
+  return tx;
+}
+
+export interface BuildAmmWithdrawInput {
+  account: string;
+  asset: AssetAmount;
+  asset2: AssetAmount;
+  amount?: AssetAmount;
+  amount2?: AssetAmount;
+  ePrice?: AssetAmount;
+  lpTokenIn?: { currency: string; issuer: string; value: string };
+  flags?: number;
+}
+
+export function buildAmmWithdraw(input: BuildAmmWithdrawInput): AMMWithdraw {
+  const tx: AMMWithdraw = {
+    TransactionType: 'AMMWithdraw',
+    Account: input.account,
+    Asset: assetToCurrency(input.asset),
+    Asset2: assetToCurrency(input.asset2),
+  };
+  if (input.amount) tx.Amount = assetAmountToXrpl(input.amount);
+  if (input.amount2) tx.Amount2 = assetAmountToXrpl(input.amount2);
+  if (input.ePrice) tx.EPrice = assetAmountToXrpl(input.ePrice);
+  if (input.lpTokenIn) {
+    tx.LPTokenIn = input.lpTokenIn as IssuedCurrencyAmount;
+  }
+  if (input.flags !== undefined) tx.Flags = input.flags;
+  return tx;
 }
