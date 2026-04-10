@@ -5,6 +5,7 @@ import type {
   FinishEscrowParams,
   Payment,
   QueuedTx,
+  RequestOptions,
   SendPaymentParams,
 } from '../types.ts';
 
@@ -12,8 +13,8 @@ export class Payments {
   constructor(private http: HttpClient) {}
 
   /** Send an XRP, MPT, or issued-currency payment. */
-  async send(params: SendPaymentParams): Promise<QueuedTx> {
-    return this.http.post<QueuedTx>('/v1/payments', params);
+  async send(params: SendPaymentParams, opts?: RequestOptions): Promise<QueuedTx> {
+    return this.http.post<QueuedTx>('/v1/payments', params, opts?.idempotencyKey);
   }
 
   /** Get payment status by transaction ID. */
@@ -22,17 +23,33 @@ export class Payments {
   }
 
   /** Create a time- or condition-based escrow. */
-  async createEscrow(params: CreateEscrowParams): Promise<QueuedTx> {
-    return this.http.post<QueuedTx>('/v1/payments/escrows', params);
+  async createEscrow(params: CreateEscrowParams, opts?: RequestOptions): Promise<QueuedTx> {
+    return this.http.post<QueuedTx>('/v1/payments/escrows', params, opts?.idempotencyKey);
   }
 
   /** Finish (release) an escrow. */
-  async finishEscrow(escrowId: string, params: FinishEscrowParams): Promise<QueuedTx> {
-    return this.http.post<QueuedTx>(`/v1/payments/escrows/${escrowId}/finish`, params);
+  async finishEscrow(
+    escrowId: string,
+    params: FinishEscrowParams,
+    opts?: RequestOptions,
+  ): Promise<QueuedTx> {
+    return this.http.post<QueuedTx>(
+      `/v1/payments/escrows/${escrowId}/finish`,
+      params,
+      opts?.idempotencyKey,
+    );
   }
 
   /** Cancel an expired escrow. */
-  async cancelEscrow(escrowId: string, params: CancelEscrowParams): Promise<QueuedTx> {
-    return this.http.post<QueuedTx>(`/v1/payments/escrows/${escrowId}/cancel`, params);
+  async cancelEscrow(
+    escrowId: string,
+    params: CancelEscrowParams,
+    opts?: RequestOptions,
+  ): Promise<QueuedTx> {
+    return this.http.post<QueuedTx>(
+      `/v1/payments/escrows/${escrowId}/cancel`,
+      params,
+      opts?.idempotencyKey,
+    );
   }
 }

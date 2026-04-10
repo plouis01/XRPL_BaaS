@@ -26,6 +26,12 @@ export interface ApiError {
   error: string;
 }
 
+/** Options for state-changing requests. */
+export interface RequestOptions {
+  /** Caller-provided idempotency key for safe retries. Auto-generated if omitted. */
+  idempotencyKey?: string;
+}
+
 // ---------------------------------------------------------------------------
 // Accounts
 // ---------------------------------------------------------------------------

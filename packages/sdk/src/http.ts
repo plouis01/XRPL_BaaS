@@ -33,19 +33,24 @@ export class HttpClient {
     return this.request<T>('GET', path);
   }
 
-  async post<T>(path: string, body?: unknown): Promise<T> {
-    return this.request<T>('POST', path, body);
+  async post<T>(path: string, body?: unknown, idempotencyKey?: string): Promise<T> {
+    return this.request<T>('POST', path, body, idempotencyKey);
   }
 
-  async put<T>(path: string, body?: unknown): Promise<T> {
-    return this.request<T>('PUT', path, body);
+  async put<T>(path: string, body?: unknown, idempotencyKey?: string): Promise<T> {
+    return this.request<T>('PUT', path, body, idempotencyKey);
   }
 
-  async delete<T>(path: string, body?: unknown): Promise<T> {
-    return this.request<T>('DELETE', path, body);
+  async delete<T>(path: string, body?: unknown, idempotencyKey?: string): Promise<T> {
+    return this.request<T>('DELETE', path, body, idempotencyKey);
   }
 
-  private async request<T>(method: string, path: string, body?: unknown): Promise<T> {
+  private async request<T>(
+    method: string,
+    path: string,
+    body?: unknown,
+    idempotencyKey?: string,
+  ): Promise<T> {
     const url = `${this.baseUrl}${path}`;
 
     const headers: Record<string, string> = {
@@ -58,9 +63,9 @@ export class HttpClient {
     }
 
     // State-changing methods need an idempotency key.
-    // Generate one automatically if the caller didn't provide one via a wrapper.
+    // Use caller-provided key for retries, or auto-generate one.
     if (method !== 'GET') {
-      headers['Idempotency-Key'] = crypto.randomUUID();
+      headers['Idempotency-Key'] = idempotencyKey ?? crypto.randomUUID();
     }
 
     const res = await fetch(url, {
