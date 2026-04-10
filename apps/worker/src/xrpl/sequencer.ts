@@ -22,6 +22,7 @@
 // CRITICAL: never bypass this. Direct client.submit() calls in
 // route handlers will collide on the same Sequence under load.
 
+import { randomUUID } from 'node:crypto';
 import type { Redis } from 'ioredis';
 import type { XrplClientPool } from './client.ts';
 
@@ -101,7 +102,7 @@ export class TxSequencer {
   async getNextSequence(address: string): Promise<number> {
     const lockKey = `railforge:seq:lock:${address}`;
     const cacheKey = `railforge:seq:${address}`;
-    const lockToken = `${process.pid}-${Date.now()}-${Math.random()}`;
+    const lockToken = randomUUID();
 
     // Acquire lock with bounded retry. Lock contention is expected under load
     // and should not throw immediately — but it must not loop forever.
