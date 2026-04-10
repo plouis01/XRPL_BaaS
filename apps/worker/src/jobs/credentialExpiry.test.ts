@@ -26,6 +26,7 @@ vi.mock('@railforge/db', () => {
   return {
     db: { select, insert },
     eq: vi.fn(),
+    and: vi.fn((...args: unknown[]) => ({ and: args })),
     schema: {
       credentials: { __name: 'credentials' },
       webhookEndpoints: { __name: 'webhook_endpoints' },

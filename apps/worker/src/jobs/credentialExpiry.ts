@@ -10,7 +10,7 @@
 //
 // This job runs on a repeating BullMQ schedule (every 6 hours).
 
-import { db, eq, schema } from '@railforge/db';
+import { and, db, eq, schema } from '@railforge/db';
 import { Worker } from 'bullmq';
 import type { Redis } from 'ioredis';
 import { logger } from '../logger.ts';
@@ -70,7 +70,12 @@ export async function processCredentialExpirySweep(
         events: schema.webhookEndpoints.events,
       })
       .from(schema.webhookEndpoints)
-      .where(eq(schema.webhookEndpoints.clientId, cred.clientId));
+      .where(
+        and(
+          eq(schema.webhookEndpoints.clientId, cred.clientId),
+          eq(schema.webhookEndpoints.isActive, true),
+        ),
+      );
 
     for (const ep of endpoints) {
       if (!ep.events?.includes('credential.expiring')) continue;

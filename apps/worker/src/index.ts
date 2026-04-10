@@ -8,6 +8,7 @@
 // everything gracefully so in-flight jobs finish before the process exits.
 
 import { Redis } from 'ioredis';
+import { startCredentialExpiryWorker } from './jobs/credentialExpiry.ts';
 import { startTxConfirmWorker } from './jobs/txConfirmer.ts';
 import { startTxSubmitWorker } from './jobs/txSubmitter.ts';
 import { startWebhookDeliveryWorker } from './jobs/webhookDelivery.ts';
@@ -76,10 +77,11 @@ if (treasurySeed) {
 const txSubmitWorker = startTxSubmitWorker(workerRedis);
 const txConfirmWorker = startTxConfirmWorker(workerRedis);
 const webhookDeliveryWorker = startWebhookDeliveryWorker(workerRedis);
+const credentialExpiryWorker = startCredentialExpiryWorker(workerRedis);
 
 logger.info(
   {
-    queues: ['tx-submit', 'tx-confirm', 'webhook-delivery'],
+    queues: ['tx-submit', 'tx-confirm', 'webhook-delivery', 'credential-expiry'],
     redis: redisUrl,
     network: process.env.XRPL_NETWORK ?? 'testnet',
     treasuryLoaded: !!treasurySeed,
@@ -93,6 +95,7 @@ async function shutdown(signal: string): Promise<void> {
     txSubmitWorker.close(),
     txConfirmWorker.close(),
     webhookDeliveryWorker.close(),
+    credentialExpiryWorker.close(),
   ]);
   await disconnectWorker();
   await workerRedis.quit();
