@@ -25,6 +25,7 @@ import {
   getAccount,
   rotateRegularKey,
 } from '../services/account.service.ts';
+import { listCredentialsForAccount } from '../services/credential.service.ts';
 import type { AppEnv } from '../types.ts';
 import {
   configureSignersSchema,
@@ -105,6 +106,20 @@ accounts.get('/:address', async (c) => {
     funding_tx_id: account.fundingTxId,
     created_at: account.createdAt,
   });
+});
+
+// GET /:address/credentials — list all credentials for a managed account.
+accounts.get('/:address/credentials', async (c) => {
+  const clientId = c.get('clientId');
+  const address = c.req.param('address');
+
+  const account = await getAccount(clientId, address);
+  if (!account) {
+    return c.json({ error: 'Account not found' }, 404);
+  }
+
+  const credentials = await listCredentialsForAccount(clientId, address);
+  return c.json({ data: credentials });
 });
 
 // Map an AccountServiceError to its HTTP response. Centralized so the

@@ -3,6 +3,7 @@ import type {
   Account,
   ConfigureSignersParams,
   CreateAccountParams,
+  Credential,
   DeleteAccountParams,
   QueuedTx,
   RequestOptions,
@@ -51,5 +52,10 @@ export class Accounts {
     opts?: RequestOptions,
   ): Promise<QueuedTx> {
     return this.http.delete<QueuedTx>(`/v1/accounts/${address}`, params, opts?.idempotencyKey);
+  }
+
+  /** List all credentials for a managed account. */
+  async listCredentials(address: string): Promise<{ data: Credential[] }> {
+    return this.http.get<{ data: Credential[] }>(`/v1/accounts/${address}/credentials`);
   }
 }

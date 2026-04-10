@@ -7,9 +7,11 @@ vi.stubGlobal(
 );
 
 describe('RailForge', () => {
-  it('exposes accounts, tokens, payments, webhooks resource clients', () => {
+  it('exposes all resource clients', () => {
     const rf = new RailForge({ apiKey: 'rf_test_abc' });
     expect(rf.accounts).toBeDefined();
+    expect(rf.credentials).toBeDefined();
+    expect(rf.domains).toBeDefined();
     expect(rf.tokens).toBeDefined();
     expect(rf.payments).toBeDefined();
     expect(rf.webhooks).toBeDefined();

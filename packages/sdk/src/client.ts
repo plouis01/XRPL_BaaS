@@ -3,6 +3,8 @@
 
 import { HttpClient } from './http.ts';
 import { Accounts } from './resources/accounts.ts';
+import { Credentials } from './resources/credentials.ts';
+import { Domains } from './resources/domains.ts';
 import { Payments } from './resources/payments.ts';
 import { Tokens } from './resources/tokens.ts';
 import { Webhooks } from './resources/webhooks.ts';
@@ -21,6 +23,8 @@ export interface RailForgeOptions {
 
 export class RailForge {
   readonly accounts: Accounts;
+  readonly credentials: Credentials;
+  readonly domains: Domains;
   readonly tokens: Tokens;
   readonly payments: Payments;
   readonly webhooks: Webhooks;
@@ -30,6 +34,8 @@ export class RailForge {
     const http = new HttpClient({ baseUrl, apiKey: opts.apiKey });
 
     this.accounts = new Accounts(http);
+    this.credentials = new Credentials(http);
+    this.domains = new Domains(http);
     this.tokens = new Tokens(http);
     this.payments = new Payments(http);
     this.webhooks = new Webhooks(http);

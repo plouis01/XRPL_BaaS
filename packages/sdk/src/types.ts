@@ -13,7 +13,16 @@ export type CustodyMode = 'semi' | 'non_custodial';
 
 export type TokenType = 'mpt' | 'trustline';
 
-export type WebhookEventType = 'transaction.validated' | 'transaction.failed';
+export type WebhookEventType =
+  | 'transaction.validated'
+  | 'transaction.failed'
+  | 'credential.issued'
+  | 'credential.accepted'
+  | 'credential.revoked'
+  | 'credential.expiring'
+  | 'domain.created'
+  | 'domain.updated'
+  | 'domain.deleted';
 
 /** Returned by every async operation (202 Accepted). */
 export interface QueuedTx {
@@ -208,4 +217,101 @@ export interface WebhookEndpointWithSecret extends WebhookEndpoint {
 
 export interface WebhookEndpointList {
   data: WebhookEndpoint[];
+}
+
+// ---------------------------------------------------------------------------
+// Credentials (XLS-70)
+// ---------------------------------------------------------------------------
+
+export interface IssueCredentialParams {
+  issuer_address: string;
+  subject_address: string;
+  credential_type: string;
+  expiration?: number;
+  uri?: string;
+  metadata?: Record<string, unknown>;
+}
+
+export interface AcceptCredentialParams {
+  subject_address: string;
+}
+
+export interface VerifyCredentialParams {
+  subject_address: string;
+  issuer_address: string;
+  credential_type: string;
+}
+
+export interface Credential {
+  id: string;
+  issuer_address: string;
+  subject_address: string;
+  credential_type: string;
+  status: string;
+  expires_at: string | null;
+  accepted_at: string | null;
+  ledger_index: string | null;
+  metadata: unknown;
+  created_at: string | null;
+}
+
+export interface CredentialWithTx extends Credential {
+  tx_id: string;
+}
+
+export interface VerifyCredentialResult {
+  valid: boolean;
+  credential: Credential | null;
+}
+
+export interface CredentialIssuer {
+  id: string;
+  name: string;
+  address: string;
+  provider: string;
+  types: string[];
+}
+
+// ---------------------------------------------------------------------------
+// Domains (XLS-80)
+// ---------------------------------------------------------------------------
+
+export interface AcceptedCredentialEntry {
+  issuer: string;
+  credential_type: string;
+}
+
+export interface CreateDomainParams {
+  owner_address: string;
+  accepted_credentials: AcceptedCredentialEntry[];
+}
+
+export interface UpdateDomainParams {
+  accepted_credentials: AcceptedCredentialEntry[];
+}
+
+export interface CheckDomainMembershipParams {
+  subject_address: string;
+}
+
+export interface Domain {
+  id: string;
+  owner_address: string;
+  domain_id: string;
+  accepted_credentials: AcceptedCredentialEntry[];
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+export interface DomainWithTx extends Domain {
+  tx_id: string;
+}
+
+export interface DomainMembershipResult {
+  is_member: boolean;
+  matching_credentials: string[];
+}
+
+export interface DomainMembersList {
+  members: Array<{ subject_address: string; credential_ids: string[] }>;
 }

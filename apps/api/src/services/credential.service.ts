@@ -494,6 +494,36 @@ export async function listIssuers(): Promise<IssuerView[]> {
   }));
 }
 
+// ── List credentials for an account ──────────────────────────────────────────
+
+export async function listCredentialsForAccount(
+  clientId: string,
+  subjectAddress: string,
+): Promise<CredentialView[]> {
+  const rows = await db
+    .select({
+      id: schema.credentials.id,
+      issuerAddress: schema.credentials.issuerAddress,
+      subjectAddress: schema.credentials.subjectAddress,
+      credentialType: schema.credentials.credentialType,
+      status: schema.credentials.status,
+      expiresAt: schema.credentials.expiresAt,
+      acceptedAt: schema.credentials.acceptedAt,
+      ledgerIndex: schema.credentials.ledgerIndex,
+      metadata: schema.credentials.metadata,
+      createdAt: schema.credentials.createdAt,
+    })
+    .from(schema.credentials)
+    .where(
+      and(
+        eq(schema.credentials.clientId, clientId),
+        eq(schema.credentials.subjectAddress, subjectAddress),
+      ),
+    );
+
+  return rows.map(toView);
+}
+
 // ── List expiring credentials (for worker job) ─────────────────────────────
 
 export async function findExpiringCredentials(horizonDate: Date): Promise<
