@@ -110,6 +110,14 @@ export async function createAccount(input: CreateAccountInput): Promise<AccountV
       'TREASURY_ADDRESS env var is not set — account creation is disabled',
     );
   }
+  // Validate format — catch misconfiguration before queuing a tx that will
+  // fail in the worker with an obscure rippled error.
+  if (!/^r[1-9A-HJ-NP-Za-km-z]{24,34}$/.test(treasuryAddress)) {
+    throw new AccountServiceError(
+      'treasury_not_configured',
+      'TREASURY_ADDRESS is not a valid XRPL address',
+    );
+  }
 
   // 2. Generate a fresh wallet. Wallet.generate() produces a keypair with
   // a non-null seed; we assert it for the type system.
