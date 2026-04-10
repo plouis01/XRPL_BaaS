@@ -48,6 +48,10 @@ export const idempotency: MiddlewareHandler<AppEnv> = async (c, next) => {
   if (!key) {
     return c.json({ error: 'Missing Idempotency-Key header' }, 400);
   }
+  // Cap length to prevent Redis memory exhaustion via oversized keys.
+  if (key.length > 256) {
+    return c.json({ error: 'Idempotency-Key must be 256 characters or fewer' }, 400);
+  }
 
   // clientId is set by auth middleware which runs BEFORE this one. If it's
   // missing, something is very wrong upstream — fail closed.
