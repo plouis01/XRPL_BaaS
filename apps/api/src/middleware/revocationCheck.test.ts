@@ -1,13 +1,13 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const dbSelectResult = { current: [] as unknown[] };
+const limitMock = vi.fn();
 
 vi.mock('@railforge/db', () => ({
   db: {
     select: vi.fn(() => ({
       from: vi.fn(() => ({
         where: vi.fn(() => ({
-          limit: vi.fn(async () => dbSelectResult.current),
+          limit: limitMock,
         })),
       })),
     })),
@@ -39,21 +39,29 @@ function makeContext() {
 
 describe('revocationCheck', () => {
   beforeEach(() => {
-    dbSelectResult.current = [];
+    limitMock.mockReset();
   });
 
   it('passes through when key is still active', async () => {
-    dbSelectResult.current = [{ id: 'key-123' }];
+    limitMock.mockResolvedValueOnce([{ id: 'key-123' }]);
     const { c, next } = makeContext();
     await revocationCheck(c, next);
     expect(next).toHaveBeenCalledOnce();
   });
 
   it('returns 401 when key has been revoked (no matching row)', async () => {
-    dbSelectResult.current = [];
+    limitMock.mockResolvedValueOnce([]);
     const { c, next, json } = makeContext();
     await revocationCheck(c, next);
     expect(next).not.toHaveBeenCalled();
     expect(json).toHaveBeenCalledWith({ error: 'API key has been revoked' }, 401);
+  });
+
+  it('returns 503 when DB query fails (fail closed)', async () => {
+    limitMock.mockRejectedValueOnce(new Error('connection refused'));
+    const { c, next, json } = makeContext();
+    await revocationCheck(c, next);
+    expect(next).not.toHaveBeenCalled();
+    expect(json).toHaveBeenCalledWith({ error: 'Service unavailable' }, 503);
   });
 });

@@ -16,17 +16,23 @@ import type { AppEnv } from '../types.ts';
 export const revocationCheck: MiddlewareHandler<AppEnv> = async (c, next) => {
   const apiKeyId = c.get('apiKeyId');
 
-  const rows = await db
-    .select({ id: schema.apiKeys.id })
-    .from(schema.apiKeys)
-    .where(
-      and(
-        eq(schema.apiKeys.id, apiKeyId),
-        eq(schema.apiKeys.isActive, true),
-        isNull(schema.apiKeys.revokedAt),
-      ),
-    )
-    .limit(1);
+  let rows: { id: string }[];
+  try {
+    rows = await db
+      .select({ id: schema.apiKeys.id })
+      .from(schema.apiKeys)
+      .where(
+        and(
+          eq(schema.apiKeys.id, apiKeyId),
+          eq(schema.apiKeys.isActive, true),
+          isNull(schema.apiKeys.revokedAt),
+        ),
+      )
+      .limit(1);
+  } catch {
+    // Fail closed: if the DB is unreachable, block the request.
+    return c.json({ error: 'Service unavailable' }, 503);
+  }
 
   if (rows.length === 0) {
     return c.json({ error: 'API key has been revoked' }, 401);

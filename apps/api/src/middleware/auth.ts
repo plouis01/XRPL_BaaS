@@ -81,22 +81,35 @@ export const auth: MiddlewareHandler<AppEnv> = async (c, next) => {
   // indistinguishable from auth's perspective — same code path, same timing,
   // same response. This closes the timing-oracle gap that would otherwise
   // distinguish revoked/inactive keys from unknown keys.
-  const rows = await db
-    .select({
-      id: schema.apiKeys.id,
-      clientId: schema.apiKeys.clientId,
-      environment: schema.apiKeys.environment,
-      rateLimit: schema.apiKeys.rateLimit,
-    })
-    .from(schema.apiKeys)
-    .where(
-      and(
-        eq(schema.apiKeys.keyHash, keyHash),
-        eq(schema.apiKeys.isActive, true),
-        isNull(schema.apiKeys.revokedAt),
-      ),
-    )
-    .limit(1);
+  let rows: {
+    id: string;
+    clientId: string;
+    environment: string;
+    rateLimit: number;
+  }[];
+  try {
+    rows = await db
+      .select({
+        id: schema.apiKeys.id,
+        clientId: schema.apiKeys.clientId,
+        environment: schema.apiKeys.environment,
+        rateLimit: schema.apiKeys.rateLimit,
+      })
+      .from(schema.apiKeys)
+      .where(
+        and(
+          eq(schema.apiKeys.keyHash, keyHash),
+          eq(schema.apiKeys.isActive, true),
+          isNull(schema.apiKeys.revokedAt),
+        ),
+      )
+      .limit(1);
+  } catch (err) {
+    // Fail closed: if the DB is down, reject the request rather than
+    // letting unauthenticated traffic through.
+    logger.error({ err, ip }, 'auth DB query failed');
+    return c.json({ error: 'Service unavailable' }, 503);
+  }
 
   const row = rows[0];
   if (!row) {

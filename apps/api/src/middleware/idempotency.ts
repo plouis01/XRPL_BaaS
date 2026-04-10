@@ -61,7 +61,14 @@ export const idempotency: MiddlewareHandler<AppEnv> = async (c, next) => {
   const redis = getRedis();
 
   // 1. Check for a cached response. If found, replay it verbatim.
-  const cached = await redis.get(cacheKey);
+  // Wrapped in try/catch so Redis being down doesn't block the request —
+  // the handler will re-process and the cache write below also tolerates failure.
+  let cached: string | null = null;
+  try {
+    cached = await redis.get(cacheKey);
+  } catch {
+    // Redis down — treat as cache miss and proceed.
+  }
   if (cached) {
     try {
       const { status, body } = JSON.parse(cached) as CachedResponse;

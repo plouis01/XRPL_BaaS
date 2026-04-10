@@ -199,6 +199,29 @@ describe('auth middleware', () => {
     expect(res.headers.get('x-railforge-key-prefix')).toBeNull();
   });
 
+  it('rejects keys with commas (header smuggling defense)', async () => {
+    const app = makeApp();
+    const res = await app.request('/protected', {
+      headers: { 'x-api-key': 'rf_test_a,rf_test_b' },
+    });
+    expect(res.status).toBe(401);
+    const body = await res.json();
+    expect(body).toEqual({ error: 'Invalid API key' });
+    expect(limitMock).not.toHaveBeenCalled();
+  });
+
+  it('returns 503 when the DB query fails (fail closed)', async () => {
+    const app = makeApp();
+    limitMock.mockRejectedValueOnce(new Error('connection refused'));
+
+    const res = await app.request('/protected', {
+      headers: { 'x-api-key': 'rf_test_valid' },
+    });
+    expect(res.status).toBe(503);
+    const body = await res.json();
+    expect(body).toEqual({ error: 'Service unavailable' });
+  });
+
   it('issues a database query for every distinct key (no in-process key cache)', async () => {
     const app = makeApp();
     limitMock.mockResolvedValue([]);
