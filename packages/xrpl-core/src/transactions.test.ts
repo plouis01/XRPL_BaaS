@@ -761,6 +761,13 @@ describe('assetAmountToXrpl', () => {
     });
   });
 
+  it('converts MPT amount', () => {
+    expect(assetAmountToXrpl({ mptIssuanceId: MPT_ID, value: '50' })).toEqual({
+      mpt_issuance_id: MPT_ID,
+      value: '50',
+    });
+  });
+
   it('throws on invalid input', () => {
     expect(() => assetAmountToXrpl({ value: '10' })).toThrow();
   });

@@ -672,11 +672,17 @@ export interface AssetAmount {
 /** Convert our AssetAmount to the xrpl.js Amount type. */
 export function assetAmountToXrpl(a: AssetAmount): Amount {
   if (a.drops !== undefined) return a.drops;
+  if (a.mptIssuanceId && a.value) {
+    return {
+      mpt_issuance_id: a.mptIssuanceId,
+      value: a.value,
+    } as unknown as Amount;
+  }
   if (a.currency && a.issuer && a.value) {
     return { currency: a.currency, issuer: a.issuer, value: a.value };
   }
   throw new Error(
-    'AssetAmount must specify either drops (XRP) or currency+issuer+value (issued currency)',
+    'AssetAmount must specify drops (XRP), mptIssuanceId+value (MPT), or currency+issuer+value (issued currency)',
   );
 }
 
