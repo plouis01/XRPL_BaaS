@@ -1,21 +1,33 @@
 {
   "name": "@railforge/sdk",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "type": "module",
-  "main": "src/index.ts",
-  "types": "src/index.ts",
+  "description": "TypeScript client SDK for the RailForge API — Stripe for XRPL",
+  "license": "MIT",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
   "exports": {
-    ".": "./src/index.ts"
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
   },
+  "files": ["dist", "README.md"],
   "scripts": {
-    "build": "echo 'no build step (Bun runs .ts directly)'",
+    "build": "tsup src/index.ts --format esm --dts --clean --outDir dist",
     "test": "vitest run --passWithNoTests",
     "typecheck": "tsc"
   },
   "dependencies": {},
   "devDependencies": {
     "@types/node": "^22.9.0",
+    "tsup": "^8.5.1",
     "typescript": "^5.6.3",
     "vitest": "^2.1.5"
+  },
+  "keywords": ["xrpl", "railforge", "blockchain", "api", "sdk", "fintech"],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/plouis01/XRPL_BaaS"
   }
 }
