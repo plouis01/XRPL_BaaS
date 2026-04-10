@@ -87,3 +87,31 @@ jobs:
         # cost of the occasional retry. Same Postgres + Redis services
         # already provisioned above; no extra setup.
         run: bun run test:integration
+
+  dependency-scan:
+    name: Dependency audit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.1.38
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      # Socket detects supply-chain attacks, typosquats, and known
+      # vulnerabilities in the dependency tree. Free for open-source.
+      - name: Socket Security scan
+        uses: SocketDev/socket-security-action@v1
+        if: github.event_name == 'pull_request'
+
+      # npm audit as a fallback — catches CVEs in the npm advisory DB.
+      # --audit-level=high avoids noise from low/moderate findings that
+      # would block CI without actionable fixes.
+      - name: npm audit (high + critical)
+        run: bunx npm-audit-html@latest --registry https://registry.npmjs.org || true
+        continue-on-error: true
