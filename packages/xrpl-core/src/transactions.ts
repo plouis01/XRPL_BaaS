@@ -18,13 +18,19 @@
 import type {
   AccountDelete,
   AccountSet,
+  AuthorizeCredential,
   Clawback,
+  CredentialAccept,
+  CredentialCreate,
+  CredentialDelete,
   EscrowCancel,
   EscrowCreate,
   EscrowFinish,
   MPTokenIssuanceCreate,
   MPTokenIssuanceSet,
   Payment,
+  PermissionedDomainDelete,
+  PermissionedDomainSet,
   SetRegularKey,
   SignerEntry,
   SignerListSet,
@@ -492,5 +498,146 @@ export function buildEscrowCancel(input: BuildEscrowCancelInput): EscrowCancel {
     Account: input.account,
     Owner: input.owner,
     OfferSequence: input.offerSequence,
+  };
+}
+
+// ── Credentials (XLS-70) ──────────────────────────────────────────────────
+//
+// Three tx types: CredentialCreate (issuer creates), CredentialAccept
+// (subject accepts), CredentialDelete (issuer or subject deletes).
+//
+// CredentialType is a hex-encoded string up to 64 bytes. Callers pass it
+// pre-encoded — the builder does NOT hex-encode for them (the schema
+// validator ensures the format).
+
+export interface BuildCredentialCreateInput {
+  /** The issuer account creating the credential. */
+  account: string;
+  /** The subject account receiving the credential. */
+  subject: string;
+  /** Hex-encoded credential type (up to 64 bytes). */
+  credentialType: string;
+  /** Optional XRPL epoch expiration timestamp. */
+  expiration?: number;
+  /** Optional URI (hex-encoded). */
+  uri?: string;
+}
+
+export function buildCredentialCreate(input: BuildCredentialCreateInput): CredentialCreate {
+  if (input.credentialType.length === 0 || input.credentialType.length > 128) {
+    throw new Error(
+      `CredentialType must be 1-128 hex chars (up to 64 bytes), got ${input.credentialType.length}`,
+    );
+  }
+  const tx: CredentialCreate = {
+    TransactionType: 'CredentialCreate',
+    Account: input.account,
+    Subject: input.subject,
+    CredentialType: input.credentialType.toUpperCase(),
+  };
+  if (input.expiration !== undefined) tx.Expiration = input.expiration;
+  if (input.uri !== undefined) tx.URI = input.uri.toUpperCase();
+  return tx;
+}
+
+export interface BuildCredentialAcceptInput {
+  /** The subject account accepting the credential. */
+  account: string;
+  /** The issuer who created the credential. */
+  issuer: string;
+  /** Hex-encoded credential type. */
+  credentialType: string;
+}
+
+export function buildCredentialAccept(input: BuildCredentialAcceptInput): CredentialAccept {
+  return {
+    TransactionType: 'CredentialAccept',
+    Account: input.account,
+    Issuer: input.issuer,
+    CredentialType: input.credentialType.toUpperCase(),
+  };
+}
+
+export interface BuildCredentialDeleteInput {
+  /** The account submitting the delete (issuer or subject). */
+  account: string;
+  /** Hex-encoded credential type. */
+  credentialType: string;
+  /** Required when the submitter is the issuer (identifies the subject). */
+  subject?: string;
+  /** Required when the submitter is the subject (identifies the issuer). */
+  issuer?: string;
+}
+
+export function buildCredentialDelete(input: BuildCredentialDeleteInput): CredentialDelete {
+  if (!input.subject && !input.issuer) {
+    throw new Error('CredentialDelete requires either subject or issuer');
+  }
+  const tx: CredentialDelete = {
+    TransactionType: 'CredentialDelete',
+    Account: input.account,
+    CredentialType: input.credentialType.toUpperCase(),
+  };
+  if (input.subject !== undefined) tx.Subject = input.subject;
+  if (input.issuer !== undefined) tx.Issuer = input.issuer;
+  return tx;
+}
+
+// ── Permissioned Domains (XLS-80) ─────────────────────────────────────────
+//
+// PermissionedDomainSet creates a new domain (DomainID omitted) or updates
+// an existing one (DomainID present). AcceptedCredentials is an array of
+// {Credential: {Issuer, CredentialType}} — max 10 per domain.
+
+export interface AcceptedCredentialEntry {
+  issuer: string;
+  credentialType: string;
+}
+
+export interface BuildPermissionedDomainSetInput {
+  account: string;
+  /** Omit to create a new domain. Provide to update an existing one. */
+  domainId?: string;
+  /** Up to 10 accepted credential entries. */
+  acceptedCredentials: AcceptedCredentialEntry[];
+}
+
+export function buildPermissionedDomainSet(
+  input: BuildPermissionedDomainSetInput,
+): PermissionedDomainSet {
+  if (input.acceptedCredentials.length === 0 || input.acceptedCredentials.length > 10) {
+    throw new Error(
+      `AcceptedCredentials must have 1-10 entries, got ${input.acceptedCredentials.length}`,
+    );
+  }
+
+  const entries: AuthorizeCredential[] = input.acceptedCredentials.map((c) => ({
+    Credential: {
+      Issuer: c.issuer,
+      CredentialType: c.credentialType.toUpperCase(),
+    },
+  }));
+
+  const tx: PermissionedDomainSet = {
+    TransactionType: 'PermissionedDomainSet',
+    Account: input.account,
+    AcceptedCredentials: entries,
+  };
+  if (input.domainId !== undefined) tx.DomainID = input.domainId;
+  return tx;
+}
+
+export interface BuildPermissionedDomainDeleteInput {
+  account: string;
+  domainId: string;
+}
+
+export function buildPermissionedDomainDelete(
+  input: BuildPermissionedDomainDeleteInput,
+): PermissionedDomainDelete {
+  return {
+    TransactionType: 'PermissionedDomainDelete',
+    Account: input.account,
+    DomainID: input.domainId,
   };
 }
