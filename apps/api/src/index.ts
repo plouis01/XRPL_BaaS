@@ -1,6 +1,7 @@
 import { Hono } from 'hono';
 import { logger } from './logger.ts';
 import { auth } from './middleware/auth.ts';
+import { envGuard } from './middleware/envGuard.ts';
 import { errorHandler } from './middleware/errorHandler.ts';
 import { idempotency } from './middleware/idempotency.ts';
 import { ipRateLimit } from './middleware/ipRateLimit.ts';
@@ -29,11 +30,13 @@ app.get('/health', (c) => c.json({ status: 'ok' }));
 //      BEFORE the database is touched. Without this, failed-auth requests
 //      bypass rate limiting entirely (they never reach the per-key limiter).
 //   2. auth        — HMAC-SHA256 API key lookup, sets clientId/apiKeyId.
-//   3. rateLimit   — per-API-key sliding window, sets X-RateLimit-* headers.
-//   4. idempotency — enforces Idempotency-Key on state-changing methods.
+//   3. envGuard    — rejects keys whose environment doesn't match the server's XRPL_NETWORK.
+//   4. rateLimit   — per-API-key sliding window, sets X-RateLimit-* headers.
+//   5. idempotency — enforces Idempotency-Key on state-changing methods.
 const v1 = new Hono<AppEnv>();
 v1.use('*', ipRateLimit);
 v1.use('*', auth);
+v1.use('*', envGuard);
 v1.use('*', rateLimit);
 v1.use('*', idempotency);
 
