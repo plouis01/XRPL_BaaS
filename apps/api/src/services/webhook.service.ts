@@ -70,9 +70,25 @@ function generateSecret(): string {
 }
 
 /**
+ * Returns true if a hostname resolves to a private/reserved IP range.
+ * Blocks SSRF against internal services (cloud metadata, databases, etc.).
+ */
+function isPrivateHostname(hostname: string): boolean {
+  const patterns = [
+    /^127\./, // loopback
+    /^10\./, // RFC 1918
+    /^172\.(1[6-9]|2\d|3[01])\./, // RFC 1918
+    /^192\.168\./, // RFC 1918
+    /^169\.254\./, // link-local (AWS metadata at 169.254.169.254)
+    /^0\./, // "this" network
+  ];
+  return patterns.some((p) => p.test(hostname)) || hostname === '[::1]' || hostname === '0.0.0.0';
+}
+
+/**
  * Validate that a URL is suitable for webhook delivery. We require https
- * in production but permit http on localhost for dev. Reject everything
- * else (file://, javascript:, etc.) — those are an SSRF surface.
+ * in production but permit http on localhost for dev. Reject private IPs
+ * and non-http(s) schemes — those are an SSRF surface.
  */
 function validateUrl(url: string): URL {
   let parsed: URL;
@@ -84,14 +100,20 @@ function validateUrl(url: string): URL {
   if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
     throw new WebhookServiceError('invalid_url', 'Webhook URL must use http or https');
   }
+  // Localhost is allowed for dev (http or https). Skip SSRF check for it.
+  const isLocalhost = parsed.hostname === 'localhost' || parsed.hostname === '127.0.0.1';
+
+  // Block private/reserved IPs — SSRF defense. Exempt localhost for dev.
+  if (!isLocalhost && isPrivateHostname(parsed.hostname)) {
+    throw new WebhookServiceError(
+      'invalid_url',
+      'Webhook URL cannot point to private or reserved IP addresses',
+    );
+  }
   // Refuse http:// outside localhost — silent plaintext delivery is a
   // footgun. The worker doesn't enforce TLS itself, so this is the
   // chokepoint.
-  if (
-    parsed.protocol === 'http:' &&
-    parsed.hostname !== 'localhost' &&
-    parsed.hostname !== '127.0.0.1'
-  ) {
+  if (parsed.protocol === 'http:' && !isLocalhost) {
     throw new WebhookServiceError('invalid_url', 'Webhook URL must use https except on localhost');
   }
   return parsed;
