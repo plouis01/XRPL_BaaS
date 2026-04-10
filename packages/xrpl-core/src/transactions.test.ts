@@ -13,6 +13,9 @@ import {
   MPT_UNLOCK_FLAG,
   buildAccountDelete,
   buildAccountSet,
+  buildEscrowCancel,
+  buildEscrowCreate,
+  buildEscrowFinish,
   buildIssuedCurrencyClawback,
   buildIssuedCurrencyPayment,
   buildMptClawback,
@@ -466,5 +469,109 @@ describe('buildSetRegularKey', () => {
     });
     const rt = roundTrip(tx);
     expect(rt.RegularKey).toBe(ACCOUNT_B);
+  });
+});
+
+describe('buildEscrowCreate', () => {
+  it('produces an EscrowCreate with FinishAfter', () => {
+    const tx = buildEscrowCreate({
+      account: ACCOUNT_A,
+      destination: ACCOUNT_B,
+      amountDrops: '1000000',
+      finishAfter: 800000000,
+    });
+    expect(tx.TransactionType).toBe('EscrowCreate');
+    expect(tx.Account).toBe(ACCOUNT_A);
+    expect(tx.Destination).toBe(ACCOUNT_B);
+    expect(tx.Amount).toBe('1000000');
+    expect(tx.FinishAfter).toBe(800000000);
+    expect(tx.CancelAfter).toBeUndefined();
+  });
+
+  it('includes CancelAfter and Condition when provided', () => {
+    const tx = buildEscrowCreate({
+      account: ACCOUNT_A,
+      destination: ACCOUNT_B,
+      amountDrops: '100',
+      finishAfter: 800000000,
+      cancelAfter: 800100000,
+      condition: 'A0258020',
+    });
+    expect(tx.CancelAfter).toBe(800100000);
+    expect(tx.Condition).toBe('A0258020');
+  });
+
+  it('throws when neither finishAfter nor cancelAfter is set', () => {
+    expect(() =>
+      buildEscrowCreate({
+        account: ACCOUNT_A,
+        destination: ACCOUNT_B,
+        amountDrops: '100',
+      }),
+    ).toThrow(/at least one/);
+  });
+
+  it('throws when cancelAfter <= finishAfter', () => {
+    expect(() =>
+      buildEscrowCreate({
+        account: ACCOUNT_A,
+        destination: ACCOUNT_B,
+        amountDrops: '100',
+        finishAfter: 800000000,
+        cancelAfter: 800000000, // equal — invalid
+      }),
+    ).toThrow(/cancelAfter must be after/);
+  });
+
+  it('round-trips through encode/decode', () => {
+    const tx = buildEscrowCreate({
+      account: ACCOUNT_A,
+      destination: ACCOUNT_B,
+      amountDrops: '1000000',
+      finishAfter: 800000000,
+      cancelAfter: 800100000,
+    });
+    const rt = roundTrip(tx);
+    expect(rt.Amount).toBe('1000000');
+    expect(rt.FinishAfter).toBe(800000000);
+    expect(rt.CancelAfter).toBe(800100000);
+  });
+});
+
+describe('buildEscrowFinish', () => {
+  it('produces an EscrowFinish', () => {
+    const tx = buildEscrowFinish({
+      account: ACCOUNT_A,
+      owner: ACCOUNT_B,
+      offerSequence: 42,
+    });
+    expect(tx.TransactionType).toBe('EscrowFinish');
+    expect(tx.Owner).toBe(ACCOUNT_B);
+    expect(tx.OfferSequence).toBe(42);
+  });
+
+  it('includes Condition + Fulfillment when provided', () => {
+    const tx = buildEscrowFinish({
+      account: ACCOUNT_A,
+      owner: ACCOUNT_B,
+      offerSequence: 42,
+      condition: 'A0258020',
+      fulfillment: 'A0028000',
+    });
+    expect(tx.Condition).toBe('A0258020');
+    expect(tx.Fulfillment).toBe('A0028000');
+  });
+});
+
+describe('buildEscrowCancel', () => {
+  it('produces an EscrowCancel', () => {
+    const tx = buildEscrowCancel({
+      account: ACCOUNT_A,
+      owner: ACCOUNT_B,
+      offerSequence: 42,
+    });
+    expect(tx.TransactionType).toBe('EscrowCancel');
+    expect(tx.Owner).toBe(ACCOUNT_B);
+    expect(tx.OfferSequence).toBe(42);
   });
 });

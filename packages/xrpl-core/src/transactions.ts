@@ -19,6 +19,9 @@ import type {
   AccountDelete,
   AccountSet,
   Clawback,
+  EscrowCancel,
+  EscrowCreate,
+  EscrowFinish,
   MPTokenIssuanceCreate,
   MPTokenIssuanceSet,
   Payment,
@@ -397,4 +400,97 @@ export function buildSetRegularKey(input: BuildSetRegularKeyInput): SetRegularKe
     tx.RegularKey = input.regularKey;
   }
   return tx;
+}
+
+// ── Escrow ──────────────────────────────────────────────────────────────────
+//
+// EscrowCreate locks XRP (or MPT, per xrpl.js types) until either:
+//   (a) FinishAfter time passes AND the optional Condition is fulfilled, or
+//   (b) CancelAfter time passes and the escrow is cancelled.
+// At least one of FinishAfter / CancelAfter MUST be set (rippled rejects
+// the tx otherwise). We validate this in the builder rather than letting
+// rippled produce a cryptic temMALFORMED.
+//
+// Times are XRPL epoch seconds (seconds since 2000-01-01T00:00:00Z).
+// The constant below converts from Unix epoch to XRPL epoch.
+export const XRPL_EPOCH_OFFSET = 946684800;
+
+export interface BuildEscrowCreateInput {
+  account: string;
+  destination: string;
+  /** Amount in drops (XRP). */
+  amountDrops: string;
+  /** XRPL epoch timestamp after which the escrow can be finished. */
+  finishAfter?: number;
+  /** XRPL epoch timestamp after which the escrow can be cancelled. */
+  cancelAfter?: number;
+  /** PREIMAGE-SHA-256 crypto-condition (hex). */
+  condition?: string;
+  destinationTag?: number;
+}
+
+export function buildEscrowCreate(input: BuildEscrowCreateInput): EscrowCreate {
+  if (input.finishAfter === undefined && input.cancelAfter === undefined) {
+    throw new Error('EscrowCreate requires at least one of finishAfter or cancelAfter');
+  }
+  if (
+    input.cancelAfter !== undefined &&
+    input.finishAfter !== undefined &&
+    input.cancelAfter <= input.finishAfter
+  ) {
+    throw new Error('cancelAfter must be after finishAfter');
+  }
+
+  const tx: EscrowCreate = {
+    TransactionType: 'EscrowCreate',
+    Account: input.account,
+    Destination: input.destination,
+    Amount: input.amountDrops,
+  };
+  if (input.finishAfter !== undefined) tx.FinishAfter = input.finishAfter;
+  if (input.cancelAfter !== undefined) tx.CancelAfter = input.cancelAfter;
+  if (input.condition !== undefined) tx.Condition = input.condition;
+  if (input.destinationTag !== undefined) tx.DestinationTag = input.destinationTag;
+  return tx;
+}
+
+export interface BuildEscrowFinishInput {
+  account: string;
+  /** The account that created the escrow. */
+  owner: string;
+  /** The Sequence number of the EscrowCreate tx. */
+  offerSequence: number;
+  /** The crypto-condition from the EscrowCreate (hex). Required if the escrow has a Condition. */
+  condition?: string;
+  /** The fulfillment that satisfies the condition (hex). */
+  fulfillment?: string;
+}
+
+export function buildEscrowFinish(input: BuildEscrowFinishInput): EscrowFinish {
+  const tx: EscrowFinish = {
+    TransactionType: 'EscrowFinish',
+    Account: input.account,
+    Owner: input.owner,
+    OfferSequence: input.offerSequence,
+  };
+  if (input.condition !== undefined) tx.Condition = input.condition;
+  if (input.fulfillment !== undefined) tx.Fulfillment = input.fulfillment;
+  return tx;
+}
+
+export interface BuildEscrowCancelInput {
+  account: string;
+  /** The account that created the escrow. */
+  owner: string;
+  /** The Sequence number of the EscrowCreate tx. */
+  offerSequence: number;
+}
+
+export function buildEscrowCancel(input: BuildEscrowCancelInput): EscrowCancel {
+  return {
+    TransactionType: 'EscrowCancel',
+    Account: input.account,
+    Owner: input.owner,
+    OfferSequence: input.offerSequence,
+  };
 }
