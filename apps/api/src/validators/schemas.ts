@@ -280,5 +280,127 @@ export const checkDomainMembershipSchema = z.object({
   subject_address: xrplAddressSchema,
 });
 
-// ── Permissions, DEX ─────────────────────────────────────────────────────
-// TODO Sprint 6: add schemas for permissions and DEX as those routes are implemented.
+// ── Permissions (XLS-75 fallback: multi-sign roles) ─────────────────────
+
+/** XLS-75 permission values. Pre-V1.1 the service uses multi-sign roles. */
+export const PERMISSION_VALUES = [
+  'Payment',
+  'TrustSet',
+  'OfferCreate',
+  'OfferCancel',
+  'AccountSet',
+  'EscrowCreate',
+  'EscrowFinish',
+  'EscrowCancel',
+  'CredentialCreate',
+  'CredentialAccept',
+  'CredentialDelete',
+] as const;
+
+export const grantPermissionSchema = z.object({
+  /** The delegator account (must be managed). */
+  delegator_address: xrplAddressSchema,
+  /** The delegate account receiving permissions. */
+  delegate_address: xrplAddressSchema,
+  /** List of permission strings (e.g. 'Payment', 'TrustSet'). */
+  permissions: z.array(z.enum(PERMISSION_VALUES)).min(1).max(10),
+  /** Signer weight for the delegate on the signer list. Default 1. */
+  weight: z.number().int().min(1).max(65535).default(1),
+});
+
+export const revokePermissionSchema = z.object({
+  /** Required to confirm the delegator account. */
+  delegator_address: xrplAddressSchema,
+});
+
+// ── DEX ─────────────────────────────────────────────────────────────────
+
+/**
+ * Asset amount: one of XRP drops, issued currency (currency+issuer+value),
+ * or MPT (mpt_issuance_id+value).
+ */
+const assetAmountSchema = z
+  .object({
+    drops: z.string().optional(),
+    currency: z.string().optional(),
+    issuer: xrplAddressSchema.optional(),
+    value: z.string().optional(),
+    mpt_issuance_id: z.string().optional(),
+  })
+  .refine(
+    (d) => {
+      const hasXrp = !!d.drops;
+      const hasIssued = !!d.currency && !!d.issuer && !!d.value;
+      const hasMpt = !!d.mpt_issuance_id && !!d.value;
+      return [hasXrp, hasIssued, hasMpt].filter(Boolean).length === 1;
+    },
+    {
+      message:
+        'Provide exactly one of: drops (XRP), currency+issuer+value (issued), or mpt_issuance_id+value (MPT)',
+    },
+  );
+
+/** Asset identifier (no value): for pool pair identification in AMM ops. */
+const assetCurrencySchema = z
+  .object({
+    drops: z.literal(true).optional(),
+    currency: z.string().optional(),
+    issuer: xrplAddressSchema.optional(),
+    mpt_issuance_id: z.string().optional(),
+  })
+  .refine(
+    (d) => {
+      const isXrp = !!d.drops;
+      const isIssued = !!d.currency && !!d.issuer;
+      const isMpt = !!d.mpt_issuance_id;
+      return [isXrp, isIssued, isMpt].filter(Boolean).length === 1;
+    },
+    {
+      message: 'Provide exactly one of: drops (XRP), currency+issuer, or mpt_issuance_id',
+    },
+  );
+
+export const createOfferSchema = z.object({
+  /** Account placing the offer (must be managed). */
+  account: xrplAddressSchema,
+  taker_gets: assetAmountSchema,
+  taker_pays: assetAmountSchema,
+  expiration: z.number().int().min(0).optional(),
+  /** Replace an existing offer by its sequence number. */
+  offer_sequence: z.number().int().min(0).optional(),
+  /** OfferCreate flags (tfPassive=65536, tfImmediateOrCancel=131072, tfFillOrKill=262144, tfSell=524288). */
+  flags: z.number().int().min(0).optional(),
+  /** Permissioned DEX domain ID (XLS-81). */
+  domain_id: z.string().optional(),
+});
+
+export const cancelOfferSchema = z.object({
+  /** Account that owns the offer. */
+  account: xrplAddressSchema,
+  /** Sequence number of the offer to cancel. */
+  offer_sequence: z.number().int().min(0),
+});
+
+export const ammDepositSchema = z.object({
+  account: xrplAddressSchema,
+  asset: assetCurrencySchema,
+  asset2: assetCurrencySchema,
+  amount: assetAmountSchema.optional(),
+  amount2: assetAmountSchema.optional(),
+  e_price: assetAmountSchema.optional(),
+  lp_token_out: z
+    .object({ currency: z.string(), issuer: z.string(), value: z.string() })
+    .optional(),
+  flags: z.number().int().min(0).optional(),
+});
+
+export const ammWithdrawSchema = z.object({
+  account: xrplAddressSchema,
+  asset: assetCurrencySchema,
+  asset2: assetCurrencySchema,
+  amount: assetAmountSchema.optional(),
+  amount2: assetAmountSchema.optional(),
+  e_price: assetAmountSchema.optional(),
+  lp_token_in: z.object({ currency: z.string(), issuer: z.string(), value: z.string() }).optional(),
+  flags: z.number().int().min(0).optional(),
+});
