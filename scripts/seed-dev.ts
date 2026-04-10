@@ -110,4 +110,45 @@ console.log(`       -d '{"label":"test-wallet"}' \\`);
 console.log(`       http://localhost:3000/v1/accounts`);
 console.log("");
 
+// ── 6. Seed credential issuers (Sprint 5 marketplace) ─────────────────────
+// Upsert marketplace issuers. These are third-party KYC providers whose
+// XRPL addresses are registered so the API can validate issuer_address
+// on credential creation. The addresses below are testnet-only placeholders.
+
+const ISSUERS = [
+  {
+    name: "Sumsub (testnet)",
+    address: "rSumsubTestIssuer11111111111111",
+    provider: "sumsub",
+    types: ["4B5943", "4B5942"], // hex("KYC"), hex("KYB")
+  },
+  {
+    name: "Synaps (testnet)",
+    address: "rSynapsTestIssuer11111111111111",
+    provider: "synaps",
+    types: ["4B5943", "414D4C"], // hex("KYC"), hex("AML")
+  },
+];
+
+for (const issuer of ISSUERS) {
+  const existing = await db
+    .select({ id: schema.credentialIssuers.id })
+    .from(schema.credentialIssuers)
+    .where(eq(schema.credentialIssuers.provider, issuer.provider))
+    .limit(1);
+
+  if (existing[0]) {
+    console.log(`→ Issuer "${issuer.name}" already exists — skipping`);
+  } else {
+    await db.insert(schema.credentialIssuers).values({
+      name: issuer.name,
+      address: issuer.address,
+      provider: issuer.provider,
+      types: issuer.types,
+      isActive: true,
+    });
+    console.log(`→ Seeded issuer "${issuer.name}" (${issuer.provider})`);
+  }
+}
+
 process.exit(0);
