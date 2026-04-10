@@ -74,15 +74,34 @@ function generateSecret(): string {
  * Blocks SSRF against internal services (cloud metadata, databases, etc.).
  */
 function isPrivateHostname(hostname: string): boolean {
-  const patterns = [
+  // Strip IPv6 brackets for uniform matching.
+  const h = hostname.replace(/^\[|\]$/g, '');
+
+  const ipv4Patterns = [
     /^127\./, // loopback
     /^10\./, // RFC 1918
     /^172\.(1[6-9]|2\d|3[01])\./, // RFC 1918
     /^192\.168\./, // RFC 1918
     /^169\.254\./, // link-local (AWS metadata at 169.254.169.254)
     /^0\./, // "this" network
+    /^0+127\./, // octal-encoded loopback (0177.0.0.1)
+    /^\d+$/, // decimal-encoded IP (e.g. 2130706433 = 127.0.0.1)
   ];
-  return patterns.some((p) => p.test(hostname)) || hostname === '[::1]' || hostname === '0.0.0.0';
+
+  // IPv6 private/reserved ranges
+  const ipv6Patterns = [
+    /^::1$/, // loopback
+    /^::$/, // unspecified
+    /^::ffff:(?:127\.|10\.|172\.(1[6-9]|2\d|3[01])\.|192\.168\.)/, // IPv4-mapped
+    /^f[cd]/, // fc00::/7 unique local
+    /^fe[89ab]/, // fe80::/10 link-local
+  ];
+
+  return (
+    ipv4Patterns.some((p) => p.test(h)) ||
+    ipv6Patterns.some((p) => p.test(h.toLowerCase())) ||
+    h === '0.0.0.0'
+  );
 }
 
 /**
@@ -97,11 +116,17 @@ function validateUrl(url: string): URL {
   } catch {
     throw new WebhookServiceError('invalid_url', 'Webhook URL is not a valid URL');
   }
+  // Reject credentials in the URL — prevents request smuggling via user:pass@host.
+  if (parsed.username || parsed.password) {
+    throw new WebhookServiceError('invalid_url', 'Webhook URL must not contain credentials');
+  }
   if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
     throw new WebhookServiceError('invalid_url', 'Webhook URL must use http or https');
   }
-  // Localhost is allowed for dev (http or https). Skip SSRF check for it.
-  const isLocalhost = parsed.hostname === 'localhost' || parsed.hostname === '127.0.0.1';
+  // Localhost is allowed for dev only. In production, localhost is an SSRF vector.
+  const isLocalhost =
+    (parsed.hostname === 'localhost' || parsed.hostname === '127.0.0.1') &&
+    process.env.NODE_ENV !== 'production';
 
   // Block private/reserved IPs — SSRF defense. Exempt localhost for dev.
   if (!isLocalhost && isPrivateHostname(parsed.hostname)) {
