@@ -11,9 +11,11 @@ describe('RailForge', () => {
     const rf = new RailForge({ apiKey: 'rf_test_abc' });
     expect(rf.accounts).toBeDefined();
     expect(rf.credentials).toBeDefined();
+    expect(rf.dex).toBeDefined();
     expect(rf.domains).toBeDefined();
     expect(rf.tokens).toBeDefined();
     expect(rf.payments).toBeDefined();
+    expect(rf.permissions).toBeDefined();
     expect(rf.webhooks).toBeDefined();
   });
 

@@ -315,3 +315,110 @@ export interface DomainMembershipResult {
 export interface DomainMembersList {
   members: Array<{ subject_address: string; credential_ids: string[] }>;
 }
+
+// ---------------------------------------------------------------------------
+// DEX
+// ---------------------------------------------------------------------------
+
+export interface AssetAmount {
+  drops?: string;
+  currency?: string;
+  issuer?: string;
+  value?: string;
+  mpt_issuance_id?: string;
+}
+
+export interface AssetCurrency {
+  drops?: true;
+  currency?: string;
+  issuer?: string;
+  mpt_issuance_id?: string;
+}
+
+export interface CreateOfferParams {
+  account: string;
+  taker_gets: AssetAmount;
+  taker_pays: AssetAmount;
+  expiration?: number;
+  offer_sequence?: number;
+  flags?: number;
+  domain_id?: string;
+}
+
+export interface CancelOfferParams {
+  account: string;
+  offer_sequence: number;
+}
+
+export interface AmmDepositParams {
+  account: string;
+  asset: AssetCurrency;
+  asset2: AssetCurrency;
+  amount?: AssetAmount;
+  amount2?: AssetAmount;
+  e_price?: AssetAmount;
+  lp_token_out?: { currency: string; issuer: string; value: string };
+  flags?: number;
+}
+
+export interface AmmWithdrawParams {
+  account: string;
+  asset: AssetCurrency;
+  asset2: AssetCurrency;
+  amount?: AssetAmount;
+  amount2?: AssetAmount;
+  e_price?: AssetAmount;
+  lp_token_in?: { currency: string; issuer: string; value: string };
+  flags?: number;
+}
+
+// ---------------------------------------------------------------------------
+// Permissions (XLS-75 fallback: multi-sign roles)
+// ---------------------------------------------------------------------------
+
+export type PermissionValue =
+  | 'Payment'
+  | 'TrustSet'
+  | 'OfferCreate'
+  | 'OfferCancel'
+  | 'AccountSet'
+  | 'EscrowCreate'
+  | 'EscrowFinish'
+  | 'EscrowCancel'
+  | 'CredentialCreate'
+  | 'CredentialAccept'
+  | 'CredentialDelete';
+
+export interface GrantPermissionParams {
+  delegator_address: string;
+  delegate_address: string;
+  permissions: PermissionValue[];
+  weight?: number;
+}
+
+export interface RevokePermissionParams {
+  delegator_address: string;
+}
+
+export interface Delegation {
+  id: string;
+  delegator_address: string;
+  delegate_address: string;
+  permissions: string[];
+  status: string;
+  created_at: string | null;
+  revoked_at: string | null;
+}
+
+export interface DelegationWithTx extends Delegation {
+  tx_id: string;
+}
+
+export interface AuditEntry {
+  id: string;
+  method: string;
+  path: string;
+  status_code: number;
+  ip: string | null;
+  created_at: string | null;
+}
