@@ -14,7 +14,7 @@
 //   list   — list all active delegations for a delegator
 //   audit  — query audit_log for delegation-related changes
 
-import { and, db, eq, isNull, schema } from '@railforge/db';
+import { and, db, eq, isNull, like, schema } from '@railforge/db';
 import { enqueueTxSubmit } from '@railforge/jobs';
 import { buildSignerListSet } from '@railforge/xrpl-core';
 import { logger } from '../logger.ts';
@@ -355,6 +355,7 @@ export async function getDelegationAudit(
   delegatorAddress: string,
 ): Promise<AuditEntry[]> {
   // Return audit log entries related to permission operations for this delegator.
+  // Push both filters into SQL to avoid loading the full audit_log table.
   const rows = await db
     .select({
       id: schema.auditLog.id,
@@ -365,17 +366,20 @@ export async function getDelegationAudit(
       createdAt: schema.auditLog.createdAt,
     })
     .from(schema.auditLog)
-    .where(eq(schema.auditLog.clientId, clientId));
+    .where(
+      and(
+        eq(schema.auditLog.clientId, clientId),
+        like(schema.auditLog.path, '%/permissions%'),
+        like(schema.auditLog.path, `%${delegatorAddress}%`),
+      ),
+    );
 
-  // Filter to permission-related paths for this delegator.
-  return rows
-    .filter((r) => r.path.includes('/permissions') && r.path.includes(delegatorAddress))
-    .map((r) => ({
-      id: r.id,
-      method: r.method,
-      path: r.path,
-      status_code: r.statusCode,
-      ip: r.ip,
-      created_at: r.createdAt,
-    }));
+  return rows.map((r) => ({
+    id: r.id,
+    method: r.method,
+    path: r.path,
+    status_code: r.statusCode,
+    ip: r.ip,
+    created_at: r.createdAt,
+  }));
 }

@@ -69,6 +69,7 @@ vi.mock('@railforge/db', () => {
     eq: vi.fn(),
     and: vi.fn(),
     isNull: vi.fn(),
+    like: vi.fn(),
   };
 });
 
@@ -214,16 +215,10 @@ describe('PermissionService', () => {
   // ── audit ─────────────────────────────────────────────────────────────
 
   describe('getDelegationAudit', () => {
-    it('returns filtered audit entries', async () => {
+    it('returns audit entries mapped from DB rows', async () => {
+      // Filtering now happens in SQL (LIKE clauses). The mock simulates
+      // the DB returning only matching rows.
       dbSelectResults.auditLog = [
-        {
-          id: 'audit-1',
-          method: 'POST',
-          path: '/v1/permissions',
-          statusCode: 201,
-          ip: '127.0.0.1',
-          createdAt: new Date(),
-        },
         {
           id: 'audit-2',
           method: 'DELETE',
@@ -232,19 +227,11 @@ describe('PermissionService', () => {
           ip: '127.0.0.1',
           createdAt: new Date(),
         },
-        {
-          id: 'audit-3',
-          method: 'GET',
-          path: '/v1/accounts/rDelegator',
-          statusCode: 200,
-          ip: '127.0.0.1',
-          createdAt: new Date(),
-        },
       ];
       const result = await getDelegationAudit('client-1', 'rDelegator');
-      // Only the DELETE entry matches both /permissions and rDelegator
       expect(result).toHaveLength(1);
       expect(result[0]!.path).toContain('rDelegator');
+      expect(result[0]!.status_code).toBe(202);
     });
   });
 });
