@@ -15,6 +15,7 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { and, db, eq, isNull, schema } from '@railforge/db';
 import type { MiddlewareHandler } from 'hono';
+import { logger } from '../logger.ts';
 import type { AppEnv } from '../types.ts';
 
 const KEY_PREFIX_LENGTH = 8;
@@ -47,7 +48,13 @@ function safeEqual(a: string, b: string): boolean {
 
 export const auth: MiddlewareHandler<AppEnv> = async (c, next) => {
   const apiKey = c.req.header('x-api-key');
+  const ip =
+    c.req.header('x-forwarded-for')?.split(',')[0]?.trim() ??
+    c.req.header('x-real-ip') ??
+    'unknown';
+
   if (!apiKey) {
+    logger.warn({ ip, reason: 'missing_key' }, 'auth failure');
     return c.json({ error: 'Missing API key' }, 401);
   }
 
@@ -55,6 +62,14 @@ export const auth: MiddlewareHandler<AppEnv> = async (c, next) => {
   // duplicate headers or commas. Reject any value that looks like
   // multiple keys concatenated — this is never a legitimate use.
   if (apiKey.includes(',')) {
+    logger.warn(
+      {
+        ip,
+        reason: 'header_smuggling',
+        keyPrefix: apiKey.slice(0, KEY_PREFIX_LENGTH),
+      },
+      'auth failure',
+    );
     return c.json({ error: 'Invalid API key' }, 401);
   }
 
@@ -87,6 +102,14 @@ export const auth: MiddlewareHandler<AppEnv> = async (c, next) => {
     // Intentionally generic — never reveal whether the key was found, revoked,
     // or just inactive. Brute-force pattern detection is the (pre-auth IP)
     // rate limiter's job.
+    logger.warn(
+      {
+        ip,
+        reason: 'invalid_key',
+        keyPrefix: apiKey.slice(0, KEY_PREFIX_LENGTH),
+      },
+      'auth failure',
+    );
     return c.json({ error: 'Invalid API key' }, 401);
   }
 
