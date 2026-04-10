@@ -369,7 +369,15 @@ export const createOfferSchema = z.object({
   /** Replace an existing offer by its sequence number. */
   offer_sequence: z.number().int().min(0).optional(),
   /** OfferCreate flags (tfPassive=65536, tfImmediateOrCancel=131072, tfFillOrKill=262144, tfSell=524288). */
-  flags: z.number().int().min(0).optional(),
+  flags: z
+    .number()
+    .int()
+    .min(0)
+    .refine((v) => (v & ~(65536 | 131072 | 262144 | 524288)) === 0, {
+      message:
+        'flags must be a combination of tfPassive(65536), tfImmediateOrCancel(131072), tfFillOrKill(262144), tfSell(524288)',
+    })
+    .optional(),
   /** Permissioned DEX domain ID (XLS-81). */
   domain_id: z.string().optional(),
 });
