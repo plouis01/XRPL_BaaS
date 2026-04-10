@@ -54,6 +54,7 @@ permissions.post('/', zValidator('json', grantPermissionSchema), async (c) => {
       delegateAddress: body.delegate_address,
       permissions: [...body.permissions],
       weight: body.weight,
+      idempotencyKey: c.req.header('idempotency-key'),
     });
     return c.json(result, 201);
   } catch (err) {
@@ -115,6 +116,7 @@ permissions.delete(
         clientId,
         delegatorAddress: delegator,
         delegateAddress: delegate,
+        idempotencyKey: c.req.header('idempotency-key'),
       });
       return c.json({ ...result, status: 'queued' }, 202);
     } catch (err) {

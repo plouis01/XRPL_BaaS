@@ -64,6 +64,7 @@ dex.post('/offers', zValidator('json', createOfferSchema), async (c) => {
       offerSequence: body.offer_sequence,
       flags: body.flags,
       domainId: body.domain_id,
+      idempotencyKey: c.req.header('idempotency-key'),
     });
     return c.json(result, 202);
   } catch (err) {
@@ -88,6 +89,7 @@ dex.delete('/offers/:id', zValidator('json', cancelOfferSchema), async (c) => {
       clientId,
       account: body.account,
       offerSequence: body.offer_sequence,
+      idempotencyKey: c.req.header('idempotency-key'),
     });
     return c.json(result, 202);
   } catch (err) {
@@ -120,6 +122,7 @@ dex.post('/amm/deposit', zValidator('json', ammDepositSchema), async (c) => {
       ePrice: body.e_price ? toAssetAmount(body.e_price) : undefined,
       lpTokenOut: body.lp_token_out,
       flags: body.flags,
+      idempotencyKey: c.req.header('idempotency-key'),
     });
     return c.json(result, 202);
   } catch (err) {
@@ -146,6 +149,7 @@ dex.post('/amm/withdraw', zValidator('json', ammWithdrawSchema), async (c) => {
       ePrice: body.e_price ? toAssetAmount(body.e_price) : undefined,
       lpTokenIn: body.lp_token_in,
       flags: body.flags,
+      idempotencyKey: c.req.header('idempotency-key'),
     });
     return c.json(result, 202);
   } catch (err) {

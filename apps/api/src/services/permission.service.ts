@@ -129,6 +129,7 @@ export interface GrantPermissionInput {
   delegateAddress: string;
   permissions: string[];
   weight: number;
+  idempotencyKey?: string;
 }
 
 export async function grantPermission(
@@ -181,6 +182,7 @@ export async function grantPermission(
           txType: 'SignerListSet',
           sourceAddress: input.delegatorAddress,
           status: 'queued',
+          idempotencyKey: input.idempotencyKey,
           requestBody: {
             op: 'grantPermission',
             delegator: input.delegatorAddress,
@@ -250,6 +252,7 @@ export interface RevokePermissionInput {
   clientId: string;
   delegatorAddress: string;
   delegateAddress: string;
+  idempotencyKey?: string;
 }
 
 export async function revokePermission(input: RevokePermissionInput): Promise<{ tx_id: string }> {
@@ -289,6 +292,7 @@ export async function revokePermission(input: RevokePermissionInput): Promise<{ 
       txType: 'SignerListSet',
       sourceAddress: input.delegatorAddress,
       status: 'queued',
+      idempotencyKey: input.idempotencyKey,
       requestBody: {
         op: 'revokePermission',
         delegator: input.delegatorAddress,

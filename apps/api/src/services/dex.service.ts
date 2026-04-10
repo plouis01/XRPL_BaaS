@@ -94,6 +94,7 @@ export interface CreateOfferInput {
   offerSequence?: number;
   flags?: number;
   domainId?: string;
+  idempotencyKey?: string;
 }
 
 export async function createOffer(
@@ -125,6 +126,7 @@ export async function createOffer(
       txType: 'OfferCreate',
       sourceAddress: input.account,
       status: 'queued',
+      idempotencyKey: input.idempotencyKey,
       requestBody: { op: 'createOffer', account: input.account },
     })
     .returning({ id: schema.transactions.id });
@@ -148,6 +150,7 @@ export interface CancelOfferInput {
   clientId: string;
   account: string;
   offerSequence: number;
+  idempotencyKey?: string;
 }
 
 export async function cancelOffer(
@@ -174,6 +177,7 @@ export async function cancelOffer(
       txType: 'OfferCancel',
       sourceAddress: input.account,
       status: 'queued',
+      idempotencyKey: input.idempotencyKey,
       requestBody: {
         op: 'cancelOffer',
         account: input.account,
@@ -207,6 +211,7 @@ export interface AmmDepositInput {
   ePrice?: AssetAmount;
   lpTokenOut?: { currency: string; issuer: string; value: string };
   flags?: number;
+  idempotencyKey?: string;
 }
 
 export async function ammDeposit(
@@ -239,6 +244,7 @@ export async function ammDeposit(
       txType: 'AMMDeposit',
       sourceAddress: input.account,
       status: 'queued',
+      idempotencyKey: input.idempotencyKey,
       requestBody: { op: 'ammDeposit', account: input.account },
     })
     .returning({ id: schema.transactions.id });
@@ -268,6 +274,7 @@ export interface AmmWithdrawInput {
   ePrice?: AssetAmount;
   lpTokenIn?: { currency: string; issuer: string; value: string };
   flags?: number;
+  idempotencyKey?: string;
 }
 
 export async function ammWithdraw(
@@ -300,6 +307,7 @@ export async function ammWithdraw(
       txType: 'AMMWithdraw',
       sourceAddress: input.account,
       status: 'queued',
+      idempotencyKey: input.idempotencyKey,
       requestBody: { op: 'ammWithdraw', account: input.account },
     })
     .returning({ id: schema.transactions.id });
