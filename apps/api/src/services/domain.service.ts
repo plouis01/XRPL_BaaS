@@ -144,9 +144,17 @@ export async function createDomain(
     throw new DomainServiceError('not_managed', 'Owner address is not a managed account');
   }
 
+  // Normalize credential types to uppercase before storage so DB matches
+  // on-chain state (builders also uppercase) and comparisons don't need
+  // runtime toUpperCase() calls.
+  const normalizedCreds = input.acceptedCredentials.map((c) => ({
+    ...c,
+    credential_type: c.credential_type.toUpperCase(),
+  }));
+
   const txJson = buildPermissionedDomainSet({
     account: input.ownerAddress,
-    acceptedCredentials: input.acceptedCredentials.map((c) => ({
+    acceptedCredentials: normalizedCreds.map((c) => ({
       issuer: c.issuer,
       credentialType: c.credential_type,
     })),
@@ -184,7 +192,7 @@ export async function createDomain(
           clientId: input.clientId,
           ownerAddress: input.ownerAddress,
           domainId: placeholderDomainId,
-          acceptedCredentials: input.acceptedCredentials,
+          acceptedCredentials: normalizedCreds,
         })
         .returning({ id: schema.domains.id });
       const domainRow = domainInserted[0];
@@ -220,7 +228,7 @@ export async function createDomain(
     id: domainDbId,
     owner_address: input.ownerAddress,
     domain_id: placeholderDomainId,
-    accepted_credentials: input.acceptedCredentials,
+    accepted_credentials: normalizedCreds,
     created_at: new Date(),
     updated_at: new Date(),
     tx_id: txId,
@@ -255,10 +263,15 @@ export async function updateDomain(
     );
   }
 
+  const normalizedCreds = input.acceptedCredentials.map((c) => ({
+    ...c,
+    credential_type: c.credential_type.toUpperCase(),
+  }));
+
   const txJson = buildPermissionedDomainSet({
     account: domain.ownerAddress,
     domainId: domain.domainId,
-    acceptedCredentials: input.acceptedCredentials.map((c) => ({
+    acceptedCredentials: normalizedCreds.map((c) => ({
       issuer: c.issuer,
       credentialType: c.credential_type,
     })),
@@ -285,7 +298,7 @@ export async function updateDomain(
   await db
     .update(schema.domains)
     .set({
-      acceptedCredentials: input.acceptedCredentials,
+      acceptedCredentials: normalizedCreds,
       updatedAt: new Date(),
     })
     .where(eq(schema.domains.id, input.domainDbId));
@@ -303,7 +316,7 @@ export async function updateDomain(
     id: domain.id,
     owner_address: domain.ownerAddress,
     domain_id: domain.domainId,
-    accepted_credentials: input.acceptedCredentials,
+    accepted_credentials: normalizedCreds,
     created_at: domain.createdAt,
     updated_at: new Date(),
     tx_id: txId,
@@ -391,7 +404,7 @@ export async function checkMembership(
     return { is_member: false, matching_credentials: [] };
   }
 
-  // Query all accepted credentials for the subject.
+  // Query credentials for the subject, scoped to this client.
   const creds = await db
     .select({
       id: schema.credentials.id,
@@ -403,6 +416,7 @@ export async function checkMembership(
     .from(schema.credentials)
     .where(
       and(
+        eq(schema.credentials.clientId, input.clientId),
         eq(schema.credentials.subjectAddress, input.subjectAddress),
         eq(schema.credentials.status, 'accepted'),
       ),
@@ -415,7 +429,7 @@ export async function checkMembership(
     const match = creds.find(
       (c) =>
         c.issuerAddress === entry.issuer &&
-        c.credentialType === entry.credential_type.toUpperCase() &&
+        c.credentialType === entry.credential_type &&
         (!c.expiresAt || c.expiresAt > now),
     );
     if (match) matchingIds.push(match.id);
@@ -441,7 +455,7 @@ export async function listMembers(
   const accepted = (domain.acceptedCredentials as AcceptedCredentialEntry[]) ?? [];
   if (accepted.length === 0) return { members: [] };
 
-  // Fetch all accepted credentials that match any of the domain's accepted types.
+  // Fetch accepted credentials scoped to this client.
   const creds = await db
     .select({
       id: schema.credentials.id,
@@ -451,7 +465,9 @@ export async function listMembers(
       expiresAt: schema.credentials.expiresAt,
     })
     .from(schema.credentials)
-    .where(eq(schema.credentials.status, 'accepted'));
+    .where(
+      and(eq(schema.credentials.clientId, clientId), eq(schema.credentials.status, 'accepted')),
+    );
 
   const now = new Date();
   const memberMap = new Map<string, string[]>();
@@ -459,8 +475,7 @@ export async function listMembers(
   for (const cred of creds) {
     if (cred.expiresAt && cred.expiresAt <= now) continue;
     const matches = accepted.some(
-      (a) =>
-        a.issuer === cred.issuerAddress && a.credential_type.toUpperCase() === cred.credentialType,
+      (a) => a.issuer === cred.issuerAddress && a.credential_type === cred.credentialType,
     );
     if (matches) {
       const existing = memberMap.get(cred.subjectAddress) ?? [];
