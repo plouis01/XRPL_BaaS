@@ -1,0 +1,208 @@
+// Unit tests for orphanReconciler.ts (Sprint 7, PLAN.md §9.2 G-1).
+//
+// The reconciler scans for stale `transactions.status='queued'` rows
+// past a grace window, marks them as failed (result_code='ORPHANED'),
+// and soft-deletes any unfunded `accounts` row whose fundingTxId
+// matches. We mock @railforge/db to drive each branch deterministically.
+
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+
+// ── DB mock ─────────────────────────────────────────────────────────────────
+//
+// We model the bits of the Drizzle query builder we use in the
+// reconciler:
+//   - select().from(table).where(...).limit(N) → returns staleSelectResults
+//   - update(table).set(...).where(...).returning(...) → returns either
+//     transactionsClaimReturning or accountsDeleteReturning depending on
+//     which table the call targeted (matched via the pgTable mock object).
+//
+// Per-call state is stashed in module-level arrays so tests can assert
+// on what got read/written without spinning up Postgres.
+
+const staleSelectResults = { current: [] as Array<Record<string, unknown>> };
+
+// Each entry in this queue feeds the next claim UPDATE on transactions.
+// Tests push the rows that should be returned (claim wins) or empty
+// arrays (claim lost a race).
+const transactionsClaimQueue: Array<Array<{ id: string }>> = [];
+
+// Same shape for accounts soft-delete UPDATE.
+const accountsDeleteQueue: Array<Array<{ id: string }>> = [];
+
+// Records every UPDATE so tests can assert on what the reconciler did.
+interface RecordedUpdate {
+  table: string;
+  set: Record<string, unknown>;
+}
+const recordedUpdates: RecordedUpdate[] = [];
+
+vi.mock('@railforge/db', () => {
+  const select = vi.fn(() => ({
+    from: vi.fn(() => ({
+      where: vi.fn(() => ({
+        limit: vi.fn(async () => staleSelectResults.current),
+      })),
+    })),
+  }));
+
+  const update = vi.fn((table: { __name: string }) => ({
+    set: vi.fn((values: Record<string, unknown>) => ({
+      where: vi.fn(() => ({
+        returning: vi.fn(async () => {
+          recordedUpdates.push({ table: table.__name, set: values });
+          if (table.__name === 'transactions') {
+            return transactionsClaimQueue.shift() ?? [];
+          }
+          if (table.__name === 'accounts') {
+            return accountsDeleteQueue.shift() ?? [];
+          }
+          return [];
+        }),
+      })),
+    })),
+  }));
+
+  return {
+    db: { select, update },
+    eq: vi.fn(),
+    and: vi.fn((...args: unknown[]) => ({ and: args })),
+    lt: vi.fn(),
+    schema: {
+      transactions: {
+        __name: 'transactions',
+        id: 'transactions.id',
+        status: 'transactions.status',
+        createdAt: 'transactions.createdAt',
+        txType: 'transactions.txType',
+        sourceAddress: 'transactions.sourceAddress',
+      },
+      accounts: {
+        __name: 'accounts',
+        fundingTxId: 'accounts.fundingTxId',
+        isFunded: 'accounts.isFunded',
+      },
+    },
+  };
+});
+
+vi.mock('../logger.ts', () => ({
+  logger: {
+    child: () => ({
+      info: vi.fn(),
+      warn: vi.fn(),
+      error: vi.fn(),
+      debug: vi.fn(),
+    }),
+  },
+}));
+
+// ── Test setup ──────────────────────────────────────────────────────────────
+
+let processOrphanReconcileSweep: typeof import('./orphanReconciler.ts').processOrphanReconcileSweep;
+
+beforeEach(async () => {
+  vi.resetModules();
+  staleSelectResults.current = [];
+  transactionsClaimQueue.length = 0;
+  accountsDeleteQueue.length = 0;
+  recordedUpdates.length = 0;
+  const mod = await import('./orphanReconciler.ts');
+  processOrphanReconcileSweep = mod.processOrphanReconcileSweep;
+});
+
+// ── Tests ───────────────────────────────────────────────────────────────────
+
+describe('processOrphanReconcileSweep', () => {
+  it('returns zero counts when no stale transactions are found', async () => {
+    staleSelectResults.current = [];
+
+    const result = await processOrphanReconcileSweep();
+
+    expect(result).toEqual({ orphanedCount: 0, accountsSoftDeleted: 0 });
+    expect(recordedUpdates).toEqual([]);
+  });
+
+  it('marks a single orphan failed and soft-deletes the linked account', async () => {
+    staleSelectResults.current = [{ id: 'tx-1', txType: 'Payment', sourceAddress: 'rTreasury' }];
+    transactionsClaimQueue.push([{ id: 'tx-1' }]);
+    accountsDeleteQueue.push([{ id: 'acct-1' }]);
+
+    const result = await processOrphanReconcileSweep();
+
+    expect(result).toEqual({ orphanedCount: 1, accountsSoftDeleted: 1 });
+
+    // Two updates: transactions (mark failed) then accounts (soft-delete).
+    expect(recordedUpdates).toHaveLength(2);
+    expect(recordedUpdates[0]?.table).toBe('transactions');
+    expect(recordedUpdates[0]?.set).toMatchObject({
+      status: 'failed',
+      resultCode: 'ORPHANED',
+    });
+    expect(recordedUpdates[0]?.set.errorMessage).toMatch(/never enqueued/i);
+    expect(recordedUpdates[0]?.set.submittedAt).toBeInstanceOf(Date);
+
+    expect(recordedUpdates[1]?.table).toBe('accounts');
+    expect(recordedUpdates[1]?.set).toHaveProperty('deletedAt');
+    expect(recordedUpdates[1]?.set.deletedAt).toBeInstanceOf(Date);
+  });
+
+  it('marks an orphan failed without soft-deleting when no account is linked', async () => {
+    // E.g. an orphaned token-issuance tx, where there's no `accounts.fundingTxId == tx.id`.
+    staleSelectResults.current = [
+      { id: 'tx-2', txType: 'MPTokenIssuanceCreate', sourceAddress: 'rIssuer' },
+    ];
+    transactionsClaimQueue.push([{ id: 'tx-2' }]);
+    accountsDeleteQueue.push([]); // No linked accounts row.
+
+    const result = await processOrphanReconcileSweep();
+
+    expect(result).toEqual({ orphanedCount: 1, accountsSoftDeleted: 0 });
+    // Both UPDATEs still ran — the accounts UPDATE just matched zero rows.
+    expect(recordedUpdates).toHaveLength(2);
+    expect(recordedUpdates[1]?.table).toBe('accounts');
+  });
+
+  it('skips a row when the claim UPDATE returns zero (concurrent sweep won the race)', async () => {
+    staleSelectResults.current = [
+      { id: 'tx-3', txType: 'Payment', sourceAddress: 'rA' },
+      { id: 'tx-4', txType: 'Payment', sourceAddress: 'rB' },
+    ];
+    // First row: claim lost race, returns []. Second row: claim wins.
+    transactionsClaimQueue.push([], [{ id: 'tx-4' }]);
+    // Only the second orphan triggers an accounts soft-delete.
+    accountsDeleteQueue.push([{ id: 'acct-4' }]);
+
+    const result = await processOrphanReconcileSweep();
+
+    expect(result).toEqual({ orphanedCount: 1, accountsSoftDeleted: 1 });
+    // Updates recorded: tx-3 claim attempt (returned []), tx-4 claim (returned id), accounts (returned id).
+    // The accounts UPDATE for tx-3 should be skipped because the claim lost.
+    const tableSequence = recordedUpdates.map((u) => u.table);
+    expect(tableSequence).toEqual(['transactions', 'transactions', 'accounts']);
+  });
+
+  it('processes multiple orphans in a single sweep', async () => {
+    staleSelectResults.current = [
+      { id: 'tx-a', txType: 'Payment', sourceAddress: 'rA' },
+      { id: 'tx-b', txType: 'Payment', sourceAddress: 'rB' },
+      { id: 'tx-c', txType: 'OfferCreate', sourceAddress: 'rC' },
+    ];
+    transactionsClaimQueue.push([{ id: 'tx-a' }], [{ id: 'tx-b' }], [{ id: 'tx-c' }]);
+    accountsDeleteQueue.push([{ id: 'acct-a' }], [{ id: 'acct-b' }], []); // tx-c has no account
+
+    const result = await processOrphanReconcileSweep();
+
+    expect(result).toEqual({ orphanedCount: 3, accountsSoftDeleted: 2 });
+    // 3 transactions UPDATEs + 3 accounts UPDATEs.
+    expect(recordedUpdates).toHaveLength(6);
+  });
+
+  it('honors the gracePeriodMs override (smoke check that the parameter wires through)', async () => {
+    staleSelectResults.current = [];
+    // Custom grace period — the underlying SELECT mock doesn't actually
+    // filter, but we want to make sure the override is accepted and the
+    // sweep doesn't throw.
+    const result = await processOrphanReconcileSweep(60_000);
+    expect(result).toEqual({ orphanedCount: 0, accountsSoftDeleted: 0 });
+  });
+});
