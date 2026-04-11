@@ -318,6 +318,18 @@ export async function acceptCredential(input: AcceptCredentialInput): Promise<{ 
     txJson = result.txJson;
   } catch (err) {
     if (err instanceof CredentialServiceError) throw err;
+    // A retry carrying the same Idempotency-Key that the first attempt
+    // already committed will trip the transactions UNIQUE constraint.
+    // Surface it as db_conflict so the caller sees a 409 instead of a
+    // raw Postgres error — same pattern as issueCredential.
+    if (
+      err &&
+      typeof err === 'object' &&
+      'code' in err &&
+      (err as { code: string }).code === '23505'
+    ) {
+      throw new CredentialServiceError('db_conflict', 'Duplicate idempotency key (retry)');
+    }
     throw err;
   }
 
