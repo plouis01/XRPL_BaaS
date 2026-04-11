@@ -218,6 +218,7 @@ export interface AcceptCredentialInput {
   clientId: string;
   credentialId: string;
   subjectAddress: string;
+  idempotencyKey?: string;
 }
 
 export async function acceptCredential(input: AcceptCredentialInput): Promise<{ tx_id: string }> {
@@ -227,70 +228,103 @@ export async function acceptCredential(input: AcceptCredentialInput): Promise<{ 
     clientId: input.clientId,
   });
 
-  // Credential must exist and belong to this client.
-  const rows = await db
-    .select({
-      id: schema.credentials.id,
-      issuerAddress: schema.credentials.issuerAddress,
-      subjectAddress: schema.credentials.subjectAddress,
-      credentialType: schema.credentials.credentialType,
-      status: schema.credentials.status,
-    })
-    .from(schema.credentials)
-    .where(
-      and(
-        eq(schema.credentials.id, input.credentialId),
-        eq(schema.credentials.clientId, input.clientId),
-      ),
-    )
-    .limit(1);
-
-  const cred = rows[0];
-  if (!cred) throw new CredentialServiceError('not_found', 'Credential not found');
-  if (cred.status !== 'pending') {
-    throw new CredentialServiceError(
-      'already_accepted',
-      `Credential is ${cred.status}, not pending`,
-    );
-  }
-
-  // Subject address from the request must match the credential's subject.
-  if (cred.subjectAddress !== input.subjectAddress) {
-    throw new CredentialServiceError('invalid_input', 'subject_address does not match credential');
-  }
-
-  // Subject must be a managed account.
-  const subjectAccount = await resolveOwnedAccount(input.clientId, cred.subjectAddress);
+  // Subject must be a managed account (cheap check, outside the tx).
+  const subjectAccount = await resolveOwnedAccount(input.clientId, input.subjectAddress);
   if (!subjectAccount) {
     throw new CredentialServiceError('not_managed', 'Subject address is not a managed account');
   }
 
-  const txJson = buildCredentialAccept({
-    account: cred.subjectAddress,
-    issuer: cred.issuerAddress,
-    credentialType: cred.credentialType,
-  });
+  // TOCTOU fix: wrap status check + tx insert + status transition in one
+  // DB transaction with SELECT FOR UPDATE. Concurrent accept requests will
+  // serialize on the credential row; the loser sees status='accepting'
+  // and throws already_accepted.
+  let txId: string;
+  let txJson: ReturnType<typeof buildCredentialAccept>;
+  try {
+    const result = await db.transaction(async (tx) => {
+      const lockedRows = await tx
+        .select({
+          id: schema.credentials.id,
+          issuerAddress: schema.credentials.issuerAddress,
+          subjectAddress: schema.credentials.subjectAddress,
+          credentialType: schema.credentials.credentialType,
+          status: schema.credentials.status,
+        })
+        .from(schema.credentials)
+        .where(
+          and(
+            eq(schema.credentials.id, input.credentialId),
+            eq(schema.credentials.clientId, input.clientId),
+          ),
+        )
+        .for('update')
+        .limit(1);
 
-  const txInserted = await db
-    .insert(schema.transactions)
-    .values({
-      clientId: input.clientId,
-      txType: 'CredentialAccept',
-      sourceAddress: cred.subjectAddress,
-      status: 'queued',
-      requestBody: {
-        op: 'acceptCredential',
-        credentialId: input.credentialId,
-        subject: cred.subjectAddress,
+      const cred = lockedRows[0];
+      if (!cred) throw new CredentialServiceError('not_found', 'Credential not found');
+      if (cred.status !== 'pending') {
+        throw new CredentialServiceError(
+          'already_accepted',
+          `Credential is ${cred.status}, not pending`,
+        );
+      }
+      if (cred.subjectAddress !== input.subjectAddress) {
+        throw new CredentialServiceError(
+          'invalid_input',
+          'subject_address does not match credential',
+        );
+      }
+
+      const builtTxJson = buildCredentialAccept({
+        account: cred.subjectAddress,
         issuer: cred.issuerAddress,
-      },
-    })
-    .returning({ id: schema.transactions.id });
-  const txId = txInserted[0]?.id;
-  if (!txId) throw new Error('transactions insert returned no row');
+        credentialType: cred.credentialType,
+      });
+
+      const txInserted = await tx
+        .insert(schema.transactions)
+        .values({
+          clientId: input.clientId,
+          txType: 'CredentialAccept',
+          sourceAddress: cred.subjectAddress,
+          status: 'queued',
+          idempotencyKey: input.idempotencyKey,
+          requestBody: {
+            op: 'acceptCredential',
+            credentialId: input.credentialId,
+            subject: cred.subjectAddress,
+            issuer: cred.issuerAddress,
+          },
+        })
+        .returning({ id: schema.transactions.id });
+      const txRow = txInserted[0];
+      if (!txRow) {
+        throw new CredentialServiceError('db_conflict', 'transactions insert returned no row');
+      }
+
+      // Transition to an intermediate 'accepting' state while the tx is in
+      // flight. txConfirmer flips to 'accepted' on validation, or back to
+      // 'pending' on failure. This closes the TOCTOU window.
+      await tx
+        .update(schema.credentials)
+        .set({ status: 'accepting' })
+        .where(eq(schema.credentials.id, cred.id));
+
+      return { txId: txRow.id, txJson: builtTxJson };
+    });
+    txId = result.txId;
+    txJson = result.txJson;
+  } catch (err) {
+    if (err instanceof CredentialServiceError) throw err;
+    throw err;
+  }
 
   try {
-    await enqueueTxSubmit({ txId, sourceAddress: cred.subjectAddress, txJson });
+    await enqueueTxSubmit({
+      txId,
+      sourceAddress: input.subjectAddress,
+      txJson,
+    });
   } catch (err) {
     log.error({ err }, 'enqueueTxSubmit failed');
     throw new CredentialServiceError('enqueue_failed', 'Failed to enqueue credential acceptance');
