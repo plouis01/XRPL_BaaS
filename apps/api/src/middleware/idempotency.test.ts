@@ -22,6 +22,22 @@ vi.mock('../redis.ts', () => ({
   disconnectRedis: async () => {},
 }));
 
+// Silence the logger so failure-path tests don't spam stdout.
+vi.mock('../logger.ts', () => ({
+  logger: {
+    warn: vi.fn(),
+    info: vi.fn(),
+    error: vi.fn(),
+    debug: vi.fn(),
+    child: () => ({
+      warn: vi.fn(),
+      info: vi.fn(),
+      error: vi.fn(),
+      debug: vi.fn(),
+    }),
+  },
+}));
+
 const { idempotency } = await import('./idempotency.ts');
 
 function makeApp(opts: {
@@ -316,5 +332,190 @@ describe('idempotency middleware', () => {
     // Handler ran ONCE; the second call was replayed from cache.
     expect(calls).toHaveBeenCalledTimes(1);
     expect(r2.headers.get('x-idempotent-replay')).toBe('true');
+  });
+
+  // Sprint 7 #17: TOCTOU fix. Before this fix, two concurrent requests
+  // with the same key both saw an empty cache, both ran the handler, and
+  // both returned. We now acquire a short-lived Redis `SET NX` lock
+  // between the cache check and the handler run so only one progresses.
+
+  describe('TOCTOU lock', () => {
+    // Helper: await a gate that only resolves when release() is called.
+    // Lets a test force two requests to interleave deterministically.
+    function gate() {
+      let release = () => {};
+      const blocked = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      return { blocked, release };
+    }
+
+    it('returns 409 when a concurrent request is holding the lock', async () => {
+      const { blocked, release } = gate();
+      const calls = vi.fn();
+      const app = new Hono<AppEnv>();
+      app.use('*', async (c, next) => {
+        c.set('clientId', 'c1');
+        c.set('apiKeyId', 'k');
+        c.set('rateLimit', 100);
+        c.set('environment', 'testnet');
+        await next();
+      });
+      app.use('*', idempotency);
+      app.post('/v1/things', async (c) => {
+        calls();
+        // First request parks here until the test explicitly releases.
+        await blocked;
+        return c.json({ ok: true }, 201);
+      });
+
+      // Launch the first request; it acquires the lock and waits inside
+      // the handler until release() is called.
+      const p1 = app.request('/v1/things', {
+        method: 'POST',
+        headers: { 'idempotency-key': 'k1' },
+      });
+
+      // Yield the event loop so p1 reaches the handler's `await blocked`
+      // (which means it already acquired the lock).
+      await new Promise((resolve) => setImmediate(resolve));
+
+      // Second concurrent request with the same key: must 409 immediately
+      // because the first request still holds the lock.
+      const r2 = await app.request('/v1/things', {
+        method: 'POST',
+        headers: { 'idempotency-key': 'k1' },
+      });
+      expect(r2.status).toBe(409);
+      const body = (await r2.json()) as {
+        error: string;
+        retry_after_seconds: number;
+      };
+      expect(body.error).toMatch(/in progress/);
+      expect(body.retry_after_seconds).toBeGreaterThan(0);
+
+      // The second request MUST NOT have executed the handler.
+      expect(calls).toHaveBeenCalledTimes(1);
+
+      // Let the first request finish so the test cleanly awaits it.
+      release();
+      const r1 = await p1;
+      expect(r1.status).toBe(201);
+    });
+
+    it('releases the lock after the handler completes (subsequent request replays from cache)', async () => {
+      const calls = vi.fn();
+      const app = makeApp({
+        clientId: 'c1',
+        handler: () => {
+          calls();
+          return new Response(JSON.stringify({ n: calls.mock.calls.length }), {
+            status: 201,
+            headers: { 'content-type': 'application/json' },
+          });
+        },
+      });
+
+      // First request: acquires lock, runs handler, caches, releases lock.
+      const r1 = await app.request('/v1/things', {
+        method: 'POST',
+        headers: { 'idempotency-key': 'k1' },
+      });
+      expect(r1.status).toBe(201);
+
+      // The lock MUST have been released by now — otherwise the second
+      // request would 409 instead of replaying from cache.
+      const r2 = await app.request('/v1/things', {
+        method: 'POST',
+        headers: { 'idempotency-key': 'k1' },
+      });
+      expect(r2.status).toBe(201);
+      expect(r2.headers.get('x-idempotent-replay')).toBe('true');
+      // Handler ran exactly once — the second hit the cache.
+      expect(calls).toHaveBeenCalledTimes(1);
+    });
+
+    it('releases the lock when the handler throws (next request is not stuck at 409)', async () => {
+      const calls = vi.fn();
+      const app = new Hono<AppEnv>();
+      app.use('*', async (c, next) => {
+        c.set('clientId', 'c1');
+        c.set('apiKeyId', 'k');
+        c.set('rateLimit', 100);
+        c.set('environment', 'testnet');
+        await next();
+      });
+      app.onError((_err, c) => c.json({ error: 'boom' }, 500));
+      app.use('*', idempotency);
+      app.post('/v1/things', () => {
+        calls();
+        throw new Error('handler exploded');
+      });
+
+      // First request: handler throws, middleware re-raises, onError →
+      // 500. The lock MUST be released on the way out, even though the
+      // cache was never written.
+      const r1 = await app.request('/v1/things', {
+        method: 'POST',
+        headers: { 'idempotency-key': 'k1' },
+      });
+      expect(r1.status).toBe(500);
+
+      // Second request with the same key: lock is free, nothing cached,
+      // handler runs again (same as the existing "handler throws" test).
+      // The NEW assertion here is that we DO NOT get a 409 — which would
+      // indicate the lock leaked.
+      const r2 = await app.request('/v1/things', {
+        method: 'POST',
+        headers: { 'idempotency-key': 'k1' },
+      });
+      expect(r2.status).toBe(500);
+      expect(r2.status).not.toBe(409);
+      expect(calls).toHaveBeenCalledTimes(2);
+    });
+
+    it('cache-hit path does not attempt to acquire the lock (replay is lock-free)', async () => {
+      const app = makeApp({ clientId: 'c1' });
+
+      // Seed a cached response directly in Redis — simulates a prior
+      // request that already completed.
+      const cacheKey = 'railforge:idemp:c1:POST:/v1/things:k1';
+      await mockRedis.set(cacheKey, JSON.stringify({ status: 201, body: { replayed: true } }));
+
+      // Separately, hold the lock key to simulate a lingering lock from
+      // (say) a slow DEL or TTL that hasn't expired yet. The replay path
+      // should NOT care — cache wins, lock is never checked.
+      const lockKey = 'railforge:idemp:lock:c1:POST:/v1/things:k1';
+      await mockRedis.set(lockKey, '1', 'EX', 60);
+
+      const r = await app.request('/v1/things', {
+        method: 'POST',
+        headers: { 'idempotency-key': 'k1' },
+      });
+      expect(r.status).toBe(201);
+      expect(r.headers.get('x-idempotent-replay')).toBe('true');
+      const body = (await r.json()) as { replayed: boolean };
+      expect(body.replayed).toBe(true);
+    });
+
+    it('proceeds without a lock when SET fails (redis unreachable)', async () => {
+      const app = makeApp({ clientId: 'c1' });
+
+      // Break redis.set for the lock call only. We need GET (cache check)
+      // to return null (cache miss), then SET to throw on the lock. The
+      // middleware should log and proceed, running the handler.
+      const setSpy = vi.spyOn(mockRedis, 'set').mockImplementation(async () => {
+        throw new Error('connection refused');
+      });
+
+      const r = await app.request('/v1/things', {
+        method: 'POST',
+        headers: { 'idempotency-key': 'k1' },
+      });
+      // Handler still ran (default handler returns 201).
+      expect(r.status).toBe(201);
+
+      setSpy.mockRestore();
+    });
   });
 });

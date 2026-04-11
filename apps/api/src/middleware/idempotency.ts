@@ -22,12 +22,28 @@
 // middleware and is part of the cache key.
 //
 // Closes PLAN.md §9.2 item #10.
+//
+// Sprint 7 (#17) — TOCTOU fix:
+// Before this fix, two concurrent requests with the same idempotency key
+// both saw an empty cache in step 1, both ran the handler, and both
+// returned responses. The DB constraint `UNIQUE(client_id, idempotency_key)`
+// on the transactions table caught double-submitted txs, but any other
+// state-changing op (webhook endpoint CRUD, credential accept, etc.)
+// could execute twice. We now acquire a Redis `SET NX` lock between the
+// cache-hit check and the handler run so only one of N concurrent
+// duplicates progresses; the others get a 409 Conflict immediately.
 
 import type { MiddlewareHandler } from 'hono';
+import { logger } from '../logger.ts';
 import { getRedis } from '../redis.ts';
 import type { AppEnv } from '../types.ts';
 
 const IDEMP_TTL_SECONDS = 24 * 60 * 60; // 24h
+// Upper bound on handler runtime. If a handler legitimately takes longer
+// than this, the lock expires and a concurrent request can proceed — the
+// lock is primarily crash-recovery safety, not a hard SLA. 60s is well
+// above p99 for any endpoint we currently expose.
+const IDEMP_LOCK_TTL_SECONDS = 60;
 const CACHEABLE_METHODS = new Set(['POST', 'PUT', 'DELETE', 'PATCH']);
 
 interface CachedResponse {
@@ -62,6 +78,10 @@ export const idempotency: MiddlewareHandler<AppEnv> = async (c, next) => {
 
   const path = new URL(c.req.url).pathname;
   const cacheKey = `railforge:idemp:${clientId}:${method}:${path}:${key}`;
+  // The lock key sits in a sibling namespace so it never collides with the
+  // cached response at the same key. It's short-lived (IDEMP_LOCK_TTL_SECONDS)
+  // vs the 24h cache TTL, and its only job is to block concurrent duplicates.
+  const lockKey = `railforge:idemp:lock:${clientId}:${method}:${path}:${key}`;
   const redis = getRedis();
 
   // 1. Check for a cached response. If found, replay it verbatim.
@@ -88,14 +108,63 @@ export const idempotency: MiddlewareHandler<AppEnv> = async (c, next) => {
     }
   }
 
-  // 2. Run the handler. If it throws, the error propagates up the
-  // middleware chain — the global onError handler turns it into a 5xx
-  // response. CRITICALLY: any code below this line is unreachable on
-  // throw, so a thrown handler will NOT cache anything. The behavior is
-  // verified by the "handler throws: no caching" test below.
-  await next();
+  // 2. Acquire a short-lived Redis lock before running the handler.
+  // SET NX EX: only succeeds if the key doesn't exist. If another request
+  // with the same (clientId, method, path, key) is in flight, we lose the
+  // race and return 409 — Stripe-style "concurrent request" error. The
+  // client's retry should either hit the cache (if the first finished) or
+  // re-attempt the lock (if the first is still running).
+  //
+  // If Redis is unreachable, skip the lock entirely and fall through to
+  // the handler. We lose TOCTOU protection in that mode but it's the same
+  // degraded behavior the DB UNIQUE constraint was already compensating
+  // for pre-fix — no regression, just no improvement.
+  let holdingLock = false;
+  try {
+    const acquired = await redis.set(lockKey, '1', 'EX', IDEMP_LOCK_TTL_SECONDS, 'NX');
+    if (acquired === 'OK') {
+      holdingLock = true;
+    } else {
+      // Another request is processing this exact (client, method, path,
+      // key) tuple right now. Return 409 so the client can retry — by
+      // then the first request will have either cached its response
+      // (→ replay on next attempt) or released the lock (→ acquire now).
+      return c.json(
+        {
+          error: 'Idempotent request already in progress',
+          retry_after_seconds: 1,
+        },
+        409,
+      );
+    }
+  } catch (err) {
+    // Redis unreachable on the lock check. Log and proceed without the
+    // lock — we cannot enforce TOCTOU protection without Redis, but we
+    // must not block the whole API because of it.
+    logger.warn({ err, lockKey }, 'idempotency lock unavailable — proceeding without lock');
+  }
 
-  // 3. Cache the response for the next retry. We only cache successful
+  // 3. Run the handler. If it throws, the error propagates up the
+  // middleware chain — the global onError handler turns it into a 5xx
+  // response. CRITICALLY: we MUST release the lock on both success and
+  // throw, so the handler call is wrapped in try/finally. A thrown
+  // handler is still unreachable for the caching block below, so a
+  // thrown handler will NOT cache anything (verified by the existing
+  // "handler throws: no caching" test).
+  try {
+    await next();
+  } catch (err) {
+    if (holdingLock) {
+      try {
+        await redis.del(lockKey);
+      } catch {
+        // Non-fatal — the lock will expire via its TTL.
+      }
+    }
+    throw err;
+  }
+
+  // 4. Cache the response for the next retry. We only cache successful
   // and client-error responses (2xx, 4xx). 5xx responses are NOT cached
   // so that transient server errors don't stick around — the client
   // retrying after a 500 should get a real retry, not a replayed failure.
@@ -121,6 +190,16 @@ export const idempotency: MiddlewareHandler<AppEnv> = async (c, next) => {
     } catch {
       // Non-fatal — the response has already been returned to the client
       // at this point. A cache miss on the next retry is acceptable.
+    }
+  }
+
+  // 5. Release the lock. Runs on both 2xx/4xx/5xx success paths. Best
+  // effort — if DEL fails, the lock expires via its TTL.
+  if (holdingLock) {
+    try {
+      await redis.del(lockKey);
+    } catch {
+      // Non-fatal.
     }
   }
   return;
