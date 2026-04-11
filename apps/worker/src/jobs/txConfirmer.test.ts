@@ -18,12 +18,16 @@ import type { TxConfirmJobData } from '../queues.ts';
 // asserted independently from the transactions-row update.
 const dbUpdateCalls: Array<{ table: string; set: unknown }> = [];
 const dbSelectResult = {
-  current: [{ sourceAddress: 'rSource00000000000000000000000000' }],
+  current: [{ sourceAddress: 'rSource00000000000000000000000000' }] as unknown[],
 };
 // What `accounts.update().set().where().returning()` should resolve to.
 // Empty array = "no funding row matched" — the most common path because
 // most txs aren't funding txs.
 const accountUpdateReturning = { current: [] as unknown[] };
+// Sprint 7: credential-accept state machine returning() — what the
+// applyCredentialAcceptOutcome UPDATE returns. Empty = "already
+// transitioned, noop"; non-empty = "we won the transition".
+const credentialUpdateReturning = { current: [] as unknown[] };
 
 // ── Sprint 3 webhook fan-out: extra mock state ──
 //
@@ -52,10 +56,15 @@ vi.mock('@railforge/db', () => {
       const where = vi.fn(() => {
         dbUpdateCalls.push({ table: table.__name, set: payload });
         // The accounts UPDATE chains a .returning() — tx UPDATE doesn't.
-        // We expose returning() on the same object so both call patterns
-        // work without branching.
+        // Sprint 7: credentials UPDATE also chains .returning(). Route
+        // the returning() result by table so each call site can assert
+        // its own expected shape without a shared buffer fight.
         return Object.assign(Promise.resolve(), {
-          returning: vi.fn(async () => accountUpdateReturning.current),
+          returning: vi.fn(async () => {
+            if (table.__name === 'accounts') return accountUpdateReturning.current;
+            if (table.__name === 'credentials') return credentialUpdateReturning.current;
+            return [];
+          }),
         });
       });
       return { where };
@@ -111,6 +120,11 @@ vi.mock('@railforge/db', () => {
         id: 'id',
         endpointId: 'endpointId',
       },
+      credentials: {
+        __name: 'credentials',
+        id: 'id',
+        status: 'status',
+      },
     },
     eq: vi.fn((col: unknown, val: unknown) => ({ col, val })),
     and: vi.fn((...args: unknown[]) => ({ and: args })),
@@ -138,9 +152,12 @@ vi.mock('../queues.ts', () => ({
   enqueueWebhookDelivery: enqueueWebhookDeliveryMock,
 }));
 
-const { extractMptIssuanceIdFromMeta, processTxConfirmJob, TxNotYetValidated } = await import(
-  './txConfirmer.ts'
-);
+const {
+  applyCredentialAcceptOutcome,
+  extractMptIssuanceIdFromMeta,
+  processTxConfirmJob,
+  TxNotYetValidated,
+} = await import('./txConfirmer.ts');
 
 // ── Test helpers ────────────────────────────────────────────────────────────
 
@@ -159,6 +176,7 @@ describe('processTxConfirmJob', () => {
     dbUpdateCalls.length = 0;
     dbSelectResult.current = [{ sourceAddress: 'rSource00000000000000000000000000' }];
     accountUpdateReturning.current = [];
+    credentialUpdateReturning.current = [];
     // Sprint 3 fan-out state.
     subscribersResult.current = [];
     deliveryInsertResult.current = [];
@@ -557,5 +575,198 @@ describe('extractMptIssuanceIdFromMeta', () => {
     expect(extractMptIssuanceIdFromMeta({})).toBeNull();
     expect(extractMptIssuanceIdFromMeta({ meta: {} })).toBeNull();
     expect(extractMptIssuanceIdFromMeta({ meta: { AffectedNodes: 'not-array' } })).toBeNull();
+  });
+});
+
+// ── Sprint 7: CredentialAccept state-machine partner ─────────────────────────
+//
+// acceptCredential transitions the credentials row to 'accepting' inside
+// the same DB transaction that enqueues the CredentialAccept tx. txConfirmer
+// must flip the row out of 'accepting' once rippled validates (or expires)
+// that tx: success → 'accepted' (+ acceptedAt), any failure → 'pending'.
+// Coverage below exercises the helper directly AND drives it through
+// processTxConfirmJob on all three terminal paths.
+
+const silentLog = {
+  info: () => {},
+  debug: () => {},
+  warn: () => {},
+  error: () => {},
+  // biome-ignore lint/suspicious/noExplicitAny: silent logger stand-in
+} as any;
+
+describe('applyCredentialAcceptOutcome (unit)', () => {
+  beforeEach(() => {
+    dbUpdateCalls.length = 0;
+    dbSelectResult.current = [];
+    credentialUpdateReturning.current = [];
+  });
+
+  afterEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('non-CredentialAccept tx: no credentials UPDATE', async () => {
+    dbSelectResult.current = [{ txType: 'Payment', requestBody: { foo: 'bar' } }];
+    await applyCredentialAcceptOutcome('tx-uuid-1', true, silentLog);
+    expect(dbUpdateCalls.filter((u) => u.table === 'credentials')).toHaveLength(0);
+  });
+
+  it('missing tx row: no credentials UPDATE', async () => {
+    dbSelectResult.current = [];
+    await applyCredentialAcceptOutcome('tx-uuid-1', true, silentLog);
+    expect(dbUpdateCalls.filter((u) => u.table === 'credentials')).toHaveLength(0);
+  });
+
+  it('CredentialAccept with missing credentialId in requestBody: no credentials UPDATE', async () => {
+    dbSelectResult.current = [
+      { txType: 'CredentialAccept', requestBody: { op: 'acceptCredential' } },
+    ];
+    await applyCredentialAcceptOutcome('tx-uuid-1', true, silentLog);
+    expect(dbUpdateCalls.filter((u) => u.table === 'credentials')).toHaveLength(0);
+  });
+
+  it("success path: sets status='accepted' and acceptedAt", async () => {
+    dbSelectResult.current = [
+      {
+        txType: 'CredentialAccept',
+        requestBody: { credentialId: 'cred-1' },
+      },
+    ];
+    credentialUpdateReturning.current = [{ id: 'cred-1' }];
+
+    await applyCredentialAcceptOutcome('tx-uuid-1', true, silentLog);
+
+    const credUpdate = dbUpdateCalls.find((u) => u.table === 'credentials');
+    expect(credUpdate).toBeDefined();
+    const set = credUpdate!.set as Record<string, unknown>;
+    expect(set.status).toBe('accepted');
+    expect(set.acceptedAt).toBeInstanceOf(Date);
+  });
+
+  it("failure path: sets status='pending' (no acceptedAt)", async () => {
+    dbSelectResult.current = [
+      {
+        txType: 'CredentialAccept',
+        requestBody: { credentialId: 'cred-1' },
+      },
+    ];
+    credentialUpdateReturning.current = [{ id: 'cred-1' }];
+
+    await applyCredentialAcceptOutcome('tx-uuid-1', false, silentLog);
+
+    const credUpdate = dbUpdateCalls.find((u) => u.table === 'credentials');
+    expect(credUpdate).toBeDefined();
+    const set = credUpdate!.set as Record<string, unknown>;
+    expect(set.status).toBe('pending');
+    expect(set.acceptedAt).toBeUndefined();
+  });
+
+  it('already transitioned (returning=[]): noop, does not throw', async () => {
+    dbSelectResult.current = [
+      {
+        txType: 'CredentialAccept',
+        requestBody: { credentialId: 'cred-1' },
+      },
+    ];
+    credentialUpdateReturning.current = [];
+
+    // The UPDATE still fires — the idempotency guard is the WHERE clause
+    // that returns zero rows. Helper must not throw.
+    await expect(
+      applyCredentialAcceptOutcome('tx-uuid-1', true, silentLog),
+    ).resolves.toBeUndefined();
+
+    // UPDATE was attempted exactly once even though it was a noop.
+    expect(dbUpdateCalls.filter((u) => u.table === 'credentials')).toHaveLength(1);
+  });
+});
+
+describe('processTxConfirmJob: CredentialAccept integration', () => {
+  beforeEach(() => {
+    dbUpdateCalls.length = 0;
+    accountUpdateReturning.current = [];
+    credentialUpdateReturning.current = [];
+    subscribersResult.current = [];
+    deliveryInsertResult.current = [];
+    dbInsertCalls.length = 0;
+    enqueueWebhookDeliveryMock.mockClear();
+  });
+
+  afterEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('validated tesSUCCESS CredentialAccept: flips credential to accepted', async () => {
+    stubs.clientRequest.mockResolvedValueOnce({
+      result: {
+        validated: true,
+        ledger_index: 115,
+        meta: { TransactionResult: 'tesSUCCESS' },
+      },
+    });
+    dbSelectResult.current = [
+      {
+        txType: 'CredentialAccept',
+        requestBody: { credentialId: 'cred-1' },
+      },
+    ];
+    credentialUpdateReturning.current = [{ id: 'cred-1' }];
+
+    await processTxConfirmJob(makeJob(BASE_JOB));
+
+    const credUpdate = dbUpdateCalls.find((u) => u.table === 'credentials');
+    expect(credUpdate).toBeDefined();
+    expect((credUpdate!.set as Record<string, unknown>).status).toBe('accepted');
+  });
+
+  it('validated tec error CredentialAccept: flips credential back to pending', async () => {
+    stubs.clientRequest.mockResolvedValueOnce({
+      result: {
+        validated: true,
+        ledger_index: 115,
+        meta: { TransactionResult: 'tecNO_PERMISSION' },
+      },
+    });
+    dbSelectResult.current = [
+      {
+        txType: 'CredentialAccept',
+        requestBody: { credentialId: 'cred-1' },
+      },
+    ];
+    credentialUpdateReturning.current = [{ id: 'cred-1' }];
+
+    await processTxConfirmJob(makeJob(BASE_JOB));
+
+    const credUpdate = dbUpdateCalls.find((u) => u.table === 'credentials');
+    expect(credUpdate).toBeDefined();
+    expect((credUpdate!.set as Record<string, unknown>).status).toBe('pending');
+  });
+
+  it('expired CredentialAccept: flips credential back to pending', async () => {
+    // First call = tx lookup throws; second call = ledger_current past lastLedger.
+    stubs.clientRequest
+      .mockRejectedValueOnce(new Error('txnNotFound'))
+      .mockResolvedValueOnce({ result: { ledger_current_index: 125 } });
+
+    // Shared mock data: the expired branch's sourceAddress SELECT and the
+    // helper's txType/requestBody SELECT both read from dbSelectResult. A
+    // single row with all fields satisfies both without per-chain routing.
+    dbSelectResult.current = [
+      {
+        sourceAddress: 'rSource00000000000000000000000000',
+        txType: 'CredentialAccept',
+        requestBody: { credentialId: 'cred-1' },
+      },
+    ];
+    credentialUpdateReturning.current = [{ id: 'cred-1' }];
+
+    await processTxConfirmJob(makeJob(BASE_JOB));
+
+    // Tx row marked failed AND credential row reverted to 'pending'.
+    expect(dbUpdateCalls.filter((u) => u.table === 'transactions')).toHaveLength(1);
+    const credUpdate = dbUpdateCalls.find((u) => u.table === 'credentials');
+    expect(credUpdate).toBeDefined();
+    expect((credUpdate!.set as Record<string, unknown>).status).toBe('pending');
   });
 });

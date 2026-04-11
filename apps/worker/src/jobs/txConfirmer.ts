@@ -19,6 +19,7 @@
 // delivery worker handles retries independently from this job.
 
 import { and, db, eq, isNull, schema, sql } from '@railforge/db';
+import type { Logger } from '@railforge/logger';
 import { type Job, Worker } from 'bullmq';
 import type { Redis } from 'ioredis';
 import { logger } from '../logger.ts';
@@ -91,6 +92,15 @@ export async function processTxConfirmJob(job: Job<TxConfirmJobData>): Promise<v
           errorMessage: 'Transaction expired before validation',
         })
         .where(eq(schema.transactions.id, txId));
+      // Partner to the acceptCredential TOCTOU fix: if this expired tx
+      // was a CredentialAccept, revert the credential row out of the
+      // 'accepting' intermediate state back to 'pending' so the subject
+      // can retry. Best-effort — do not retry the whole job on failure.
+      try {
+        await applyCredentialAcceptOutcome(txId, false, log);
+      } catch (err) {
+        log.error({ err }, 'credential accept outcome failed (non-fatal)');
+      }
       return; // done — do NOT throw, or BullMQ will retry a dead job
     }
 
@@ -194,6 +204,17 @@ export async function processTxConfirmJob(job: Job<TxConfirmJobData>): Promise<v
     });
   } catch (err) {
     log.error({ err }, 'webhook fan-out failed (non-fatal)');
+  }
+
+  // Partner to the acceptCredential TOCTOU fix: flip the credential row
+  // out of the 'accepting' intermediate state. tesSUCCESS → 'accepted',
+  // any failure → back to 'pending' so the subject can retry. Best-effort
+  // like the webhook and MPT backfill — a hiccup here must not retry the
+  // whole confirmation job, which would re-fire side effects above.
+  try {
+    await applyCredentialAcceptOutcome(txId, isSuccess, log);
+  } catch (err) {
+    log.error({ err }, 'credential accept outcome failed (non-fatal)');
   }
 
   // 6. Backfill tokens.mpt_issuance_id from tx metadata.
@@ -395,6 +416,68 @@ export function startTxConfirmWorker(redis: Redis): Worker<TxConfirmJobData> {
     connection: redis,
     concurrency: 5, // polling is cheap and safe to parallelize across different txs
   });
+}
+
+/**
+ * Flip a credentials row out of the 'accepting' intermediate state that
+ * acceptCredential left it in. Partner to the TOCTOU fix in
+ * credential.service.ts: the service takes the pending → accepting
+ * transition inside the same DB transaction that enqueues the
+ * CredentialAccept tx, and this helper closes the loop when rippled
+ * validates (or expires) that tx.
+ *
+ * tesSUCCESS → 'accepted' (+ acceptedAt=now)
+ * any failure/expiry → 'pending' (so the subject can retry)
+ *
+ * Idempotency: the UPDATE only matches rows still in 'accepting', so a
+ * replayed confirmation after a successful first pass is a silent no-op
+ * rather than overwriting a status that a later action moved on from.
+ *
+ * Exported so the unit test can drive it directly.
+ */
+export async function applyCredentialAcceptOutcome(
+  txId: string,
+  isSuccess: boolean,
+  log: Logger,
+): Promise<void> {
+  const rows = await db
+    .select({
+      txType: schema.transactions.txType,
+      requestBody: schema.transactions.requestBody,
+    })
+    .from(schema.transactions)
+    .where(eq(schema.transactions.id, txId))
+    .limit(1);
+
+  const row = rows[0];
+  if (!row || row.txType !== 'CredentialAccept') return;
+
+  const body = row.requestBody as { credentialId?: unknown } | null;
+  const credentialId = typeof body?.credentialId === 'string' ? body.credentialId : null;
+  if (!credentialId) return;
+
+  const setValues = isSuccess
+    ? { status: 'accepted', acceptedAt: new Date() }
+    : { status: 'pending' };
+
+  const updated = await db
+    .update(schema.credentials)
+    .set(setValues)
+    .where(and(eq(schema.credentials.id, credentialId), eq(schema.credentials.status, 'accepting')))
+    .returning({ id: schema.credentials.id });
+
+  if (updated.length === 0) {
+    log.debug(
+      { credentialId, isSuccess },
+      'credential already transitioned out of accepting (noop)',
+    );
+    return;
+  }
+
+  log.info(
+    { credentialId, newStatus: isSuccess ? 'accepted' : 'pending' },
+    'credential accept outcome applied',
+  );
 }
 
 // Re-exported so tests can `expect.toThrow(TxNotYetValidated)`.
