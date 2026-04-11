@@ -3,14 +3,16 @@
 // Scans the credentials table for credentials expiring within a
 // configurable horizon (default 7 days). For each expiring credential,
 // inserts a webhook_deliveries row with event type 'credential.expiring'
-// and enqueues a delivery job. The alert fires once per credential —
-// repeated runs are idempotent (we only alert credentials with status
-// 'accepted', and the txConfirmer flips to 'expired' after the on-chain
-// state changes).
+// and enqueues a delivery job.
+//
+// Dedup (PLAN.md §9.1 #19): each credential carries `last_expiry_alert_at`.
+// The sweep only alerts credentials whose marker is NULL or older than
+// DEDUP_INTERVAL_HOURS, then stamps the marker in the same DB round so
+// concurrent sweeps cannot double-fire.
 //
 // This job runs on a repeating BullMQ schedule (every 6 hours).
 
-import { and, db, eq, schema } from '@railforge/db';
+import { and, db, eq, isNull, lte, or, schema } from '@railforge/db';
 import { Worker } from 'bullmq';
 import type { Redis } from 'ioredis';
 import { logger } from '../logger.ts';
@@ -18,6 +20,9 @@ import { enqueueWebhookDelivery } from '../queues.ts';
 
 // Credentials expiring within this window get alerts.
 const EXPIRY_HORIZON_DAYS = 7;
+// Don't re-alert a credential more often than this. 23h keeps safely under
+// a daily cron and above the default 6h sweep cadence.
+const DEDUP_INTERVAL_HOURS = 23;
 
 export interface CredentialExpiryJobData {
   /** Optional override for the horizon (in days). Used by tests. */
@@ -37,7 +42,13 @@ export async function processCredentialExpirySweep(
   const horizon = new Date();
   horizon.setDate(horizon.getDate() + horizonDays);
 
-  // Find accepted credentials expiring before the horizon.
+  const now = new Date();
+  const dedupCutoff = new Date(now.getTime() - DEDUP_INTERVAL_HOURS * 60 * 60 * 1000);
+
+  // Find accepted credentials expiring before the horizon whose last alert
+  // marker is either missing or older than the dedup window. Expiry/horizon
+  // bounds are still filtered in JS because the schema stores expires_at as
+  // a nullable timestamp and we want to keep the query simple.
   const expiring = await db
     .select({
       id: schema.credentials.id,
@@ -48,9 +59,16 @@ export async function processCredentialExpirySweep(
       expiresAt: schema.credentials.expiresAt,
     })
     .from(schema.credentials)
-    .where(eq(schema.credentials.status, 'accepted'));
+    .where(
+      and(
+        eq(schema.credentials.status, 'accepted'),
+        or(
+          isNull(schema.credentials.lastExpiryAlertAt),
+          lte(schema.credentials.lastExpiryAlertAt, dedupCutoff),
+        ),
+      ),
+    );
 
-  const now = new Date();
   const candidates = expiring.filter(
     (c) => c.expiresAt !== null && c.expiresAt > now && c.expiresAt <= horizon,
   );
@@ -63,6 +81,24 @@ export async function processCredentialExpirySweep(
   let alertedCount = 0;
 
   for (const cred of candidates) {
+    // Claim the credential by stamping lastExpiryAlertAt under the same
+    // dedup predicate. If another sweep raced us, the WHERE clause matches
+    // zero rows and we skip. Postgres's UPDATE ... WHERE is atomic.
+    const claim = await db
+      .update(schema.credentials)
+      .set({ lastExpiryAlertAt: now })
+      .where(
+        and(
+          eq(schema.credentials.id, cred.id),
+          or(
+            isNull(schema.credentials.lastExpiryAlertAt),
+            lte(schema.credentials.lastExpiryAlertAt, dedupCutoff),
+          ),
+        ),
+      )
+      .returning({ id: schema.credentials.id });
+    if (claim.length === 0) continue;
+
     // Find webhook endpoints for this client that subscribe to credential.expiring.
     const endpoints = await db
       .select({

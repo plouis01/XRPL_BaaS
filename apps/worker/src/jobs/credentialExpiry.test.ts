@@ -23,10 +23,22 @@ vi.mock('@railforge/db', () => {
     })),
   }));
 
+  // Dedup-claim UPDATE: always claim the row in tests.
+  const update = vi.fn(() => ({
+    set: vi.fn(() => ({
+      where: vi.fn(() => ({
+        returning: vi.fn(async () => [{ id: 'cred-1' }]),
+      })),
+    })),
+  }));
+
   return {
-    db: { select, insert },
+    db: { select, insert, update },
     eq: vi.fn(),
     and: vi.fn((...args: unknown[]) => ({ and: args })),
+    or: vi.fn((...args: unknown[]) => ({ or: args })),
+    isNull: vi.fn(),
+    lte: vi.fn(),
     schema: {
       credentials: { __name: 'credentials' },
       webhookEndpoints: { __name: 'webhook_endpoints' },

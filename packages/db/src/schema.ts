@@ -148,6 +148,10 @@ export const credentials = pgTable(
     status: text('status').notNull().default('pending'),
     expiresAt: timestamp('expires_at', { withTimezone: true }),
     acceptedAt: timestamp('accepted_at', { withTimezone: true }),
+    /** Dedup marker for credential.expiring webhook sweeps (PLAN.md §9.1 #19). */
+    lastExpiryAlertAt: timestamp('last_expiry_alert_at', {
+      withTimezone: true,
+    }),
     ledgerIndex: text('ledger_index'),
     metadata: jsonb('metadata').default({}),
     createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),

@@ -1,0 +1,1 @@
+ALTER TABLE "credentials" ADD COLUMN "last_expiry_alert_at" timestamp with time zone;
