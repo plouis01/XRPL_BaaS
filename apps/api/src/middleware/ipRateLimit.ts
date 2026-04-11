@@ -21,8 +21,10 @@
 // key namespace (`railforge:ip:` vs `railforge:rl:`) so the two don't collide.
 
 import type { MiddlewareHandler } from 'hono';
+import { logger } from '../logger.ts';
 import { getRedis } from '../redis.ts';
 import type { AppEnv } from '../types.ts';
+import { memoryRateLimiter } from './memoryRateLimit.ts';
 
 const WINDOW_MS = 60_000; // 1 minute
 const WINDOW_SECONDS = Math.ceil(WINDOW_MS / 1000);
@@ -58,23 +60,33 @@ export const ipRateLimit: MiddlewareHandler<AppEnv> = async (c, next) => {
   const key = `railforge:ip:${ip}`;
   const member = `${now}-${Math.random()}`;
 
-  const pipeline = redis.multi();
-  pipeline.zremrangebyscore(key, 0, windowStart);
-  pipeline.zadd(key, now, member);
-  pipeline.zcard(key);
-  pipeline.expire(key, WINDOW_SECONDS);
-  const result = await pipeline.exec();
+  let count = -1;
+  let degraded = false;
+  try {
+    const pipeline = redis.multi();
+    pipeline.zremrangebyscore(key, 0, windowStart);
+    pipeline.zadd(key, now, member);
+    pipeline.zcard(key);
+    pipeline.expire(key, WINDOW_SECONDS);
+    const result = await pipeline.exec();
 
-  if (!result) {
-    // Pipeline rejected — fail open. Pre-auth limiter is defense-in-depth;
-    // if Redis is down, the per-key limiter behind it still runs once auth
-    // succeeds. Logging a metric here would be good once we wire pino.
-    await next();
-    return;
+    if (!result) {
+      degraded = true;
+    } else {
+      const cardResult = result[2];
+      count = cardResult && typeof cardResult[1] === 'number' ? cardResult[1] : 0;
+    }
+  } catch (err) {
+    // Sprint 7 (#16): Redis unreachable. The pre-auth limiter is the only
+    // thing standing between anonymous traffic and the auth lookup — we
+    // can't fail open. Fall through to the in-process sliding window.
+    logger.warn({ err, key }, 'ipRateLimit redis error — using in-memory fallback');
+    degraded = true;
   }
 
-  const cardResult = result[2];
-  const count = cardResult && typeof cardResult[1] === 'number' ? cardResult[1] : 0;
+  if (degraded) {
+    count = memoryRateLimiter.hit(key, WINDOW_MS, now);
+  }
 
   // Don't expose the per-IP budget in headers — that just tells attackers
   // the threshold. Only emit a Retry-After on rejection.

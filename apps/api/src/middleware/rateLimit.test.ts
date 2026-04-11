@@ -13,7 +13,24 @@ vi.mock('../redis.ts', () => ({
   disconnectRedis: async () => {},
 }));
 
+// Silence the logger so failure-path tests don't spam stdout.
+vi.mock('../logger.ts', () => ({
+  logger: {
+    warn: vi.fn(),
+    info: vi.fn(),
+    error: vi.fn(),
+    debug: vi.fn(),
+    child: () => ({
+      warn: vi.fn(),
+      info: vi.fn(),
+      error: vi.fn(),
+      debug: vi.fn(),
+    }),
+  },
+}));
+
 const { rateLimit } = await import('./rateLimit.ts');
+const { memoryRateLimiter } = await import('./memoryRateLimit.ts');
 
 function makeApp(opts: { apiKeyId: string; limit: number }): Hono<AppEnv> {
   const app = new Hono<AppEnv>();
@@ -33,6 +50,9 @@ function makeApp(opts: { apiKeyId: string; limit: number }): Hono<AppEnv> {
 describe('rateLimit middleware', () => {
   beforeEach(async () => {
     await mockRedis.flushall();
+    // The in-memory fallback is a module-level singleton — reset between
+    // tests so one test's fallback state doesn't leak into another.
+    memoryRateLimiter.reset();
   });
   afterEach(() => {
     vi.clearAllMocks();
@@ -122,5 +142,104 @@ describe('rateLimit middleware', () => {
     expect(res.status).toBe(500);
     const body = await res.json();
     expect(body).toEqual({ error: 'Rate limit context missing' });
+  });
+
+  // Sprint 7 #16: the previous behavior here was "if Redis throws, fail
+  // open and let the request through". That turned a Redis outage into a
+  // DoS vector — the whole per-key limiter silently waved traffic through.
+  // Now it falls back to an in-process sliding window instead.
+
+  describe('redis failure fallback', () => {
+    it('enforces the limit via in-memory fallback when the pipeline throws', async () => {
+      const app = makeApp({ apiKeyId: 'k-down', limit: 2 });
+
+      // Break the redis mock for this test only — the pipeline exec()
+      // throws, which is the shape a real connection refusal takes.
+      const spy = vi.spyOn(mockRedis, 'multi').mockImplementation(() => {
+        // biome-ignore lint/suspicious/noExplicitAny: stubbing ioredis' fluent builder
+        const failing: any = {
+          zremrangebyscore: () => failing,
+          zadd: () => failing,
+          zcard: () => failing,
+          expire: () => failing,
+          exec: async () => {
+            throw new Error('connection refused');
+          },
+        };
+        return failing;
+      });
+
+      // Two hits under the limit → both 200.
+      const r1 = await app.request('/ping');
+      const r2 = await app.request('/ping');
+      // Third hit pushes over 2 → 429, enforced by the in-memory fallback.
+      const r3 = await app.request('/ping');
+
+      expect(r1.status).toBe(200);
+      expect(r2.status).toBe(200);
+      expect(r3.status).toBe(429);
+
+      // All three should have the degraded-mode marker header so ops
+      // knows the response came from the fallback path.
+      expect(r1.headers.get('x-ratelimit-mode')).toBe('degraded');
+      expect(r2.headers.get('x-ratelimit-mode')).toBe('degraded');
+      expect(r3.headers.get('x-ratelimit-mode')).toBe('degraded');
+
+      spy.mockRestore();
+    });
+
+    it('isolates fallback buckets by apiKeyId', async () => {
+      const appA = makeApp({ apiKeyId: 'kA-down', limit: 1 });
+      const appB = makeApp({ apiKeyId: 'kB-down', limit: 1 });
+
+      const spy = vi.spyOn(mockRedis, 'multi').mockImplementation(() => {
+        // biome-ignore lint/suspicious/noExplicitAny: stubbing ioredis' fluent builder
+        const failing: any = {
+          zremrangebyscore: () => failing,
+          zadd: () => failing,
+          zcard: () => failing,
+          expire: () => failing,
+          exec: async () => {
+            throw new Error('connection refused');
+          },
+        };
+        return failing;
+      });
+
+      const a1 = await appA.request('/ping');
+      const a2 = await appA.request('/ping'); // kA over limit via fallback
+      const b1 = await appB.request('/ping'); // kB's fallback bucket is separate
+
+      expect(a1.status).toBe(200);
+      expect(a2.status).toBe(429);
+      expect(b1.status).toBe(200);
+
+      spy.mockRestore();
+    });
+
+    it('uses fallback when exec() resolves null (pipeline rejected cleanly)', async () => {
+      const app = makeApp({ apiKeyId: 'k-null', limit: 1 });
+
+      const spy = vi.spyOn(mockRedis, 'multi').mockImplementation(() => {
+        // biome-ignore lint/suspicious/noExplicitAny: stubbing ioredis' fluent builder
+        const failing: any = {
+          zremrangebyscore: () => failing,
+          zadd: () => failing,
+          zcard: () => failing,
+          expire: () => failing,
+          exec: async () => null,
+        };
+        return failing;
+      });
+
+      const r1 = await app.request('/ping');
+      const r2 = await app.request('/ping');
+
+      expect(r1.status).toBe(200);
+      expect(r2.status).toBe(429);
+      expect(r1.headers.get('x-ratelimit-mode')).toBe('degraded');
+
+      spy.mockRestore();
+    });
   });
 });

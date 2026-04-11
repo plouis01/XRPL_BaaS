@@ -10,10 +10,17 @@
 //
 // All four ops run in a single MULTI pipeline so the count is consistent.
 // The per-key limit comes from auth middleware (api_keys.rate_limit).
+//
+// Sprint 7 (#16): when the Redis pipeline throws or returns null we no
+// longer fail open. Traffic during an outage falls back to an in-process
+// sliding window (memoryRateLimit.ts) so the limiter keeps enforcing
+// *some* ceiling instead of silently waving every request through.
 
 import type { MiddlewareHandler } from 'hono';
+import { logger } from '../logger.ts';
 import { getRedis } from '../redis.ts';
 import type { AppEnv } from '../types.ts';
+import { memoryRateLimiter } from './memoryRateLimit.ts';
 
 const WINDOW_MS = 60_000; // 1 minute
 const WINDOW_SECONDS = Math.ceil(WINDOW_MS / 1000);
@@ -34,26 +41,42 @@ export const rateLimit: MiddlewareHandler<AppEnv> = async (c, next) => {
   // Use a unique member so concurrent requests at the same ms don't collide.
   const member = `${now}-${Math.random()}`;
 
-  const pipeline = redis.multi();
-  pipeline.zremrangebyscore(key, 0, windowStart);
-  pipeline.zadd(key, now, member);
-  pipeline.zcard(key);
-  pipeline.expire(key, WINDOW_SECONDS);
-  const result = await pipeline.exec();
+  let count = -1;
+  let degraded = false;
+  try {
+    const pipeline = redis.multi();
+    pipeline.zremrangebyscore(key, 0, windowStart);
+    pipeline.zadd(key, now, member);
+    pipeline.zcard(key);
+    pipeline.expire(key, WINDOW_SECONDS);
+    const result = await pipeline.exec();
 
-  if (!result) {
-    // Pipeline rejected — fail open and let downstream handle it.
-    await next();
-    return;
+    if (!result) {
+      degraded = true;
+    } else {
+      // result is [[err, value], ...]. Index 2 is the ZCARD reply.
+      const cardResult = result[2];
+      count = cardResult && typeof cardResult[1] === 'number' ? cardResult[1] : 0;
+    }
+  } catch (err) {
+    // Redis unreachable / pipeline rejected. Fall through to in-memory.
+    logger.warn({ err, key }, 'rateLimit redis error — using in-memory fallback');
+    degraded = true;
   }
 
-  // result is [[err, value], ...]. Index 2 is the ZCARD reply.
-  const cardResult = result[2];
-  const count = cardResult && typeof cardResult[1] === 'number' ? cardResult[1] : 0;
+  if (degraded) {
+    count = memoryRateLimiter.hit(key, WINDOW_MS, now);
+  }
 
   c.header('X-RateLimit-Limit', String(limit));
   c.header('X-RateLimit-Remaining', String(Math.max(0, limit - count)));
   c.header('X-RateLimit-Reset', String(Math.ceil((now + WINDOW_MS) / 1000)));
+  if (degraded) {
+    // Signal to observability that this response was enforced by the
+    // degraded-mode in-process limiter, not Redis. Caller-visible — we
+    // want this surfaced in dashboards, not buried in logs.
+    c.header('X-RateLimit-Mode', 'degraded');
+  }
 
   if (count > limit) {
     return c.json({ error: 'Rate limit exceeded', retry_after_seconds: WINDOW_SECONDS }, 429);

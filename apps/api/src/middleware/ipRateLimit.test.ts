@@ -13,7 +13,24 @@ vi.mock('../redis.ts', () => ({
   disconnectRedis: async () => {},
 }));
 
+// Silence the logger so failure-path tests don't spam stdout.
+vi.mock('../logger.ts', () => ({
+  logger: {
+    warn: vi.fn(),
+    info: vi.fn(),
+    error: vi.fn(),
+    debug: vi.fn(),
+    child: () => ({
+      warn: vi.fn(),
+      info: vi.fn(),
+      error: vi.fn(),
+      debug: vi.fn(),
+    }),
+  },
+}));
+
 const { ipRateLimit } = await import('./ipRateLimit.ts');
+const { memoryRateLimiter } = await import('./memoryRateLimit.ts');
 
 function makeApp(): Hono<AppEnv> {
   const app = new Hono<AppEnv>();
@@ -25,6 +42,9 @@ function makeApp(): Hono<AppEnv> {
 describe('ipRateLimit middleware', () => {
   beforeEach(async () => {
     await mockRedis.flushall();
+    // Module-level singleton: reset so the fallback state from a prior
+    // test doesn't leak into the current one.
+    memoryRateLimiter.reset();
     process.env.IP_RATE_LIMIT = '5'; // tight limit for tests
   });
   afterEach(() => {
@@ -140,5 +160,104 @@ describe('ipRateLimit middleware', () => {
     }
     const blocked = await app.request('/v1/anything');
     expect(blocked.status).toBe(429);
+  });
+
+  // Sprint 7 #16: the pre-auth limiter is the ONLY thing standing between
+  // anonymous traffic and the auth lookup. When Redis is down, the old
+  // behavior was to fail open — an attacker during a Redis outage got
+  // effectively unlimited guesses against the auth endpoint. Now the
+  // in-memory fallback enforces the limit per-process.
+
+  describe('redis failure fallback', () => {
+    it('enforces the per-IP limit via in-memory fallback when exec() throws', async () => {
+      const app = makeApp();
+      const ip = { 'cf-connecting-ip': '203.0.113.99' };
+
+      const spy = vi.spyOn(mockRedis, 'multi').mockImplementation(() => {
+        // biome-ignore lint/suspicious/noExplicitAny: stubbing ioredis' fluent builder
+        const failing: any = {
+          zremrangebyscore: () => failing,
+          zadd: () => failing,
+          zcard: () => failing,
+          expire: () => failing,
+          exec: async () => {
+            throw new Error('connection refused');
+          },
+        };
+        return failing;
+      });
+
+      // Burn through the limit (5).
+      for (let i = 0; i < 5; i++) {
+        const r = await app.request('/v1/anything', { headers: ip });
+        expect(r.status).toBe(200);
+      }
+
+      // The 6th hit must be blocked by the fallback, not admitted.
+      const blocked = await app.request('/v1/anything', { headers: ip });
+      expect(blocked.status).toBe(429);
+      expect(blocked.headers.get('retry-after')).toBe('60');
+
+      spy.mockRestore();
+    });
+
+    it('isolates fallback buckets per IP during a redis outage', async () => {
+      const app = makeApp();
+
+      const spy = vi.spyOn(mockRedis, 'multi').mockImplementation(() => {
+        // biome-ignore lint/suspicious/noExplicitAny: stubbing ioredis' fluent builder
+        const failing: any = {
+          zremrangebyscore: () => failing,
+          zadd: () => failing,
+          zcard: () => failing,
+          expire: () => failing,
+          exec: async () => {
+            throw new Error('connection refused');
+          },
+        };
+        return failing;
+      });
+
+      // Drain IP A's fallback bucket.
+      for (let i = 0; i < 6; i++) {
+        await app.request('/v1/anything', {
+          headers: { 'cf-connecting-ip': '203.0.113.100' },
+        });
+      }
+      // IP B must still be admitted — the fallback map keys per IP.
+      const ok = await app.request('/v1/anything', {
+        headers: { 'cf-connecting-ip': '203.0.113.101' },
+      });
+      expect(ok.status).toBe(200);
+
+      spy.mockRestore();
+    });
+
+    it('falls back when exec() resolves null (pipeline rejected cleanly)', async () => {
+      const app = makeApp();
+      const ip = { 'cf-connecting-ip': '203.0.113.102' };
+
+      const spy = vi.spyOn(mockRedis, 'multi').mockImplementation(() => {
+        // biome-ignore lint/suspicious/noExplicitAny: stubbing ioredis' fluent builder
+        const failing: any = {
+          zremrangebyscore: () => failing,
+          zadd: () => failing,
+          zcard: () => failing,
+          expire: () => failing,
+          exec: async () => null,
+        };
+        return failing;
+      });
+
+      // Burn through the limit again via the null-result path.
+      for (let i = 0; i < 5; i++) {
+        const r = await app.request('/v1/anything', { headers: ip });
+        expect(r.status).toBe(200);
+      }
+      const blocked = await app.request('/v1/anything', { headers: ip });
+      expect(blocked.status).toBe(429);
+
+      spy.mockRestore();
+    });
   });
 });
