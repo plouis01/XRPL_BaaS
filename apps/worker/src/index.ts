@@ -1,14 +1,7 @@
-// Worker entry point. Spawns BullMQ workers for transaction submission,
-// confirmation polling, webhook delivery, credential expiry alerts, and
-// reserve reclamation. See PLAN.md §4.3 pipeline.
-//
-// Shared singletons (Redis connection, XRPL pool, sequencer, signer) live
-// in ./queues.ts. Each job module exports a start*Worker function that
-// wires its BullMQ worker to the shared Redis. On SIGTERM/SIGINT we close
-// everything gracefully so in-flight jobs finish before the process exits.
-
+import { Queue } from 'bullmq';
 import { Redis } from 'ioredis';
 import { startCredentialExpiryWorker } from './jobs/credentialExpiry.ts';
+import { ORPHAN_RECONCILER_QUEUE, startOrphanReconcilerWorker } from './jobs/orphanReconciler.ts';
 import { startTxConfirmWorker } from './jobs/txConfirmer.ts';
 import { startTxSubmitWorker } from './jobs/txSubmitter.ts';
 import { startWebhookDeliveryWorker } from './jobs/webhookDelivery.ts';
@@ -78,10 +71,43 @@ const txSubmitWorker = startTxSubmitWorker(workerRedis);
 const txConfirmWorker = startTxConfirmWorker(workerRedis);
 const webhookDeliveryWorker = startWebhookDeliveryWorker(workerRedis);
 const credentialExpiryWorker = startCredentialExpiryWorker(workerRedis);
+const orphanReconcilerWorker = startOrphanReconcilerWorker(workerRedis);
+
+// Orphan reconciler repeat schedule (PLAN.md §9.2 G-1).
+//
+// The reconciler sweeps stale `transactions` rows whose enqueue never
+// happened (Redis outage at create-time). The actual sweep logic lives
+// in jobs/orphanReconciler.ts; here we register a BullMQ repeat job
+// every 5 minutes so the worker keeps draining orphans without anyone
+// having to manually push.
+//
+// Using a deterministic jobId on the repeat keeps re-registers
+// idempotent across worker restarts — BullMQ will dedupe by id.
+const orphanReconcilerScheduleQueue = new Queue(ORPHAN_RECONCILER_QUEUE, {
+  connection: workerRedis,
+  defaultJobOptions: {
+    removeOnComplete: { count: 100 },
+    removeOnFail: { count: 100 },
+  },
+});
+await orphanReconcilerScheduleQueue.add(
+  'sweep',
+  {},
+  {
+    repeat: { every: 5 * 60 * 1000 },
+    jobId: 'orphan-reconciler-sweep',
+  },
+);
 
 logger.info(
   {
-    queues: ['tx-submit', 'tx-confirm', 'webhook-delivery', 'credential-expiry'],
+    queues: [
+      'tx-submit',
+      'tx-confirm',
+      'webhook-delivery',
+      'credential-expiry',
+      'orphan-reconciler',
+    ],
     redis: redisUrl,
     network: process.env.XRPL_NETWORK ?? 'testnet',
     treasuryLoaded: !!treasurySeed,
@@ -96,6 +122,8 @@ async function shutdown(signal: string): Promise<void> {
     txConfirmWorker.close(),
     webhookDeliveryWorker.close(),
     credentialExpiryWorker.close(),
+    orphanReconcilerWorker.close(),
+    orphanReconcilerScheduleQueue.close(),
   ]);
   await disconnectWorker();
   await workerRedis.quit();
