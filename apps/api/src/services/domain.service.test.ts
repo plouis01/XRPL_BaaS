@@ -10,6 +10,9 @@ const dbInsertResults: Record<string, unknown[]> = {
   domains: [{ id: 'dom-uuid-1' }],
 };
 const dbSelectResult = { current: [] as unknown[] };
+// Table-keyed results so queries that scan different tables (e.g.
+// listMembers: domains lookup → credentials scan) can be isolated.
+const dbSelectResults: Record<string, unknown[]> = {};
 const dbUpdateCalls: Array<unknown> = [];
 
 vi.mock('@railforge/db', () => {
@@ -23,11 +26,20 @@ vi.mock('@railforge/db', () => {
   }));
 
   const select = vi.fn(() => ({
-    from: vi.fn(() => ({
-      where: vi.fn(() => ({
-        limit: vi.fn(async () => dbSelectResult.current),
-      })),
-    })),
+    from: vi.fn((table: { __name?: string } = {}) => {
+      const tableName = table.__name ?? '';
+      const pick = () => dbSelectResults[tableName] ?? dbSelectResult.current;
+      return {
+        where: vi.fn(() => {
+          // Awaitable thenable that also exposes .limit() for the
+          // queries that chain it.
+          const result = Promise.resolve(pick());
+          const r = result as unknown as Record<string, unknown>;
+          r.limit = vi.fn(async () => pick());
+          return result;
+        }),
+      };
+    }),
   }));
 
   const update = vi.fn(() => ({
@@ -53,6 +65,8 @@ vi.mock('@railforge/db', () => {
     },
     eq: vi.fn((col: unknown, val: unknown) => ({ col, val })),
     and: vi.fn((...args: unknown[]) => ({ and: args })),
+    or: vi.fn((...args: unknown[]) => ({ or: args })),
+    gt: vi.fn((col: unknown, val: unknown) => ({ gt: [col, val] })),
     isNull: vi.fn((col: unknown) => ({ isNull: col })),
   };
 });
@@ -102,6 +116,7 @@ beforeEach(async () => {
   dbUpdateCalls.length = 0;
   enqueueCalls.length = 0;
   dbSelectResult.current = [];
+  for (const k of Object.keys(dbSelectResults)) delete dbSelectResults[k];
   dbInsertResults.transactions = [{ id: 'tx-uuid-1' }];
   dbInsertResults.domains = [{ id: 'dom-uuid-1' }];
   enqueueShouldThrow.err = null;
@@ -235,5 +250,102 @@ describe('deleteDomain', () => {
     await expect(mod.deleteDomain({ clientId: 'c1', domainDbId: 'dom-1' })).rejects.toThrow(
       'cannot delete',
     );
+  });
+});
+
+describe('listMembers', () => {
+  // Helper: seed a domain with a given accepted credentials list.
+  const seedDomain = (accepted: Array<{ issuer: string; credential_type: string }>) => {
+    dbSelectResults.domains = [
+      {
+        id: 'dom-1',
+        ownerAddress: 'rOwner',
+        domainId: 'abcd1234',
+        acceptedCredentials: accepted,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      },
+    ];
+  };
+
+  it('throws not_found when the domain does not exist', async () => {
+    dbSelectResults.domains = [];
+    await expect(mod.listMembers('c1', 'missing-id')).rejects.toThrow('Domain not found');
+  });
+
+  it('returns empty members when the domain has no accepted credentials', async () => {
+    seedDomain([]);
+    const result = await mod.listMembers('c1', 'dom-1');
+    expect(result.members).toEqual([]);
+    expect(result.has_more).toBe(false);
+  });
+
+  it('groups matching credentials by subject address', async () => {
+    seedDomain([{ issuer: 'rIss', credential_type: '4B5943' }]);
+    // Two credentials for the same subject → one member with two ids.
+    dbSelectResults.credentials = [
+      { id: 'cred-1', subjectAddress: 'rAlice' },
+      { id: 'cred-2', subjectAddress: 'rAlice' },
+    ];
+    const result = await mod.listMembers('c1', 'dom-1');
+    expect(result.members).toHaveLength(1);
+    expect(result.members[0]!.subject_address).toBe('rAlice');
+    expect(result.members[0]!.credential_ids).toEqual(['cred-1', 'cred-2']);
+    expect(result.has_more).toBe(false);
+  });
+
+  it('returns members sorted by subject_address for stable pagination', async () => {
+    seedDomain([{ issuer: 'rIss', credential_type: '4B5943' }]);
+    // Intentionally out of order
+    dbSelectResults.credentials = [
+      { id: 'cred-charlie', subjectAddress: 'rCharlie' },
+      { id: 'cred-alice', subjectAddress: 'rAlice' },
+      { id: 'cred-bob', subjectAddress: 'rBob' },
+    ];
+    const result = await mod.listMembers('c1', 'dom-1');
+    expect(result.members.map((m) => m.subject_address)).toEqual(['rAlice', 'rBob', 'rCharlie']);
+  });
+
+  it('applies limit and offset for pagination', async () => {
+    seedDomain([{ issuer: 'rIss', credential_type: '4B5943' }]);
+    dbSelectResults.credentials = [
+      { id: 'c1', subjectAddress: 'rA' },
+      { id: 'c2', subjectAddress: 'rB' },
+      { id: 'c3', subjectAddress: 'rC' },
+      { id: 'c4', subjectAddress: 'rD' },
+      { id: 'c5', subjectAddress: 'rE' },
+    ];
+
+    // First page: limit=2, offset=0
+    const page1 = await mod.listMembers('c1', 'dom-1', { limit: 2, offset: 0 });
+    expect(page1.members).toHaveLength(2);
+    expect(page1.members.map((m) => m.subject_address)).toEqual(['rA', 'rB']);
+    expect(page1.has_more).toBe(true);
+
+    // Second page: limit=2, offset=2
+    const page2 = await mod.listMembers('c1', 'dom-1', { limit: 2, offset: 2 });
+    expect(page2.members.map((m) => m.subject_address)).toEqual(['rC', 'rD']);
+    expect(page2.has_more).toBe(true);
+
+    // Last page: limit=2, offset=4 — only one left, has_more=false
+    const page3 = await mod.listMembers('c1', 'dom-1', { limit: 2, offset: 4 });
+    expect(page3.members.map((m) => m.subject_address)).toEqual(['rE']);
+    expect(page3.has_more).toBe(false);
+  });
+
+  it('clamps the limit to the 1..1000 bound', async () => {
+    seedDomain([{ issuer: 'rIss', credential_type: '4B5943' }]);
+    dbSelectResults.credentials = [
+      { id: 'c1', subjectAddress: 'rA' },
+      { id: 'c2', subjectAddress: 'rB' },
+    ];
+    // limit=0 clamps up to 1
+    const tiny = await mod.listMembers('c1', 'dom-1', { limit: 0 });
+    expect(tiny.members).toHaveLength(1);
+    expect(tiny.has_more).toBe(true);
+    // limit=9999 clamps down to 1000 (still returns all 2 since count < 1000)
+    const huge = await mod.listMembers('c1', 'dom-1', { limit: 9999 });
+    expect(huge.members).toHaveLength(2);
+    expect(huge.has_more).toBe(false);
   });
 });
