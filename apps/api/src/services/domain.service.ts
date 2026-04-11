@@ -10,7 +10,7 @@
 //   checkMembership — does the subject hold a qualifying credential?
 //   listMembers — all subjects with qualifying credentials
 
-import { and, db, eq, isNull, schema } from '@railforge/db';
+import { and, db, eq, gt, isNull, or, schema } from '@railforge/db';
 import { enqueueTxSubmit } from '@railforge/jobs';
 import { buildPermissionedDomainDelete, buildPermissionedDomainSet } from '@railforge/xrpl-core';
 import { logger } from '../logger.ts';
@@ -443,51 +443,71 @@ export async function checkMembership(
 
 // ── List members ────────────────────────────────────────────────────────────
 
+export interface ListMembersOptions {
+  /** Max members to return. Default 100, max 1000. */
+  limit?: number;
+  /** Offset into the sorted member list (for pagination). */
+  offset?: number;
+}
+
 export async function listMembers(
   clientId: string,
   domainDbId: string,
+  opts: ListMembersOptions = {},
 ): Promise<{
   members: Array<{ subject_address: string; credential_ids: string[] }>;
+  has_more: boolean;
 }> {
   const domain = await resolveOwnedDomain(clientId, domainDbId);
   if (!domain) throw new DomainServiceError('not_found', 'Domain not found');
 
   const accepted = (domain.acceptedCredentials as AcceptedCredentialEntry[]) ?? [];
-  if (accepted.length === 0) return { members: [] };
+  if (accepted.length === 0) return { members: [], has_more: false };
 
-  // Fetch accepted credentials scoped to this client.
+  const limit = Math.min(Math.max(opts.limit ?? 100, 1), 1000);
+  const offset = Math.max(opts.offset ?? 0, 0);
+
+  // Push (issuer, credentialType) matching into SQL via OR of ANDs — up to
+  // 10 entries per XLS-80 limit so the predicate list is bounded.
+  const matchers = accepted.map((a) =>
+    and(
+      eq(schema.credentials.issuerAddress, a.issuer),
+      eq(schema.credentials.credentialType, a.credential_type),
+    ),
+  );
+  const now = new Date();
+  const whereClause = and(
+    eq(schema.credentials.clientId, clientId),
+    eq(schema.credentials.status, 'accepted'),
+    or(isNull(schema.credentials.expiresAt), gt(schema.credentials.expiresAt, now)),
+    or(...matchers),
+  );
+
   const creds = await db
     .select({
       id: schema.credentials.id,
       subjectAddress: schema.credentials.subjectAddress,
-      issuerAddress: schema.credentials.issuerAddress,
-      credentialType: schema.credentials.credentialType,
-      expiresAt: schema.credentials.expiresAt,
     })
     .from(schema.credentials)
-    .where(
-      and(eq(schema.credentials.clientId, clientId), eq(schema.credentials.status, 'accepted')),
-    );
+    .where(whereClause);
 
-  const now = new Date();
   const memberMap = new Map<string, string[]>();
-
   for (const cred of creds) {
-    if (cred.expiresAt && cred.expiresAt <= now) continue;
-    const matches = accepted.some(
-      (a) => a.issuer === cred.issuerAddress && a.credential_type === cred.credentialType,
-    );
-    if (matches) {
-      const existing = memberMap.get(cred.subjectAddress) ?? [];
-      existing.push(cred.id);
-      memberMap.set(cred.subjectAddress, existing);
-    }
+    const existing = memberMap.get(cred.subjectAddress) ?? [];
+    existing.push(cred.id);
+    memberMap.set(cred.subjectAddress, existing);
   }
 
+  // Sort by subject_address for stable pagination ordering.
+  const sortedEntries = Array.from(memberMap.entries()).sort(([a], [b]) => a.localeCompare(b));
+  const page = sortedEntries.slice(offset, offset + limit);
+  const hasMore = sortedEntries.length > offset + limit;
+
   return {
-    members: Array.from(memberMap.entries()).map(([subject_address, credential_ids]) => ({
+    members: page.map(([subject_address, credential_ids]) => ({
       subject_address,
       credential_ids,
     })),
+    has_more: hasMore,
   };
 }

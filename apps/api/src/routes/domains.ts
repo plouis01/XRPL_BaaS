@@ -115,12 +115,22 @@ domains.delete('/:id', async (c) => {
   }
 });
 
-// GET /:id/members — list all qualifying members
+// GET /:id/members — list all qualifying members (paginated)
 domains.get('/:id/members', async (c) => {
   const clientId = c.get('clientId');
   const id = c.req.param('id');
+  const limitParam = c.req.query('limit');
+  const offsetParam = c.req.query('offset');
+  const limit = limitParam ? Number.parseInt(limitParam, 10) : undefined;
+  const offset = offsetParam ? Number.parseInt(offsetParam, 10) : undefined;
+  if (limit !== undefined && (Number.isNaN(limit) || limit < 1 || limit > 1000)) {
+    return c.json({ error: 'limit must be an integer between 1 and 1000' }, 400);
+  }
+  if (offset !== undefined && (Number.isNaN(offset) || offset < 0)) {
+    return c.json({ error: 'offset must be a non-negative integer' }, 400);
+  }
   try {
-    const result = await listMembers(clientId, id);
+    const result = await listMembers(clientId, id, { limit, offset });
     return c.json(result);
   } catch (err) {
     if (err instanceof DomainServiceError) {
