@@ -64,6 +64,7 @@ credentials.post('/', zValidator('json', issueCredentialSchema), async (c) => {
       expiration: body.expiration,
       uri: body.uri,
       metadata: body.metadata,
+      idempotencyKey: c.req.header('idempotency-key'),
     });
     return c.json(result, 201);
   } catch (err) {
@@ -113,6 +114,7 @@ credentials.post('/:id/accept', zValidator('json', acceptCredentialSchema), asyn
       clientId,
       credentialId: id,
       subjectAddress: body.subject_address,
+      idempotencyKey: c.req.header('idempotency-key'),
     });
     return c.json({ ...result, status: 'queued' }, 202);
   } catch (err) {
@@ -129,7 +131,11 @@ credentials.delete('/:id', async (c) => {
   const clientId = c.get('clientId');
   const id = c.req.param('id');
   try {
-    const result = await revokeCredential({ clientId, credentialId: id });
+    const result = await revokeCredential({
+      clientId,
+      credentialId: id,
+      idempotencyKey: c.req.header('idempotency-key'),
+    });
     return c.json({ ...result, status: 'queued' }, 202);
   } catch (err) {
     if (err instanceof CredentialServiceError) {

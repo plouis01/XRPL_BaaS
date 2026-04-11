@@ -58,6 +58,7 @@ domains.post('/', zValidator('json', createDomainSchema), async (c) => {
       clientId,
       ownerAddress: body.owner_address,
       acceptedCredentials: body.accepted_credentials,
+      idempotencyKey: c.req.header('idempotency-key'),
     });
     return c.json(result, 201);
   } catch (err) {
@@ -88,6 +89,7 @@ domains.put('/:id', zValidator('json', updateDomainSchema), async (c) => {
       clientId,
       domainDbId: id,
       acceptedCredentials: body.accepted_credentials,
+      idempotencyKey: c.req.header('idempotency-key'),
     });
     return c.json(result, 200);
   } catch (err) {
@@ -104,7 +106,11 @@ domains.delete('/:id', async (c) => {
   const clientId = c.get('clientId');
   const id = c.req.param('id');
   try {
-    const result = await deleteDomain({ clientId, domainDbId: id });
+    const result = await deleteDomain({
+      clientId,
+      domainDbId: id,
+      idempotencyKey: c.req.header('idempotency-key'),
+    });
     return c.json({ ...result, status: 'queued' }, 202);
   } catch (err) {
     if (err instanceof DomainServiceError) {

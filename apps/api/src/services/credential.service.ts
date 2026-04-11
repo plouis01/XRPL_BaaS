@@ -46,6 +46,7 @@ export interface IssueCredentialInput {
   expiration?: number;
   uri?: string;
   metadata?: Record<string, unknown>;
+  idempotencyKey?: string;
 }
 
 export interface CredentialView {
@@ -143,6 +144,7 @@ export async function issueCredential(
           txType: 'CredentialCreate',
           sourceAddress: input.issuerAddress,
           status: 'queued',
+          idempotencyKey: input.idempotencyKey,
           requestBody: {
             op: 'issueCredential',
             issuer: input.issuerAddress,
@@ -339,6 +341,7 @@ export async function acceptCredential(input: AcceptCredentialInput): Promise<{ 
 export interface RevokeCredentialInput {
   clientId: string;
   credentialId: string;
+  idempotencyKey?: string;
 }
 
 export async function revokeCredential(input: RevokeCredentialInput): Promise<{ tx_id: string }> {
@@ -398,6 +401,7 @@ export async function revokeCredential(input: RevokeCredentialInput): Promise<{ 
       txType: 'CredentialDelete',
       sourceAddress,
       status: 'queued',
+      idempotencyKey: input.idempotencyKey,
       requestBody: {
         op: 'revokeCredential',
         credentialId: input.credentialId,

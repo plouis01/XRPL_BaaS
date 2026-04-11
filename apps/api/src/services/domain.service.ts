@@ -128,6 +128,7 @@ export interface CreateDomainInput {
   clientId: string;
   ownerAddress: string;
   acceptedCredentials: AcceptedCredentialEntry[];
+  idempotencyKey?: string;
 }
 
 export async function createDomain(
@@ -175,6 +176,7 @@ export async function createDomain(
           txType: 'PermissionedDomainSet',
           sourceAddress: input.ownerAddress,
           status: 'queued',
+          idempotencyKey: input.idempotencyKey,
           requestBody: {
             op: 'createDomain',
             owner: input.ownerAddress,
@@ -241,6 +243,7 @@ export interface UpdateDomainInput {
   clientId: string;
   domainDbId: string;
   acceptedCredentials: AcceptedCredentialEntry[];
+  idempotencyKey?: string;
 }
 
 export async function updateDomain(
@@ -284,6 +287,7 @@ export async function updateDomain(
       txType: 'PermissionedDomainSet',
       sourceAddress: domain.ownerAddress,
       status: 'queued',
+      idempotencyKey: input.idempotencyKey,
       requestBody: {
         op: 'updateDomain',
         domainId: domain.domainId,
@@ -328,6 +332,7 @@ export async function updateDomain(
 export interface DeleteDomainInput {
   clientId: string;
   domainDbId: string;
+  idempotencyKey?: string;
 }
 
 export async function deleteDomain(input: DeleteDomainInput): Promise<{ tx_id: string }> {
@@ -359,6 +364,7 @@ export async function deleteDomain(input: DeleteDomainInput): Promise<{ tx_id: s
       txType: 'PermissionedDomainDelete',
       sourceAddress: domain.ownerAddress,
       status: 'queued',
+      idempotencyKey: input.idempotencyKey,
       requestBody: {
         op: 'deleteDomain',
         domainId: domain.domainId,
