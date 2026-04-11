@@ -26,6 +26,7 @@ import { type Job, Worker } from 'bullmq';
 import type { Redis } from 'ioredis';
 import { logger } from '../logger.ts';
 import { WEBHOOK_DELIVERY_QUEUE, type WebhookDeliveryJobData } from '../queues.ts';
+import { SsrfBlockedError, resolveAndValidateHostname } from '../ssrfGuard.ts';
 
 // Caps how long we wait on a single delivery POST before giving up and
 // retrying. Long enough that a slow webhook receiver won't fail every
@@ -123,7 +124,61 @@ export async function processWebhookDeliveryJob(job: Job<WebhookDeliveryJobData>
     return;
   }
 
-  // 2. Build the body + signature. We sign the canonical JSON we send
+  // 2. SSRF guard (#18): resolve the hostname NOW and validate the
+  // resolved IP against private/reserved ranges. This catches DNS
+  // rebinding attacks where a public-looking hostname (which passed
+  // the registration-time regex in webhook.service.ts) resolves to
+  // an internal target like 169.254.169.254 (cloud metadata) or
+  // 10.0.0.1 (internal LAN) at delivery time. A small race window
+  // between this lookup and undici's internal lookup remains; see
+  // the comment in ssrfGuard.ts for the residual-risk discussion.
+  //
+  // Failure modes:
+  //   - SsrfBlockedError → mark failed permanently, do NOT retry
+  //     (the target is unsafe and retrying won't fix that)
+  //   - DNS resolve failure → treat as transient network error,
+  //     let the existing retry path handle it
+  let parsedUrl: URL;
+  try {
+    parsedUrl = new URL(endpoint.url);
+  } catch {
+    log.warn({ url: endpoint.url }, 'webhook endpoint has an invalid URL, marking failed');
+    await markFailed(deliveryId, 0, job.attemptsMade + 1);
+    return;
+  }
+  try {
+    await resolveAndValidateHostname(parsedUrl.hostname);
+  } catch (err) {
+    if (err instanceof SsrfBlockedError) {
+      // Target resolved to a private/reserved IP. This is never going
+      // to become safe — mark failed permanently, do NOT throw (we
+      // don't want BullMQ to retry a blocked target).
+      log.warn(
+        { hostname: err.hostname, resolvedIp: err.resolvedIp },
+        'webhook delivery blocked by SSRF guard',
+      );
+      await markFailed(deliveryId, 0, job.attemptsMade + 1);
+      return;
+    }
+    // DNS resolution failure (NXDOMAIN, resolver timeout, etc.) —
+    // treat as a transient network error and let the retry logic
+    // below handle the last-attempt case.
+    log.warn(
+      {
+        err: err instanceof Error ? err.message : 'unknown',
+        hostname: parsedUrl.hostname,
+      },
+      'webhook delivery dns lookup failed',
+    );
+    await bumpAttempt(deliveryId, job.attemptsMade + 1);
+    if (job.attemptsMade + 1 >= (job.opts.attempts ?? 1)) {
+      await markFailed(deliveryId, 0, job.attemptsMade + 1);
+      return;
+    }
+    throw new WebhookDeliveryRetryable('webhook delivery dns lookup failed');
+  }
+
+  // 3. Build the body + signature. We sign the canonical JSON we send
   // on the wire — the receiver MUST hash exactly what they receive in
   // the body, NOT a re-serialization of the parsed JSON. This is the
   // standard pitfall and the reason we serialize once and hold onto
@@ -135,7 +190,7 @@ export async function processWebhookDeliveryJob(job: Job<WebhookDeliveryJobData>
   });
   const signature = signWebhookPayload(endpoint.secret, body);
 
-  // 3. POST. We use AbortSignal.timeout to bound the wait — a slow
+  // 4. POST. We use AbortSignal.timeout to bound the wait — a slow
   // subscriber must not stall the worker concurrency slot indefinitely.
   let response: Response;
   try {
@@ -148,6 +203,12 @@ export async function processWebhookDeliveryJob(job: Job<WebhookDeliveryJobData>
       },
       body,
       signal: AbortSignal.timeout(DELIVERY_TIMEOUT_MS),
+      // Disable automatic redirects. A 3xx to an attacker-controlled
+      // URL would bypass the SSRF guard we just applied to the initial
+      // hostname. We fall through to the isRetryable check below and
+      // mark the delivery failed on a 3xx — clients should configure
+      // their webhook URL to be the canonical endpoint.
+      redirect: 'manual',
     });
   } catch (err) {
     // Network failure or timeout. ALWAYS retry transient network errors.

@@ -94,6 +94,24 @@ vi.mock('../queues.ts', () => ({
   WEBHOOK_DELIVERY_QUEUE: 'railforge-webhook-delivery',
 }));
 
+// ── DNS mock for the SSRF guard (#18) ──────────────────────────────────────
+//
+// The SSRF guard added in Sprint 7 calls `dns.lookup()` before every
+// fetch. Without a mock, tests using made-up hostnames like
+// `hook.example` would hit real DNS and fail. We mock a default "safe
+// public IP" response and let individual tests override it per-case.
+// Typed loosely so tests can mockResolvedValueOnce with either family=4
+// or family=6 without fighting a `4 as const` literal type.
+const dnsLookupMock = vi.fn<(hostname: string) => Promise<{ address: string; family: 4 | 6 }>>(
+  async (_hostname: string) => ({
+    address: '93.184.216.34', // a known public IP (example.com)
+    family: 4,
+  }),
+);
+vi.mock('node:dns/promises', () => ({
+  lookup: (hostname: string) => dnsLookupMock(hostname),
+}));
+
 // ── fetch mock ──────────────────────────────────────────────────────────────
 
 const fetchMock = vi.fn();
@@ -176,6 +194,14 @@ describe('processWebhookDeliveryJob', () => {
       },
     ];
     fetchMock.mockReset();
+    // Reset the DNS mock to the default "safe public IP" so each test
+    // starts from a clean baseline. Individual tests may override it to
+    // simulate DNS rebinding or NXDOMAIN.
+    dnsLookupMock.mockReset();
+    dnsLookupMock.mockImplementation(async () => ({
+      address: '93.184.216.34',
+      family: 4,
+    }));
   });
 
   afterEach(() => {
@@ -331,5 +357,140 @@ describe('processWebhookDeliveryJob', () => {
       (c) => (c.set as Record<string, unknown>).status === 'failed',
     );
     expect(failedUpdate).toBeDefined();
+  });
+
+  // ── Sprint 7 #18: delivery-time SSRF guard ─────────────────────────────
+  //
+  // The webhook service already rejects private IPs at registration, but
+  // a public-looking hostname can rebind to an internal IP between
+  // registration and delivery. The guard in ssrfGuard.ts re-resolves and
+  // re-validates at delivery time; these tests cover the blocked paths.
+
+  describe('SSRF guard (#18)', () => {
+    it('blocks delivery when hostname resolves to AWS metadata IP', async () => {
+      // Simulate DNS rebinding: the registration-time hostname looks
+      // public, but the live DNS answer is the AWS instance metadata
+      // service at 169.254.169.254.
+      dnsLookupMock.mockResolvedValueOnce({
+        address: '169.254.169.254',
+        family: 4,
+      });
+
+      await processWebhookDeliveryJob(makeJob(BASE_JOB_DATA));
+
+      // fetch MUST NOT have been called — the guard rejected before the POST.
+      expect(fetchMock).not.toHaveBeenCalled();
+      // Delivery row marked failed permanently (not retryable).
+      const failedUpdate = dbUpdateCalls.find(
+        (c) => (c.set as Record<string, unknown>).status === 'failed',
+      );
+      expect(failedUpdate).toBeDefined();
+    });
+
+    it('blocks delivery when hostname resolves to RFC 1918 (10.0.0.1)', async () => {
+      dnsLookupMock.mockResolvedValueOnce({
+        address: '10.0.0.1',
+        family: 4,
+      });
+
+      await processWebhookDeliveryJob(makeJob(BASE_JOB_DATA));
+
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(
+        dbUpdateCalls.find((c) => (c.set as Record<string, unknown>).status === 'failed'),
+      ).toBeDefined();
+    });
+
+    it('blocks delivery when hostname resolves to loopback (127.0.0.1)', async () => {
+      dnsLookupMock.mockResolvedValueOnce({
+        address: '127.0.0.1',
+        family: 4,
+      });
+
+      await processWebhookDeliveryJob(makeJob(BASE_JOB_DATA));
+
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(
+        dbUpdateCalls.find((c) => (c.set as Record<string, unknown>).status === 'failed'),
+      ).toBeDefined();
+    });
+
+    it('blocks delivery when hostname resolves to IPv6 loopback (::1)', async () => {
+      dnsLookupMock.mockResolvedValueOnce({
+        address: '::1',
+        family: 6,
+      });
+
+      await processWebhookDeliveryJob(makeJob(BASE_JOB_DATA));
+
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(
+        dbUpdateCalls.find((c) => (c.set as Record<string, unknown>).status === 'failed'),
+      ).toBeDefined();
+    });
+
+    it('blocked delivery is NOT retried (does not throw WebhookDeliveryRetryable)', async () => {
+      dnsLookupMock.mockResolvedValueOnce({
+        address: '169.254.169.254',
+        family: 4,
+      });
+
+      // If the guard threw a retryable error, BullMQ would cycle back and
+      // hit the same blocked target again. It must resolve normally so
+      // the job is marked done.
+      await expect(processWebhookDeliveryJob(makeJob(BASE_JOB_DATA))).resolves.toBeUndefined();
+    });
+
+    it('DNS NXDOMAIN: treated as transient, throws WebhookDeliveryRetryable with attempts left', async () => {
+      dnsLookupMock.mockRejectedValueOnce(
+        Object.assign(new Error('getaddrinfo ENOTFOUND hook.example'), {
+          code: 'ENOTFOUND',
+        }),
+      );
+
+      // attemptsMade=0 → plenty of retries left. Guard rethrows as retryable.
+      await expect(processWebhookDeliveryJob(makeJob(BASE_JOB_DATA, 0, 5))).rejects.toThrow(
+        WebhookDeliveryRetryable,
+      );
+
+      // fetch not called (dns failed first), no status code to record.
+      expect(fetchMock).not.toHaveBeenCalled();
+      // attempts bumped but status NOT marked failed (retryable).
+      const bump = dbUpdateCalls[0];
+      expect(bump).toBeDefined();
+      const set = bump!.set as Record<string, unknown>;
+      expect(set.attempts).toBe(1);
+      expect(set.status).toBeUndefined();
+    });
+
+    it('DNS NXDOMAIN on the last attempt: marks failed, does NOT throw', async () => {
+      dnsLookupMock.mockRejectedValueOnce(
+        Object.assign(new Error('getaddrinfo ENOTFOUND hook.example'), {
+          code: 'ENOTFOUND',
+        }),
+      );
+
+      // attemptsMade=4, attempts=5 → the 5th and final attempt.
+      await expect(
+        processWebhookDeliveryJob(makeJob(BASE_JOB_DATA, 4, 5)),
+      ).resolves.toBeUndefined();
+
+      expect(
+        dbUpdateCalls.find((c) => (c.set as Record<string, unknown>).status === 'failed'),
+      ).toBeDefined();
+    });
+
+    it('happy path: public IP passes through and fetch runs', async () => {
+      // Default mock already returns 93.184.216.34 (public).
+      fetchMock.mockResolvedValueOnce(makeFetchResponse(200));
+
+      await processWebhookDeliveryJob(makeJob(BASE_JOB_DATA));
+
+      expect(dnsLookupMock).toHaveBeenCalledWith('hook.example');
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(
+        dbUpdateCalls.find((c) => (c.set as Record<string, unknown>).status === 'delivered'),
+      ).toBeDefined();
+    });
   });
 });
