@@ -214,6 +214,8 @@ describe('updateDomain', () => {
         ownerAddress: 'rOwner',
         domainId: 'pending-abc',
         acceptedCredentials: [],
+        pendingAcceptedCredentials: null,
+        pendingDeletion: false,
         createdAt: new Date(),
         updatedAt: new Date(),
       },
@@ -225,6 +227,84 @@ describe('updateDomain', () => {
         acceptedCredentials: [{ issuer: 'rI', credential_type: '4B5943' }],
       }),
     ).rejects.toThrow('still pending');
+  });
+
+  // #22 fix: staging behavior.
+
+  it('stages new credentials in pendingAcceptedCredentials instead of mutating committed column', async () => {
+    dbSelectResult.current = [
+      {
+        id: 'dom-1',
+        ownerAddress: 'rOwner',
+        domainId: 'abcdef1234567890',
+        acceptedCredentials: [{ issuer: 'rOld', credential_type: '4F4C44' }],
+        pendingAcceptedCredentials: null,
+        pendingDeletion: false,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      },
+    ];
+
+    await mod.updateDomain({
+      clientId: 'c1',
+      domainDbId: 'dom-1',
+      acceptedCredentials: [{ issuer: 'rNew', credential_type: '4E4557' }],
+    });
+
+    // The UPDATE payload must stage, not commit.
+    expect(dbUpdateCalls).toHaveLength(1);
+    const update = dbUpdateCalls[0] as Record<string, unknown>;
+    expect(update.pendingAcceptedCredentials).toEqual([
+      { issuer: 'rNew', credential_type: '4E4557' },
+    ]);
+    // Must NOT touch the committed column.
+    expect(update.acceptedCredentials).toBeUndefined();
+  });
+
+  it('rejects updateDomain when a prior update is still staged', async () => {
+    dbSelectResult.current = [
+      {
+        id: 'dom-1',
+        ownerAddress: 'rOwner',
+        domainId: 'abcdef1234567890',
+        acceptedCredentials: [{ issuer: 'rOld', credential_type: '4F4C44' }],
+        pendingAcceptedCredentials: [{ issuer: 'rMid', credential_type: '4D4944' }],
+        pendingDeletion: false,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      },
+    ];
+
+    await expect(
+      mod.updateDomain({
+        clientId: 'c1',
+        domainDbId: 'dom-1',
+        acceptedCredentials: [{ issuer: 'rNew', credential_type: '4E4557' }],
+      }),
+    ).rejects.toThrow('pending mutation');
+  });
+
+  it('rejects updateDomain when a delete is already staged', async () => {
+    dbSelectResult.current = [
+      {
+        id: 'dom-1',
+        ownerAddress: 'rOwner',
+        domainId: 'abcdef1234567890',
+        acceptedCredentials: [],
+        pendingAcceptedCredentials: null,
+        pendingDeletion: true,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      },
+    ];
+
+    await expect(
+      mod.updateDomain({
+        clientId: 'c1',
+        domainDbId: 'dom-1',
+        acceptedCredentials: [{ issuer: 'rNew', credential_type: '4E4557' }],
+      }),
+    ).rejects.toThrow('pending mutation');
   });
 });
 
@@ -243,12 +323,78 @@ describe('deleteDomain', () => {
         ownerAddress: 'rOwner',
         domainId: 'pending-xyz',
         acceptedCredentials: [],
+        pendingAcceptedCredentials: null,
+        pendingDeletion: false,
         createdAt: new Date(),
         updatedAt: new Date(),
       },
     ];
     await expect(mod.deleteDomain({ clientId: 'c1', domainDbId: 'dom-1' })).rejects.toThrow(
       'cannot delete',
+    );
+  });
+
+  // #22 fix: staging behavior.
+
+  it('stages deletion in pendingDeletion instead of stamping deletedAt', async () => {
+    dbSelectResult.current = [
+      {
+        id: 'dom-1',
+        ownerAddress: 'rOwner',
+        domainId: 'abcdef1234567890',
+        acceptedCredentials: [{ issuer: 'rIss', credential_type: '4B5943' }],
+        pendingAcceptedCredentials: null,
+        pendingDeletion: false,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      },
+    ];
+
+    await mod.deleteDomain({ clientId: 'c1', domainDbId: 'dom-1' });
+
+    expect(dbUpdateCalls).toHaveLength(1);
+    const update = dbUpdateCalls[0] as Record<string, unknown>;
+    expect(update.pendingDeletion).toBe(true);
+    // Must NOT stamp deletedAt eagerly — that happens only after on-chain
+    // confirmation in txConfirmer.applyDomainMutationOutcome.
+    expect(update.deletedAt).toBeUndefined();
+  });
+
+  it('rejects deleteDomain when a prior update is still staged', async () => {
+    dbSelectResult.current = [
+      {
+        id: 'dom-1',
+        ownerAddress: 'rOwner',
+        domainId: 'abcdef1234567890',
+        acceptedCredentials: [],
+        pendingAcceptedCredentials: [{ issuer: 'rMid', credential_type: '4D4944' }],
+        pendingDeletion: false,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      },
+    ];
+
+    await expect(mod.deleteDomain({ clientId: 'c1', domainDbId: 'dom-1' })).rejects.toThrow(
+      'pending mutation',
+    );
+  });
+
+  it('rejects deleteDomain when a prior delete is already staged', async () => {
+    dbSelectResult.current = [
+      {
+        id: 'dom-1',
+        ownerAddress: 'rOwner',
+        domainId: 'abcdef1234567890',
+        acceptedCredentials: [],
+        pendingAcceptedCredentials: null,
+        pendingDeletion: true,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      },
+    ];
+
+    await expect(mod.deleteDomain({ clientId: 'c1', domainDbId: 'dom-1' })).rejects.toThrow(
+      'pending mutation',
     );
   });
 });

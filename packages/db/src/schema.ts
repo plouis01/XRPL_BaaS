@@ -204,6 +204,15 @@ export const domains = pgTable('domains', {
   domainId: text('domain_id').notNull().unique(),
   // [{issuer, credential_type}] — up to 10 per domain (protocol limit)
   acceptedCredentials: jsonb('accepted_credentials').notNull(),
+  // Sprint 7 (#22): staging slots for in-flight mutations. updateDomain
+  // writes the proposed new list to pendingAcceptedCredentials instead of
+  // mutating acceptedCredentials; deleteDomain sets pendingDeletion=true
+  // instead of stamping deletedAt. The txConfirmer commits on validation
+  // or clears the staging field on failure so the DB never diverges from
+  // the on-chain state. A row with any pending flag rejects further
+  // update/delete requests (one mutation in flight at a time).
+  pendingAcceptedCredentials: jsonb('pending_accepted_credentials'),
+  pendingDeletion: boolean('pending_deletion').notNull().default(false),
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow(),
   deletedAt: timestamp('deleted_at', { withTimezone: true }),

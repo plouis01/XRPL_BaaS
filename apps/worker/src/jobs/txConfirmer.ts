@@ -101,6 +101,13 @@ export async function processTxConfirmJob(job: Job<TxConfirmJobData>): Promise<v
       } catch (err) {
         log.error({ err }, 'credential accept outcome failed (non-fatal)');
       }
+      // Partner to the #22 domain-mutation fix: drop any staged domain
+      // change on expiry so the DB reflects the unchanged on-chain state.
+      try {
+        await applyDomainMutationOutcome(txId, false, log);
+      } catch (err) {
+        log.error({ err }, 'domain mutation outcome failed (non-fatal)');
+      }
       return; // done — do NOT throw, or BullMQ will retry a dead job
     }
 
@@ -215,6 +222,15 @@ export async function processTxConfirmJob(job: Job<TxConfirmJobData>): Promise<v
     await applyCredentialAcceptOutcome(txId, isSuccess, log);
   } catch (err) {
     log.error({ err }, 'credential accept outcome failed (non-fatal)');
+  }
+
+  // Partner to the #22 optimistic-domain-update fix: commit or drop the
+  // staged domain mutation based on the on-chain outcome. Same
+  // best-effort isolation as the helpers above.
+  try {
+    await applyDomainMutationOutcome(txId, isSuccess, log);
+  } catch (err) {
+    log.error({ err }, 'domain mutation outcome failed (non-fatal)');
   }
 
   // 6. Backfill tokens.mpt_issuance_id from tx metadata.
@@ -478,6 +494,103 @@ export async function applyCredentialAcceptOutcome(
     { credentialId, newStatus: isSuccess ? 'accepted' : 'pending' },
     'credential accept outcome applied',
   );
+}
+
+/**
+ * Partner to the #22 optimistic-domain-update fix. updateDomain stages
+ * a new accepted_credentials list into `pending_accepted_credentials`,
+ * and deleteDomain sets `pending_deletion=true` — neither touches the
+ * committed column. This helper finalizes the mutation once rippled
+ * validates (or expires) the tx:
+ *
+ *   success + op='updateDomain' → move staging into acceptedCredentials,
+ *                                 clear staging, bump updatedAt
+ *   success + op='deleteDomain' → stamp deletedAt, clear pendingDeletion
+ *   failure  + op='updateDomain' → clear pendingAcceptedCredentials
+ *   failure  + op='deleteDomain' → clear pendingDeletion
+ *
+ * The staged change is dropped on failure so the DB row matches the
+ * unchanged on-ledger state. Exported for direct unit testing.
+ *
+ * Same failure-isolation contract as the other best-effort helpers —
+ * callers wrap in try/catch and continue on error.
+ */
+export async function applyDomainMutationOutcome(
+  txId: string,
+  isSuccess: boolean,
+  log: Logger,
+): Promise<void> {
+  const rows = await db
+    .select({
+      txType: schema.transactions.txType,
+      requestBody: schema.transactions.requestBody,
+    })
+    .from(schema.transactions)
+    .where(eq(schema.transactions.id, txId))
+    .limit(1);
+
+  const row = rows[0];
+  if (!row) return;
+  if (row.txType !== 'PermissionedDomainSet' && row.txType !== 'PermissionedDomainDelete') {
+    return;
+  }
+
+  const body = row.requestBody as {
+    op?: unknown;
+    domainDbId?: unknown;
+  } | null;
+  const op = typeof body?.op === 'string' ? body.op : null;
+  const domainDbId = typeof body?.domainDbId === 'string' ? body.domainDbId : null;
+  // createDomain does not stage anything (it inserts committed state up
+  // front), so it needs no rollback handling. Only update/delete.
+  if (!domainDbId || (op !== 'updateDomain' && op !== 'deleteDomain')) return;
+
+  if (op === 'updateDomain') {
+    if (isSuccess) {
+      // Commit the staged credentials: pull them from the row atomically
+      // via a single UPDATE that copies the jsonb column into its
+      // committed sibling, then nulls the staging slot.
+      await db
+        .update(schema.domains)
+        .set({
+          acceptedCredentials: sql`${schema.domains.pendingAcceptedCredentials}`,
+          pendingAcceptedCredentials: null,
+          updatedAt: new Date(),
+        })
+        .where(
+          and(
+            eq(schema.domains.id, domainDbId),
+            sql`${schema.domains.pendingAcceptedCredentials} IS NOT NULL`,
+          ),
+        );
+      log.info({ domainDbId }, 'domain update committed from staging');
+    } else {
+      await db
+        .update(schema.domains)
+        .set({ pendingAcceptedCredentials: null })
+        .where(eq(schema.domains.id, domainDbId));
+      log.info({ domainDbId }, 'domain update staging cleared (failure)');
+    }
+    return;
+  }
+
+  // op === 'deleteDomain'
+  if (isSuccess) {
+    await db
+      .update(schema.domains)
+      .set({
+        deletedAt: new Date(),
+        pendingDeletion: false,
+      })
+      .where(eq(schema.domains.id, domainDbId));
+    log.info({ domainDbId }, 'domain deletion committed from staging');
+  } else {
+    await db
+      .update(schema.domains)
+      .set({ pendingDeletion: false })
+      .where(eq(schema.domains.id, domainDbId));
+    log.info({ domainDbId }, 'domain deletion staging cleared (failure)');
+  }
 }
 
 // Re-exported so tests can `expect.toThrow(TxNotYetValidated)`.

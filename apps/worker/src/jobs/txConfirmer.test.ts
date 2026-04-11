@@ -125,6 +125,15 @@ vi.mock('@railforge/db', () => {
         id: 'id',
         status: 'status',
       },
+      domains: {
+        __name: 'domains',
+        id: 'id',
+        acceptedCredentials: 'acceptedCredentials',
+        pendingAcceptedCredentials: 'pendingAcceptedCredentials',
+        pendingDeletion: 'pendingDeletion',
+        deletedAt: 'deletedAt',
+        updatedAt: 'updatedAt',
+      },
     },
     eq: vi.fn((col: unknown, val: unknown) => ({ col, val })),
     and: vi.fn((...args: unknown[]) => ({ and: args })),
@@ -154,6 +163,7 @@ vi.mock('../queues.ts', () => ({
 
 const {
   applyCredentialAcceptOutcome,
+  applyDomainMutationOutcome,
   extractMptIssuanceIdFromMeta,
   processTxConfirmJob,
   TxNotYetValidated,
@@ -768,5 +778,215 @@ describe('processTxConfirmJob: CredentialAccept integration', () => {
     const credUpdate = dbUpdateCalls.find((u) => u.table === 'credentials');
     expect(credUpdate).toBeDefined();
     expect((credUpdate!.set as Record<string, unknown>).status).toBe('pending');
+  });
+});
+
+// ── Sprint 7 #22: optimistic-domain-mutation rollback ────────────────────────
+//
+// updateDomain/deleteDomain stage mutations in pending_* columns instead of
+// touching the committed state. applyDomainMutationOutcome commits the
+// staging on tesSUCCESS and drops it on any failure/expiry so the DB row
+// never diverges from the ledger.
+
+describe('applyDomainMutationOutcome (unit)', () => {
+  beforeEach(() => {
+    dbUpdateCalls.length = 0;
+    dbSelectResult.current = [];
+  });
+
+  afterEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('non-domain tx type: no domains UPDATE', async () => {
+    dbSelectResult.current = [{ txType: 'Payment', requestBody: { foo: 'bar' } }];
+    await applyDomainMutationOutcome('tx-uuid-1', true, silentLog);
+    expect(dbUpdateCalls.filter((u) => u.table === 'domains')).toHaveLength(0);
+  });
+
+  it('missing tx row: no domains UPDATE', async () => {
+    dbSelectResult.current = [];
+    await applyDomainMutationOutcome('tx-uuid-1', true, silentLog);
+    expect(dbUpdateCalls.filter((u) => u.table === 'domains')).toHaveLength(0);
+  });
+
+  it('createDomain op: no domains UPDATE (create path is not staged)', async () => {
+    dbSelectResult.current = [
+      {
+        txType: 'PermissionedDomainSet',
+        requestBody: { op: 'createDomain', domainDbId: 'dom-1' },
+      },
+    ];
+    await applyDomainMutationOutcome('tx-uuid-1', true, silentLog);
+    expect(dbUpdateCalls.filter((u) => u.table === 'domains')).toHaveLength(0);
+  });
+
+  it('missing domainDbId in requestBody: no domains UPDATE', async () => {
+    dbSelectResult.current = [
+      {
+        txType: 'PermissionedDomainSet',
+        requestBody: { op: 'updateDomain' /* domainDbId missing */ },
+      },
+    ];
+    await applyDomainMutationOutcome('tx-uuid-1', true, silentLog);
+    expect(dbUpdateCalls.filter((u) => u.table === 'domains')).toHaveLength(0);
+  });
+
+  it('updateDomain success: commits pendingAcceptedCredentials → acceptedCredentials and clears staging', async () => {
+    dbSelectResult.current = [
+      {
+        txType: 'PermissionedDomainSet',
+        requestBody: { op: 'updateDomain', domainDbId: 'dom-1' },
+      },
+    ];
+    await applyDomainMutationOutcome('tx-uuid-1', true, silentLog);
+
+    const update = dbUpdateCalls.find((u) => u.table === 'domains');
+    expect(update).toBeDefined();
+    const set = update!.set as Record<string, unknown>;
+    // Staging is cleared.
+    expect(set.pendingAcceptedCredentials).toBeNull();
+    // acceptedCredentials is set to an expression (sql-marker in the mock);
+    // what matters is that the field is written in the same UPDATE.
+    expect('acceptedCredentials' in set).toBe(true);
+    expect(set.updatedAt).toBeInstanceOf(Date);
+  });
+
+  it('updateDomain failure: drops staging (acceptedCredentials untouched)', async () => {
+    dbSelectResult.current = [
+      {
+        txType: 'PermissionedDomainSet',
+        requestBody: { op: 'updateDomain', domainDbId: 'dom-1' },
+      },
+    ];
+    await applyDomainMutationOutcome('tx-uuid-1', false, silentLog);
+
+    const update = dbUpdateCalls.find((u) => u.table === 'domains');
+    expect(update).toBeDefined();
+    const set = update!.set as Record<string, unknown>;
+    expect(set.pendingAcceptedCredentials).toBeNull();
+    // Failure path must NOT touch committed state.
+    expect('acceptedCredentials' in set).toBe(false);
+    expect('updatedAt' in set).toBe(false);
+  });
+
+  it('deleteDomain success: stamps deletedAt and clears pendingDeletion', async () => {
+    dbSelectResult.current = [
+      {
+        txType: 'PermissionedDomainDelete',
+        requestBody: { op: 'deleteDomain', domainDbId: 'dom-1' },
+      },
+    ];
+    await applyDomainMutationOutcome('tx-uuid-1', true, silentLog);
+
+    const update = dbUpdateCalls.find((u) => u.table === 'domains');
+    expect(update).toBeDefined();
+    const set = update!.set as Record<string, unknown>;
+    expect(set.deletedAt).toBeInstanceOf(Date);
+    expect(set.pendingDeletion).toBe(false);
+  });
+
+  it('deleteDomain failure: clears pendingDeletion but does NOT stamp deletedAt', async () => {
+    dbSelectResult.current = [
+      {
+        txType: 'PermissionedDomainDelete',
+        requestBody: { op: 'deleteDomain', domainDbId: 'dom-1' },
+      },
+    ];
+    await applyDomainMutationOutcome('tx-uuid-1', false, silentLog);
+
+    const update = dbUpdateCalls.find((u) => u.table === 'domains');
+    expect(update).toBeDefined();
+    const set = update!.set as Record<string, unknown>;
+    expect(set.pendingDeletion).toBe(false);
+    expect('deletedAt' in set).toBe(false);
+  });
+});
+
+describe('processTxConfirmJob: domain mutation integration', () => {
+  beforeEach(() => {
+    dbUpdateCalls.length = 0;
+    accountUpdateReturning.current = [];
+    credentialUpdateReturning.current = [];
+    subscribersResult.current = [];
+    deliveryInsertResult.current = [];
+    dbInsertCalls.length = 0;
+    enqueueWebhookDeliveryMock.mockClear();
+  });
+
+  afterEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('validated updateDomain: commits the stage via the domains UPDATE', async () => {
+    stubs.clientRequest.mockResolvedValueOnce({
+      result: {
+        validated: true,
+        ledger_index: 115,
+        meta: { TransactionResult: 'tesSUCCESS' },
+      },
+    });
+    dbSelectResult.current = [
+      {
+        txType: 'PermissionedDomainSet',
+        requestBody: { op: 'updateDomain', domainDbId: 'dom-1' },
+      },
+    ];
+
+    await processTxConfirmJob(makeJob(BASE_JOB));
+
+    const domainUpdate = dbUpdateCalls.find((u) => u.table === 'domains');
+    expect(domainUpdate).toBeDefined();
+    const set = domainUpdate!.set as Record<string, unknown>;
+    expect(set.pendingAcceptedCredentials).toBeNull();
+    expect(set.updatedAt).toBeInstanceOf(Date);
+  });
+
+  it('validated tec error updateDomain: drops the stage (no commit)', async () => {
+    stubs.clientRequest.mockResolvedValueOnce({
+      result: {
+        validated: true,
+        ledger_index: 115,
+        meta: { TransactionResult: 'tecNO_PERMISSION' },
+      },
+    });
+    dbSelectResult.current = [
+      {
+        txType: 'PermissionedDomainSet',
+        requestBody: { op: 'updateDomain', domainDbId: 'dom-1' },
+      },
+    ];
+
+    await processTxConfirmJob(makeJob(BASE_JOB));
+
+    const domainUpdate = dbUpdateCalls.find((u) => u.table === 'domains');
+    expect(domainUpdate).toBeDefined();
+    const set = domainUpdate!.set as Record<string, unknown>;
+    expect(set.pendingAcceptedCredentials).toBeNull();
+    expect('acceptedCredentials' in set).toBe(false);
+  });
+
+  it('expired deleteDomain: drops pendingDeletion (no deletedAt)', async () => {
+    stubs.clientRequest
+      .mockRejectedValueOnce(new Error('txnNotFound'))
+      .mockResolvedValueOnce({ result: { ledger_current_index: 125 } });
+
+    // Shared row: sourceAddress for the expired-branch SELECT + domain
+    // fields for the helper's SELECT.
+    dbSelectResult.current = [
+      {
+        sourceAddress: 'rSource00000000000000000000000000',
+        txType: 'PermissionedDomainDelete',
+        requestBody: { op: 'deleteDomain', domainDbId: 'dom-1' },
+      },
+    ];
+
+    await processTxConfirmJob(makeJob(BASE_JOB));
+
+    const domainUpdate = dbUpdateCalls.find((u) => u.table === 'domains');
+    expect(domainUpdate).toBeDefined();
+    const set = domainUpdate!.set as Record<string, unknown>;
+    expect(set.pendingDeletion).toBe(false);
+    expect('deletedAt' in set).toBe(false);
   });
 });
