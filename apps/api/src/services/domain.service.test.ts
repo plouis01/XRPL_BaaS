@@ -31,12 +31,17 @@ vi.mock('@railforge/db', () => {
       const pick = () => dbSelectResults[tableName] ?? dbSelectResult.current;
       return {
         where: vi.fn(() => {
-          // Awaitable thenable that also exposes .limit() for the
-          // queries that chain it.
-          const result = Promise.resolve(pick());
-          const r = result as unknown as Record<string, unknown>;
-          r.limit = vi.fn(async () => pick());
-          return result;
+          // Fluent chain that supports both simple `.limit()` and
+          // the full `.groupBy().orderBy().limit().offset()` used
+          // by listMembers after the SQL-push refactor.
+          const data = pick();
+          const awaitable = Object.assign(Promise.resolve(data), {
+            limit: vi.fn(() => awaitable),
+            offset: vi.fn(async () => data),
+            groupBy: vi.fn(() => awaitable),
+            orderBy: vi.fn(() => awaitable),
+          });
+          return awaitable;
         }),
       };
     }),
@@ -68,6 +73,8 @@ vi.mock('@railforge/db', () => {
     or: vi.fn((...args: unknown[]) => ({ or: args })),
     gt: vi.fn((col: unknown, val: unknown) => ({ gt: [col, val] })),
     isNull: vi.fn((col: unknown) => ({ isNull: col })),
+    asc: vi.fn((col: unknown) => ({ asc: col })),
+    sql: vi.fn((...args: unknown[]) => args),
   };
 });
 
@@ -426,12 +433,11 @@ describe('listMembers', () => {
     expect(result.has_more).toBe(false);
   });
 
-  it('groups matching credentials by subject address', async () => {
+  it('returns pre-grouped credentials from SQL', async () => {
     seedDomain([{ issuer: 'rIss', credential_type: '4B5943' }]);
-    // Two credentials for the same subject → one member with two ids.
+    // SQL returns already-grouped rows via array_agg.
     dbSelectResults.credentials = [
-      { id: 'cred-1', subjectAddress: 'rAlice' },
-      { id: 'cred-2', subjectAddress: 'rAlice' },
+      { subjectAddress: 'rAlice', credentialIds: ['cred-1', 'cred-2'] },
     ];
     const result = await mod.listMembers('c1', 'dom-1');
     expect(result.members).toHaveLength(1);
@@ -440,52 +446,54 @@ describe('listMembers', () => {
     expect(result.has_more).toBe(false);
   });
 
-  it('returns members sorted by subject_address for stable pagination', async () => {
+  it('returns members in SQL-sorted order', async () => {
     seedDomain([{ issuer: 'rIss', credential_type: '4B5943' }]);
-    // Intentionally out of order
+    // SQL ORDER BY subject_address ASC returns sorted rows.
     dbSelectResults.credentials = [
-      { id: 'cred-charlie', subjectAddress: 'rCharlie' },
-      { id: 'cred-alice', subjectAddress: 'rAlice' },
-      { id: 'cred-bob', subjectAddress: 'rBob' },
+      { subjectAddress: 'rAlice', credentialIds: ['cred-alice'] },
+      { subjectAddress: 'rBob', credentialIds: ['cred-bob'] },
+      { subjectAddress: 'rCharlie', credentialIds: ['cred-charlie'] },
     ];
     const result = await mod.listMembers('c1', 'dom-1');
     expect(result.members.map((m) => m.subject_address)).toEqual(['rAlice', 'rBob', 'rCharlie']);
   });
 
-  it('applies limit and offset for pagination', async () => {
+  it('detects has_more via the limit+1 row trick', async () => {
     seedDomain([{ issuer: 'rIss', credential_type: '4B5943' }]);
+    // SQL returns limit+1 rows when there are more results.
+    // With limit=2, the query fetches 3 rows.
     dbSelectResults.credentials = [
-      { id: 'c1', subjectAddress: 'rA' },
-      { id: 'c2', subjectAddress: 'rB' },
-      { id: 'c3', subjectAddress: 'rC' },
-      { id: 'c4', subjectAddress: 'rD' },
-      { id: 'c5', subjectAddress: 'rE' },
+      { subjectAddress: 'rA', credentialIds: ['c1'] },
+      { subjectAddress: 'rB', credentialIds: ['c2'] },
+      { subjectAddress: 'rC', credentialIds: ['c3'] },
     ];
+    const result = await mod.listMembers('c1', 'dom-1', {
+      limit: 2,
+      offset: 0,
+    });
+    expect(result.members).toHaveLength(2);
+    expect(result.members.map((m) => m.subject_address)).toEqual(['rA', 'rB']);
+    expect(result.has_more).toBe(true);
+  });
 
-    // First page: limit=2, offset=0
-    const page1 = await mod.listMembers('c1', 'dom-1', { limit: 2, offset: 0 });
-    expect(page1.members).toHaveLength(2);
-    expect(page1.members.map((m) => m.subject_address)).toEqual(['rA', 'rB']);
-    expect(page1.has_more).toBe(true);
-
-    // Second page: limit=2, offset=2
-    const page2 = await mod.listMembers('c1', 'dom-1', { limit: 2, offset: 2 });
-    expect(page2.members.map((m) => m.subject_address)).toEqual(['rC', 'rD']);
-    expect(page2.has_more).toBe(true);
-
-    // Last page: limit=2, offset=4 — only one left, has_more=false
-    const page3 = await mod.listMembers('c1', 'dom-1', { limit: 2, offset: 4 });
-    expect(page3.members.map((m) => m.subject_address)).toEqual(['rE']);
-    expect(page3.has_more).toBe(false);
+  it('sets has_more=false when SQL returns <= limit rows', async () => {
+    seedDomain([{ issuer: 'rIss', credential_type: '4B5943' }]);
+    dbSelectResults.credentials = [{ subjectAddress: 'rA', credentialIds: ['c1'] }];
+    const result = await mod.listMembers('c1', 'dom-1', {
+      limit: 2,
+      offset: 0,
+    });
+    expect(result.members).toHaveLength(1);
+    expect(result.has_more).toBe(false);
   });
 
   it('clamps the limit to the 1..1000 bound', async () => {
     seedDomain([{ issuer: 'rIss', credential_type: '4B5943' }]);
     dbSelectResults.credentials = [
-      { id: 'c1', subjectAddress: 'rA' },
-      { id: 'c2', subjectAddress: 'rB' },
+      { subjectAddress: 'rA', credentialIds: ['c1'] },
+      { subjectAddress: 'rB', credentialIds: ['c2'] },
     ];
-    // limit=0 clamps up to 1
+    // limit=0 clamps up to 1 → service fetches limit+1=2 rows, returns 1.
     const tiny = await mod.listMembers('c1', 'dom-1', { limit: 0 });
     expect(tiny.members).toHaveLength(1);
     expect(tiny.has_more).toBe(true);

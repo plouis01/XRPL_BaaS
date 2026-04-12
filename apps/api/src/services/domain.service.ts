@@ -10,7 +10,7 @@
 //   checkMembership — does the subject hold a qualifying credential?
 //   listMembers — all subjects with qualifying credentials
 
-import { and, db, eq, gt, isNull, or, schema } from '@railforge/db';
+import { and, asc, db, eq, gt, isNull, or, schema, sql } from '@railforge/db';
 import { enqueueTxSubmit } from '@railforge/jobs';
 import { buildPermissionedDomainDelete, buildPermissionedDomainSet } from '@railforge/xrpl-core';
 import { logger } from '../logger.ts';
@@ -518,30 +518,27 @@ export async function listMembers(
     or(...matchers),
   );
 
-  const creds = await db
+  // Push grouping, sorting, and pagination to SQL. Fetch limit+1 rows
+  // to determine has_more without a separate COUNT query.
+  const rows = await db
     .select({
-      id: schema.credentials.id,
       subjectAddress: schema.credentials.subjectAddress,
+      credentialIds: sql<string>`array_agg(${schema.credentials.id} ORDER BY ${schema.credentials.id})`,
     })
     .from(schema.credentials)
-    .where(whereClause);
+    .where(whereClause)
+    .groupBy(schema.credentials.subjectAddress)
+    .orderBy(asc(schema.credentials.subjectAddress))
+    .limit(limit + 1)
+    .offset(offset);
 
-  const memberMap = new Map<string, string[]>();
-  for (const cred of creds) {
-    const existing = memberMap.get(cred.subjectAddress) ?? [];
-    existing.push(cred.id);
-    memberMap.set(cred.subjectAddress, existing);
-  }
-
-  // Sort by subject_address for stable pagination ordering.
-  const sortedEntries = Array.from(memberMap.entries()).sort(([a], [b]) => a.localeCompare(b));
-  const page = sortedEntries.slice(offset, offset + limit);
-  const hasMore = sortedEntries.length > offset + limit;
+  const hasMore = rows.length > limit;
+  const page = hasMore ? rows.slice(0, limit) : rows;
 
   return {
-    members: page.map(([subject_address, credential_ids]) => ({
-      subject_address,
-      credential_ids,
+    members: page.map((r) => ({
+      subject_address: r.subjectAddress,
+      credential_ids: (r.credentialIds as unknown as string[]) ?? [],
     })),
     has_more: hasMore,
   };
