@@ -35,7 +35,8 @@ vi.mock('@railforge/db', () => {
           // the full `.groupBy().orderBy().limit().offset()` used
           // by listMembers after the SQL-push refactor.
           const data = pick();
-          const awaitable = Object.assign(Promise.resolve(data), {
+          // biome-ignore lint/suspicious/noExplicitAny: self-referencing fluent mock
+          const awaitable: any = Object.assign(Promise.resolve(data), {
             limit: vi.fn(() => awaitable),
             offset: vi.fn(async () => data),
             groupBy: vi.fn(() => awaitable),
