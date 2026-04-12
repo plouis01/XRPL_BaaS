@@ -1,6 +1,6 @@
 import { Queue } from 'bullmq';
 import { Redis } from 'ioredis';
-import { startCredentialExpiryWorker } from './jobs/credentialExpiry.ts';
+import { CREDENTIAL_EXPIRY_QUEUE, startCredentialExpiryWorker } from './jobs/credentialExpiry.ts';
 import { ORPHAN_RECONCILER_QUEUE, startOrphanReconcilerWorker } from './jobs/orphanReconciler.ts';
 import { startTxConfirmWorker } from './jobs/txConfirmer.ts';
 import { startTxSubmitWorker } from './jobs/txSubmitter.ts';
@@ -99,6 +99,28 @@ await orphanReconcilerScheduleQueue.add(
   },
 );
 
+// Credential expiry repeat schedule.
+//
+// The sweep runs every 6 hours (per credentialExpiry.ts header), checks
+// for credentials expiring within the next 7 days, and fires
+// 'credential.expiring' webhook alerts. The worker already existed but
+// no repeat registration was ever added — jobs never got pushed.
+const credentialExpiryScheduleQueue = new Queue(CREDENTIAL_EXPIRY_QUEUE, {
+  connection: workerRedis,
+  defaultJobOptions: {
+    removeOnComplete: { count: 100 },
+    removeOnFail: { count: 100 },
+  },
+});
+await credentialExpiryScheduleQueue.add(
+  'sweep',
+  {},
+  {
+    repeat: { every: 6 * 60 * 60 * 1000 },
+    jobId: 'credential-expiry-sweep',
+  },
+);
+
 logger.info(
   {
     queues: [
@@ -124,6 +146,7 @@ async function shutdown(signal: string): Promise<void> {
     credentialExpiryWorker.close(),
     orphanReconcilerWorker.close(),
     orphanReconcilerScheduleQueue.close(),
+    credentialExpiryScheduleQueue.close(),
   ]);
   await disconnectWorker();
   await workerRedis.quit();

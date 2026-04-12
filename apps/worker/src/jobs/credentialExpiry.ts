@@ -150,9 +150,11 @@ export async function processCredentialExpirySweep(
 /**
  * Wire the credential expiry worker into BullMQ.
  */
+export const CREDENTIAL_EXPIRY_QUEUE = 'railforge-credential-expiry';
+
 export function startCredentialExpiryWorker(redis: Redis): Worker<CredentialExpiryJobData> {
   return new Worker<CredentialExpiryJobData>(
-    'railforge-credential-expiry',
+    CREDENTIAL_EXPIRY_QUEUE,
     async (job) => {
       await processCredentialExpirySweep(job.data.horizonDays);
     },
