@@ -18,6 +18,7 @@ import {
   buildOfferCreate,
 } from '@railforge/xrpl-core';
 import { logger } from '../logger.ts';
+import { enforceSpendPolicy } from './spendPolicy.service.ts';
 
 export class DexServiceError extends Error {
   constructor(
@@ -119,6 +120,13 @@ export async function createOffer(
     domainId: input.domainId,
   });
 
+  // Spend policy: takerGets is what the maker sells. If selling XRP,
+  // enforce the client's spend limit on that amount.
+  const xrpDropsOut = 'drops' in input.takerGets ? input.takerGets.drops : null;
+  if (xrpDropsOut) {
+    await enforceSpendPolicy(input.clientId, xrpDropsOut);
+  }
+
   const txInserted = await db
     .insert(schema.transactions)
     .values({
@@ -126,6 +134,7 @@ export async function createOffer(
       txType: 'OfferCreate',
       sourceAddress: input.account,
       status: 'queued',
+      amountDrops: xrpDropsOut ?? null,
       idempotencyKey: input.idempotencyKey,
       requestBody: { op: 'createOffer', account: input.account },
     })

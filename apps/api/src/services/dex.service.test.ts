@@ -42,6 +42,10 @@ vi.mock('@railforge/jobs', () => ({
   enqueueTxSubmit: vi.fn(async () => {}),
 }));
 
+vi.mock('./spendPolicy.service.ts', () => ({
+  enforceSpendPolicy: vi.fn(async () => {}),
+}));
+
 vi.mock('../logger.ts', () => ({
   logger: {
     child: () => ({ info: vi.fn(), error: vi.fn(), warn: vi.fn() }),
