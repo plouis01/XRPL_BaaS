@@ -240,6 +240,12 @@ export const transactions = pgTable(
     requestBody: jsonb('request_body').notNull(),
     responseBody: jsonb('response_body'),
     errorMessage: text('error_message'),
+    // Sprint 7 (#15): XRP amount in drops for this transaction, if
+    // applicable. Used by the spend-policy daily-limit aggregation
+    // (`SUM(amount_drops::bigint) WHERE created_at > now() - 24h`).
+    // NULL for non-XRP or zero-value transactions (credentials,
+    // domains, permissions, key rotations, etc.).
+    amountDrops: text('amount_drops'),
     createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
     submittedAt: timestamp('submitted_at', { withTimezone: true }),
     confirmedAt: timestamp('confirmed_at', { withTimezone: true }),
@@ -282,6 +288,27 @@ export const auditLog = pgTable(
     apiKeyIdx: index('idx_audit_log_api_key').on(t.apiKeyId, t.createdAt),
   }),
 );
+
+// ── Spend policies (Sprint 7 #15) ───────────────────────────────────────────
+// Per-client transaction amount limits. NULL on a limit column means
+// "no limit" (unlimited). Clients without a row are also unlimited —
+// policies are opt-in, applied by ops or programmatically at tier upgrade.
+//
+// Limits are XRP-only (in drops) for Sprint 7. Token amount limits
+// require an oracle/price-feed, deferred to a later sprint.
+
+export const spendPolicies = pgTable('spend_policies', {
+  id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+  clientId: uuid('client_id')
+    .notNull()
+    .references(() => clients.id)
+    .unique(),
+  maxXrpPerTxDrops: text('max_xrp_per_tx_drops'),
+  dailyXrpLimitDrops: text('daily_xrp_limit_drops'),
+  isActive: boolean('is_active').notNull().default(true),
+  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow(),
+});
 
 // ── Webhook deliveries ───────────────────────────────────────────────────────
 
