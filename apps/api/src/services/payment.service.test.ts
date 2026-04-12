@@ -74,6 +74,10 @@ vi.mock('@railforge/jobs', () => ({
   }),
 }));
 
+vi.mock('./spendPolicy.service.ts', () => ({
+  enforceSpendPolicy: vi.fn(async () => {}),
+}));
+
 // Import after mocks.
 const { PaymentServiceError, cancelEscrow, createEscrow, finishEscrow, getPayment, sendPayment } =
   await import('./payment.service.ts');

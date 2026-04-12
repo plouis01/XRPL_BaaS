@@ -40,6 +40,7 @@ import {
 } from '@railforge/xrpl-core';
 import { Wallet } from 'xrpl';
 import { logger } from '../logger.ts';
+import { enforceSpendPolicy } from './spendPolicy.service.ts';
 
 // Amount sent from the treasury to each new account. 20 XRP covers the
 // 10 XRP base reserve with 10 XRP headroom for object reserves (trust
@@ -136,6 +137,11 @@ export async function createAccount(input: CreateAccountInput): Promise<AccountV
     amountDrops: FUNDING_AMOUNT_DROPS,
   });
 
+  // 3b. Spend policy check — account funding is an XRP payment from the
+  // treasury on behalf of this client. The spend policy limits apply to
+  // the client's cumulative XRP spend, not the treasury's.
+  await enforceSpendPolicy(input.clientId, FUNDING_AMOUNT_DROPS);
+
   // 4. Persist account + transactions row in a single DB transaction.
   //
   // Order matters: we insert the tx row first to get its id, then insert
@@ -161,6 +167,7 @@ export async function createAccount(input: CreateAccountInput): Promise<AccountV
           txType: 'Payment',
           sourceAddress: treasuryAddress,
           status: 'queued',
+          amountDrops: FUNDING_AMOUNT_DROPS,
           // request_body is jsonb NOT NULL. Stash enough context for a
           // debugging operator to understand why this tx exists without
           // having to join other tables.

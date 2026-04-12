@@ -89,6 +89,10 @@ vi.mock('@railforge/jobs', () => ({
   }),
 }));
 
+vi.mock('./spendPolicy.service.ts', () => ({
+  enforceSpendPolicy: vi.fn(async () => {}),
+}));
+
 // Import AFTER mocks.
 const {
   AccountServiceError,

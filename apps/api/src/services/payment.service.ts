@@ -28,6 +28,7 @@ import {
   buildXrpPayment,
 } from '@railforge/xrpl-core';
 import { logger } from '../logger.ts';
+import { enforceSpendPolicy } from './spendPolicy.service.ts';
 
 export class PaymentServiceError extends Error {
   constructor(
@@ -152,6 +153,10 @@ export async function sendPayment(input: SendPaymentInput): Promise<{ txId: stri
     );
   }
 
+  if (input.amountDrops) {
+    await enforceSpendPolicy(input.clientId, input.amountDrops);
+  }
+
   const txInserted = await db
     .insert(schema.transactions)
     .values({
@@ -159,6 +164,7 @@ export async function sendPayment(input: SendPaymentInput): Promise<{ txId: stri
       txType,
       sourceAddress: source.address,
       status: 'queued',
+      amountDrops: input.amountDrops ?? null,
       requestBody: {
         op: 'sendPayment',
         source: input.source,
@@ -262,6 +268,8 @@ export async function createEscrow(input: CreateEscrowInput): Promise<{ txId: st
     );
   }
 
+  await enforceSpendPolicy(input.clientId, input.amountDrops);
+
   const txInserted = await db
     .insert(schema.transactions)
     .values({
@@ -269,6 +277,7 @@ export async function createEscrow(input: CreateEscrowInput): Promise<{ txId: st
       txType: 'EscrowCreate',
       sourceAddress: source.address,
       status: 'queued',
+      amountDrops: input.amountDrops,
       requestBody: {
         op: 'createEscrow',
         source: input.source,
