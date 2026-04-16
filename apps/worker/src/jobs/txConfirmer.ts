@@ -116,6 +116,14 @@ export async function processTxConfirmJob(job: Job<TxConfirmJobData>): Promise<v
       } catch (err) {
         log.error({ err }, 'delegation revocation outcome failed (non-fatal)');
       }
+      // REVIEW.md C-3 partner: if this expired tx was a CredentialDelete,
+      // revert the credential row from 'revoking' back to its prior
+      // status so the caller can retry.
+      try {
+        await applyCredentialRevokeOutcome(txId, false, log);
+      } catch (err) {
+        log.error({ err }, 'credential revoke outcome failed (non-fatal)');
+      }
       return; // done — do NOT throw, or BullMQ will retry a dead job
     }
 
@@ -249,6 +257,15 @@ export async function processTxConfirmJob(job: Job<TxConfirmJobData>): Promise<v
     await applyDelegationRevocationOutcome(txId, isSuccess, log);
   } catch (err) {
     log.error({ err }, 'delegation revocation outcome failed (non-fatal)');
+  }
+
+  // REVIEW.md C-3 partner: finalize credential revocation. tesSUCCESS
+  // flips credentials.status to 'revoked'. Any failure reverts to the
+  // prior status (usually 'accepted') so the caller can retry.
+  try {
+    await applyCredentialRevokeOutcome(txId, isSuccess, log);
+  } catch (err) {
+    log.error({ err }, 'credential revoke outcome failed (non-fatal)');
   }
 
   // 6. Backfill tokens.mpt_issuance_id from tx metadata.
@@ -677,6 +694,70 @@ export async function applyDelegationRevocationOutcome(
     { delegationId, newStatus: isSuccess ? 'revoked' : 'active' },
     'delegation revocation outcome applied',
   );
+}
+
+/**
+ * Partner to the REVIEW.md C-3 fix. `revokeCredential` stages
+ * `status='revoking'` on the credentials row and enqueues a
+ * CredentialDelete tx; this helper finalizes the DB state once rippled
+ * validates (or expires) that tx.
+ *
+ *   tesSUCCESS → status='revoked'
+ *   failure/expiry → revert to the priorStatus captured in the tx's
+ *     requestBody (typically 'accepted' since revoke is normally called
+ *     on an accepted credential)
+ *
+ * Both branches are guarded by `status='revoking'` so replays of a
+ * confirmation are silent no-ops.
+ *
+ * Only CredentialDelete txs where `requestBody.op='revokeCredential'`
+ * are touched — this skips any CredentialDelete that came from a
+ * different code path (e.g. future client-initiated direct deletes).
+ */
+export async function applyCredentialRevokeOutcome(
+  txId: string,
+  isSuccess: boolean,
+  log: Logger,
+): Promise<void> {
+  const rows = await db
+    .select({
+      txType: schema.transactions.txType,
+      requestBody: schema.transactions.requestBody,
+    })
+    .from(schema.transactions)
+    .where(eq(schema.transactions.id, txId))
+    .limit(1);
+
+  const row = rows[0];
+  if (!row || row.txType !== 'CredentialDelete') return;
+
+  const body = row.requestBody as {
+    op?: unknown;
+    credentialId?: unknown;
+    priorStatus?: unknown;
+  } | null;
+  const op = typeof body?.op === 'string' ? body.op : null;
+  const credentialId = typeof body?.credentialId === 'string' ? body.credentialId : null;
+  const priorStatus = typeof body?.priorStatus === 'string' ? body.priorStatus : 'accepted';
+  if (op !== 'revokeCredential' || !credentialId) return;
+
+  const nextStatus = isSuccess ? 'revoked' : priorStatus;
+
+  const updated = await db
+    .update(schema.credentials)
+    .set({ status: nextStatus })
+    .where(and(eq(schema.credentials.id, credentialId), eq(schema.credentials.status, 'revoking')))
+    .returning({ id: schema.credentials.id });
+
+  if (updated.length === 0) {
+    log.debug(
+      { credentialId, isSuccess },
+      'credential already transitioned out of revoking (noop)',
+    );
+    return;
+  }
+
+  log.info({ credentialId, newStatus: nextStatus }, 'credential revoke outcome applied');
 }
 
 // Re-exported so tests can `expect.toThrow(TxNotYetValidated)`.
