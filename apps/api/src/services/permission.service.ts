@@ -432,6 +432,23 @@ export interface AuditEntry {
   created_at: Date | null;
 }
 
+/**
+ * REVIEW.md M-6: escape LIKE metacharacters (`%` and `_`) in any string
+ * interpolated into a LIKE pattern so `%` becomes a literal percent and
+ * `_` becomes a literal underscore rather than wildcards. The backslash
+ * itself is escaped first so we don't accidentally turn a trailing `\`
+ * into an escape for the quote character.
+ *
+ * In this specific caller, `delegatorAddress` is already constrained by
+ * the XRPL r-address regex (`^r[1-9A-HJ-NP-Za-km-z]{24,34}$`), which
+ * excludes both metacharacters — so the concrete exploit path is closed
+ * at the validator. This escape is defense-in-depth against future
+ * callers reusing the helper with user-supplied strings.
+ */
+function escapeLikePattern(value: string): string {
+  return value.replace(/\\/g, '\\\\').replace(/%/g, '\\%').replace(/_/g, '\\_');
+}
+
 export async function getDelegationAudit(
   clientId: string,
   delegatorAddress: string,
@@ -452,7 +469,7 @@ export async function getDelegationAudit(
       and(
         eq(schema.auditLog.clientId, clientId),
         like(schema.auditLog.path, '%/permissions%'),
-        like(schema.auditLog.path, `%${delegatorAddress}%`),
+        like(schema.auditLog.path, `%${escapeLikePattern(delegatorAddress)}%`),
       ),
     );
 

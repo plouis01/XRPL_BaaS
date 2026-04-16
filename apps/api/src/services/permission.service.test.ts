@@ -15,6 +15,7 @@ const dbSelectResults: {
   auditLog: [],
 };
 const dbUpdateCalls: Array<unknown> = [];
+const likeSpy = vi.fn();
 
 vi.mock('@railforge/db', () => {
   const insert = vi.fn((table: { __name: string }) => ({
@@ -78,7 +79,7 @@ vi.mock('@railforge/db', () => {
     eq: vi.fn(),
     and: vi.fn(),
     isNull: vi.fn(),
-    like: vi.fn(),
+    like: likeSpy,
   };
 });
 
@@ -305,6 +306,30 @@ describe('PermissionService', () => {
       expect(result).toHaveLength(1);
       expect(result[0]!.path).toContain('rDelegator');
       expect(result[0]!.status_code).toBe(202);
+    });
+
+    // REVIEW.md M-6: LIKE pattern interpolation must escape `%` and `_`.
+    // The XRPL address regex at the validator layer already blocks these,
+    // but escaping is defense-in-depth against future callers.
+    it('escapes LIKE metacharacters in the delegatorAddress pattern (REVIEW.md M-6)', async () => {
+      likeSpy.mockClear();
+      dbSelectResults.auditLog = [];
+      // Pass a raw string containing both metacharacters — bypassing
+      // the route-level regex. The service MUST still escape them
+      // before interpolation.
+      await getDelegationAudit('client-1', 'r%Admin_X');
+
+      // The audit helper calls like() twice: once for '%/permissions%'
+      // (a static pattern) and once for the delegator pattern. Find
+      // the delegator call by the 'Admin'-containing argument.
+      const delegatorCall = likeSpy.mock.calls.find(
+        (args) => typeof args[1] === 'string' && args[1].includes('Admin'),
+      );
+      expect(delegatorCall).toBeDefined();
+      const pattern = delegatorCall?.[1] as string;
+      // Both metacharacters in the input should be backslash-escaped.
+      // Outer `%` wrappers stay bare — they're the wildcards we DO want.
+      expect(pattern).toBe('%r\\%Admin\\_X%');
     });
   });
 });
