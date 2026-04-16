@@ -363,67 +363,129 @@ export async function revokeCredential(input: RevokeCredentialInput): Promise<{ 
     clientId: input.clientId,
   });
 
-  const rows = await db
-    .select({
-      id: schema.credentials.id,
-      issuerAddress: schema.credentials.issuerAddress,
-      subjectAddress: schema.credentials.subjectAddress,
-      credentialType: schema.credentials.credentialType,
-      status: schema.credentials.status,
-    })
-    .from(schema.credentials)
-    .where(
-      and(
-        eq(schema.credentials.id, input.credentialId),
-        eq(schema.credentials.clientId, input.clientId),
-      ),
-    )
-    .limit(1);
+  // REVIEW.md C-3 fix: the original implementation (a) had no TOCTOU
+  // protection — two concurrent revokes would both pass the status check
+  // and enqueue a CredentialDelete each — and (b) never updated the
+  // credentials row at any point, even on success, so the DB permanently
+  // diverged from on-ledger state after every revoke.
+  //
+  // Fix mirrors acceptCredential: wrap the lock + status-check +
+  // transactions insert + staging UPDATE in one db.transaction with
+  // SELECT FOR UPDATE. The credential transitions to the 'revoking'
+  // intermediate state; txConfirmer.applyCredentialRevokeOutcome()
+  // commits to 'revoked' on tesSUCCESS or reverts to the prior status
+  // on failure/expiry.
+  let txId: string;
+  let txJson: ReturnType<typeof buildCredentialDelete>;
+  let sourceAddress: string;
+  try {
+    const result = await db.transaction(async (tx) => {
+      const lockedRows = await tx
+        .select({
+          id: schema.credentials.id,
+          issuerAddress: schema.credentials.issuerAddress,
+          subjectAddress: schema.credentials.subjectAddress,
+          credentialType: schema.credentials.credentialType,
+          status: schema.credentials.status,
+        })
+        .from(schema.credentials)
+        .where(
+          and(
+            eq(schema.credentials.id, input.credentialId),
+            eq(schema.credentials.clientId, input.clientId),
+          ),
+        )
+        .for('update')
+        .limit(1);
 
-  const cred = rows[0];
-  if (!cred) throw new CredentialServiceError('not_found', 'Credential not found');
+      const cred = lockedRows[0];
+      if (!cred) {
+        throw new CredentialServiceError('not_found', 'Credential not found');
+      }
+      if (cred.status === 'revoking') {
+        throw new CredentialServiceError(
+          'invalid_input',
+          'Credential revocation is already in flight — wait for on-chain confirmation',
+        );
+      }
+      if (cred.status === 'revoked') {
+        // Use invalid_input (400) rather than a dedicated code — the
+        // existing route error mapper maps invalid_input → 400, which
+        // is the right semantic for "this operation can't apply to
+        // this credential state" and avoids fanning out the error code
+        // enum + touching every caller.
+        throw new CredentialServiceError('invalid_input', 'Credential is already revoked');
+      }
 
-  // The issuer deletes: Account=issuer, Subject=subject.
-  // We default to issuer-initiated delete since the issuer is the managed account.
-  const issuerAccount = await resolveOwnedAccount(input.clientId, cred.issuerAddress);
-  const sourceAddress = issuerAccount ? cred.issuerAddress : cred.subjectAddress;
+      // Pick source: issuer if managed, else subject if managed.
+      const issuerAccount = await resolveOwnedAccount(input.clientId, cred.issuerAddress);
+      const source = issuerAccount ? cred.issuerAddress : cred.subjectAddress;
+      if (!issuerAccount) {
+        const subjectAccount = await resolveOwnedAccount(input.clientId, cred.subjectAddress);
+        if (!subjectAccount) {
+          throw new CredentialServiceError(
+            'not_managed',
+            'Neither issuer nor subject is a managed account',
+          );
+        }
+      }
 
-  // At least one of issuer/subject must be managed.
-  if (!issuerAccount) {
-    const subjectAccount = await resolveOwnedAccount(input.clientId, cred.subjectAddress);
-    if (!subjectAccount) {
-      throw new CredentialServiceError(
-        'not_managed',
-        'Neither issuer nor subject is a managed account',
-      );
+      const builtTxJson = buildCredentialDelete({
+        account: source,
+        credentialType: cred.credentialType,
+        subject: source === cred.issuerAddress ? cred.subjectAddress : undefined,
+        issuer: source === cred.subjectAddress ? cred.issuerAddress : undefined,
+      });
+
+      const txInserted = await tx
+        .insert(schema.transactions)
+        .values({
+          clientId: input.clientId,
+          txType: 'CredentialDelete',
+          sourceAddress: source,
+          status: 'queued',
+          idempotencyKey: input.idempotencyKey,
+          requestBody: {
+            op: 'revokeCredential',
+            credentialId: input.credentialId,
+            priorStatus: cred.status,
+            issuer: cred.issuerAddress,
+            subject: cred.subjectAddress,
+          },
+        })
+        .returning({ id: schema.transactions.id });
+      const txRow = txInserted[0];
+      if (!txRow) {
+        throw new CredentialServiceError('db_conflict', 'transactions insert returned no row');
+      }
+
+      // Stage the revocation. Guarded by the current status we already
+      // loaded under FOR UPDATE so a concurrent caller that lost the
+      // lock race can't double-stage.
+      await tx
+        .update(schema.credentials)
+        .set({ status: 'revoking' })
+        .where(and(eq(schema.credentials.id, cred.id), eq(schema.credentials.status, cred.status)));
+
+      return { txId: txRow.id, txJson: builtTxJson, source };
+    });
+    txId = result.txId;
+    txJson = result.txJson;
+    sourceAddress = result.source;
+  } catch (err) {
+    if (err instanceof CredentialServiceError) throw err;
+    // UNIQUE(client_id, idempotency_key) collision — same idempotency-key
+    // replay. Surface as db_conflict (409), mirroring acceptCredential.
+    if (
+      err &&
+      typeof err === 'object' &&
+      'code' in err &&
+      (err as { code: string }).code === '23505'
+    ) {
+      throw new CredentialServiceError('db_conflict', 'Duplicate idempotency key (retry)');
     }
+    throw err;
   }
-
-  const txJson = buildCredentialDelete({
-    account: sourceAddress,
-    credentialType: cred.credentialType,
-    subject: sourceAddress === cred.issuerAddress ? cred.subjectAddress : undefined,
-    issuer: sourceAddress === cred.subjectAddress ? cred.issuerAddress : undefined,
-  });
-
-  const txInserted = await db
-    .insert(schema.transactions)
-    .values({
-      clientId: input.clientId,
-      txType: 'CredentialDelete',
-      sourceAddress,
-      status: 'queued',
-      idempotencyKey: input.idempotencyKey,
-      requestBody: {
-        op: 'revokeCredential',
-        credentialId: input.credentialId,
-        issuer: cred.issuerAddress,
-        subject: cred.subjectAddress,
-      },
-    })
-    .returning({ id: schema.transactions.id });
-  const txId = txInserted[0]?.id;
-  if (!txId) throw new Error('transactions insert returned no row');
 
   try {
     await enqueueTxSubmit({ txId, sourceAddress, txJson });

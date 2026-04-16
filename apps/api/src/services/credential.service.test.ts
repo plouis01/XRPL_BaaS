@@ -476,3 +476,92 @@ describe('listIssuers', () => {
     expect(result[0]!.provider).toBe('sumsub');
   });
 });
+
+// ── revokeCredential (REVIEW.md C-3) ───────────────────────────────────────
+//
+// Fix covers two bugs the review called out:
+//   1. TOCTOU — no FOR UPDATE lock, two concurrent revokes both enqueue
+//   2. DB status never updated on success — row stays 'accepted' forever
+//
+// The rewrite uses SELECT FOR UPDATE + an intermediate 'revoking' state.
+// These tests cover the staging semantics.
+
+describe('revokeCredential', () => {
+  it('happy path: stages status=revoking, inserts tx, enqueues', async () => {
+    dbSelectResults.credentials = [
+      {
+        id: 'cred-1',
+        issuerAddress: 'rIssuerAddr',
+        subjectAddress: 'rSubjectAddr',
+        credentialType: '4B5943',
+        status: 'accepted',
+      },
+    ];
+    // Issuer is managed (2nd select call, for accounts).
+    dbSelectResults.accounts = [{ id: 'acct-1', address: 'rIssuerAddr' }];
+
+    const result = await mod.revokeCredential({
+      clientId: 'client-1',
+      credentialId: 'cred-1',
+    });
+
+    expect(result.tx_id).toBe('tx-uuid-1');
+    expect(enqueueCalls).toHaveLength(1);
+
+    // Must stage status='revoking'. The review finding was that the
+    // original code never UPDATEd credentials at all — this test locks
+    // in the fix.
+    const credUpdate = dbUpdateCalls.find((c) => c.table === 'credentials');
+    expect(credUpdate?.set).toEqual({ status: 'revoking' });
+
+    // requestBody must carry credentialId + priorStatus so the txConfirmer
+    // hook can finalize the state transition.
+    const txInsert = dbInsertCalls.find((c) => c.table === 'transactions');
+    const body = (txInsert?.values as { requestBody: Record<string, unknown> })?.requestBody;
+    expect(body?.op).toBe('revokeCredential');
+    expect(body?.credentialId).toBe('cred-1');
+    expect(body?.priorStatus).toBe('accepted');
+  });
+
+  it('rejects when credential is already in revoking state (TOCTOU guard)', async () => {
+    dbSelectResults.credentials = [
+      {
+        id: 'cred-1',
+        issuerAddress: 'rIssuerAddr',
+        subjectAddress: 'rSubjectAddr',
+        credentialType: '4B5943',
+        status: 'revoking',
+      },
+    ];
+    dbSelectResults.accounts = [{ id: 'acct-1', address: 'rIssuerAddr' }];
+
+    await expect(
+      mod.revokeCredential({ clientId: 'client-1', credentialId: 'cred-1' }),
+    ).rejects.toThrow(/already in flight/);
+  });
+
+  it('rejects when credential is already revoked', async () => {
+    dbSelectResults.credentials = [
+      {
+        id: 'cred-1',
+        issuerAddress: 'rIssuerAddr',
+        subjectAddress: 'rSubjectAddr',
+        credentialType: '4B5943',
+        status: 'revoked',
+      },
+    ];
+    dbSelectResults.accounts = [{ id: 'acct-1', address: 'rIssuerAddr' }];
+
+    await expect(
+      mod.revokeCredential({ clientId: 'client-1', credentialId: 'cred-1' }),
+    ).rejects.toThrow(/already revoked/);
+  });
+
+  it('throws not_found when credential does not exist', async () => {
+    dbSelectResults.credentials = [];
+
+    await expect(
+      mod.revokeCredential({ clientId: 'client-1', credentialId: 'missing' }),
+    ).rejects.toThrow(/not found/i);
+  });
+});
