@@ -109,6 +109,7 @@ accounts.get('/:address', async (c) => {
 });
 
 // GET /:address/credentials — list all credentials for a managed account.
+// Paginated per REVIEW.md H-4. Query params: ?limit=N&offset=M.
 accounts.get('/:address/credentials', async (c) => {
   const clientId = c.get('clientId');
   const address = c.req.param('address');
@@ -118,8 +119,22 @@ accounts.get('/:address/credentials', async (c) => {
     return c.json({ error: 'Account not found' }, 404);
   }
 
-  const credentials = await listCredentialsForAccount(clientId, address);
-  return c.json({ data: credentials });
+  const limitParam = c.req.query('limit');
+  const offsetParam = c.req.query('offset');
+  const limit = limitParam ? Number.parseInt(limitParam, 10) : undefined;
+  const offset = offsetParam ? Number.parseInt(offsetParam, 10) : undefined;
+  if (limit !== undefined && (Number.isNaN(limit) || limit < 1 || limit > 1000)) {
+    return c.json({ error: 'limit must be an integer between 1 and 1000' }, 400);
+  }
+  if (offset !== undefined && (Number.isNaN(offset) || offset < 0)) {
+    return c.json({ error: 'offset must be a non-negative integer' }, 400);
+  }
+
+  const result = await listCredentialsForAccount(clientId, address, {
+    limit,
+    offset,
+  });
+  return c.json(result);
 });
 
 // Map an AccountServiceError to its HTTP response. Centralized so the

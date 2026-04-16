@@ -174,9 +174,12 @@ describe('GET /accounts/:address/credentials', () => {
     vi.clearAllMocks();
   });
 
-  it('200 with credentials list', async () => {
+  it('200 with paginated credentials list (REVIEW.md H-4)', async () => {
     mockGetAccount.mockResolvedValue({ id: 'acct-1' });
-    mockListCredentialsForAccount.mockResolvedValue([{ id: 'cred-1', credentialType: 'AABB' }]);
+    mockListCredentialsForAccount.mockResolvedValue({
+      data: [{ id: 'cred-1', credentialType: 'AABB' }],
+      has_more: false,
+    });
 
     const app = makeApp();
     const res = await app.request('/accounts/rAddr/credentials');
@@ -184,6 +187,37 @@ describe('GET /accounts/:address/credentials', () => {
     expect(res.status).toBe(200);
     const body = (await res.json()) as Record<string, unknown>;
     expect(body.data).toHaveLength(1);
+    expect(body.has_more).toBe(false);
+  });
+
+  it('400 on invalid limit query param', async () => {
+    mockGetAccount.mockResolvedValue({ id: 'acct-1' });
+    const app = makeApp();
+    const res = await app.request('/accounts/rAddr/credentials?limit=0');
+    expect(res.status).toBe(400);
+  });
+
+  it('400 on negative offset query param', async () => {
+    mockGetAccount.mockResolvedValue({ id: 'acct-1' });
+    const app = makeApp();
+    const res = await app.request('/accounts/rAddr/credentials?offset=-1');
+    expect(res.status).toBe(400);
+  });
+
+  it('threads limit+offset query params to the service', async () => {
+    mockGetAccount.mockResolvedValue({ id: 'acct-1' });
+    mockListCredentialsForAccount.mockResolvedValue({
+      data: [],
+      has_more: false,
+    });
+
+    const app = makeApp();
+    await app.request('/accounts/rAddr/credentials?limit=25&offset=50');
+
+    expect(mockListCredentialsForAccount).toHaveBeenCalledWith('client-1', 'rAddr', {
+      limit: 25,
+      offset: 50,
+    });
   });
 
   it('404 when account not found', async () => {
