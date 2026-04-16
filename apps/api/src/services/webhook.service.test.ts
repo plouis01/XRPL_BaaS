@@ -19,6 +19,7 @@ const dbInsertCalls: Array<{ values: unknown }> = [];
 const dbInsertResult = { current: [{}] as unknown[] };
 const dbSelectResult = { current: [] as unknown[] };
 const dbDeleteResult = { current: [] as unknown[] };
+const dbUpdateResult = { current: [] as unknown[] };
 const eqArgsLog: Array<{ col: unknown; val: unknown }> = [];
 const andArgsLog: Array<unknown[]> = [];
 
@@ -41,8 +42,15 @@ vi.mock('@railforge/db', () => {
       returning: vi.fn(async () => dbDeleteResult.current),
     })),
   }));
+  const update = vi.fn(() => ({
+    set: vi.fn(() => ({
+      where: vi.fn(() => ({
+        returning: vi.fn(async () => dbUpdateResult.current),
+      })),
+    })),
+  }));
   return {
-    db: { insert, select, delete: del },
+    db: { insert, select, delete: del, update },
     schema: {
       webhookEndpoints: {
         id: 'id',
@@ -66,9 +74,8 @@ vi.mock('@railforge/db', () => {
 });
 
 // Import AFTER mocks.
-const { createEndpoint, listEndpoints, deleteEndpoint, WebhookServiceError } = await import(
-  './webhook.service.ts'
-);
+const { createEndpoint, listEndpoints, deleteEndpoint, rotateEndpointSecret, WebhookServiceError } =
+  await import('./webhook.service.ts');
 
 // ── Tests ───────────────────────────────────────────────────────────────────
 
@@ -256,5 +263,50 @@ describe('deleteEndpoint', () => {
     expect(clientCall, 'WHERE missing clientId predicate').toBeDefined();
     // and() was called to combine them — proves both predicates were chained.
     expect(andArgsLog.length).toBeGreaterThan(0);
+  });
+});
+
+// ── rotateEndpointSecret (REVIEW.md H-1) ──────────────────────────────────────
+
+describe('rotateEndpointSecret', () => {
+  beforeEach(() => {
+    dbUpdateResult.current = [];
+    eqArgsLog.length = 0;
+    andArgsLog.length = 0;
+  });
+
+  it('returns a fresh whsec_ secret when the endpoint exists', async () => {
+    // The UPDATE ... RETURNING returns the id on success.
+    dbUpdateResult.current = [{ id: 'wh-1' }];
+
+    const result = await rotateEndpointSecret('client-1', 'wh-1');
+    expect(result).not.toBeNull();
+    expect(result?.id).toBe('wh-1');
+    // Same shape as createEndpoint: whsec_ prefix + 43 base64url chars.
+    expect(result?.secret).toMatch(/^whsec_[A-Za-z0-9_-]{43}$/);
+  });
+
+  it('returns null when the endpoint is unknown or belongs to another client', async () => {
+    dbUpdateResult.current = [];
+    const result = await rotateEndpointSecret('client-1', 'wh-missing');
+    expect(result).toBeNull();
+  });
+
+  it('scopes the WHERE by both id AND clientId (cross-tenant isolation)', async () => {
+    dbUpdateResult.current = [{ id: 'wh-1' }];
+    await rotateEndpointSecret('client-1', 'wh-1');
+
+    const idCall = eqArgsLog.find((c) => c.val === 'wh-1');
+    const clientCall = eqArgsLog.find((c) => c.val === 'client-1');
+    expect(idCall).toBeDefined();
+    expect(clientCall).toBeDefined();
+    expect(andArgsLog.length).toBeGreaterThan(0);
+  });
+
+  it('generates a different secret on every call', async () => {
+    dbUpdateResult.current = [{ id: 'wh-1' }];
+    const r1 = await rotateEndpointSecret('client-1', 'wh-1');
+    const r2 = await rotateEndpointSecret('client-1', 'wh-1');
+    expect(r1?.secret).not.toBe(r2?.secret);
   });
 });

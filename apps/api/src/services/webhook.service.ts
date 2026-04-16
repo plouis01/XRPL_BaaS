@@ -204,6 +204,40 @@ export async function listEndpoints(clientId: string): Promise<EndpointView[]> {
 }
 
 /**
+ * REVIEW.md H-1 fix: rotate an endpoint's signing secret atomically.
+ *
+ * Generates a fresh `whsec_`-prefixed secret, updates the row, and
+ * returns the new secret ONCE. The old secret is discarded — any in-
+ * flight webhook deliveries using the old secret will produce a
+ * signature mismatch on the client side. Clients must swap their
+ * verification secret to the new value immediately on receiving the
+ * response.
+ *
+ * Scoped by clientId so one tenant can't rotate another tenant's
+ * endpoint. Returns null if the endpoint doesn't exist (or belongs to
+ * another client — the two cases are indistinguishable by design).
+ */
+export async function rotateEndpointSecret(
+  clientId: string,
+  endpointId: string,
+): Promise<{ id: string; secret: string } | null> {
+  const newSecret = generateSecret();
+  const updated = await db
+    .update(schema.webhookEndpoints)
+    .set({ secret: newSecret })
+    .where(
+      and(
+        eq(schema.webhookEndpoints.id, endpointId),
+        eq(schema.webhookEndpoints.clientId, clientId),
+      ),
+    )
+    .returning({ id: schema.webhookEndpoints.id });
+  const row = updated[0];
+  if (!row) return null;
+  return { id: row.id, secret: newSecret };
+}
+
+/**
  * Hard delete an endpoint, scoped to the client. Returns true if a row
  * was actually removed; false if the id was unknown OR belonged to a
  * different client (the two cases are indistinguishable on purpose, no

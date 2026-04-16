@@ -7,11 +7,13 @@ import type { AppEnv } from '../types.ts';
 const mockCreateEndpoint = vi.fn();
 const mockListEndpoints = vi.fn();
 const mockDeleteEndpoint = vi.fn();
+const mockRotateEndpointSecret = vi.fn();
 
 vi.mock('../services/webhook.service.ts', () => ({
   createEndpoint: (...args: unknown[]) => mockCreateEndpoint(...args),
   listEndpoints: (...args: unknown[]) => mockListEndpoints(...args),
   deleteEndpoint: (...args: unknown[]) => mockDeleteEndpoint(...args),
+  rotateEndpointSecret: (...args: unknown[]) => mockRotateEndpointSecret(...args),
   WebhookServiceError: class WebhookServiceError extends Error {
     constructor(
       public readonly code: string,
@@ -182,6 +184,39 @@ describe('DELETE /webhooks/endpoints/:id', () => {
     const app = makeApp();
     const res = await app.request('/webhooks/endpoints/ep-missing', {
       method: 'DELETE',
+    });
+
+    expect(res.status).toBe(404);
+  });
+});
+
+describe('POST /webhooks/endpoints/:id/rotate-secret (REVIEW.md H-1)', () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it('200 with the new secret ONCE', async () => {
+    mockRotateEndpointSecret.mockResolvedValue({
+      id: 'ep-1',
+      secret: 'whsec_new_rotation_12345',
+    });
+
+    const app = makeApp();
+    const res = await app.request('/webhooks/endpoints/ep-1/rotate-secret', {
+      method: 'POST',
+    });
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.id).toBe('ep-1');
+    expect(body.secret).toBe('whsec_new_rotation_12345');
+    expect(mockRotateEndpointSecret).toHaveBeenCalledWith('client-1', 'ep-1');
+  });
+
+  it('404 when endpoint not found', async () => {
+    mockRotateEndpointSecret.mockResolvedValue(null);
+
+    const app = makeApp();
+    const res = await app.request('/webhooks/endpoints/ep-missing/rotate-secret', {
+      method: 'POST',
     });
 
     expect(res.status).toBe(404);

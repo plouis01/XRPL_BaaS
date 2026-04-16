@@ -19,6 +19,7 @@ import {
   createEndpoint,
   deleteEndpoint,
   listEndpoints,
+  rotateEndpointSecret,
 } from '../services/webhook.service.ts';
 import type { AppEnv } from '../types.ts';
 import { createWebhookEndpointSchema } from '../validators/schemas.ts';
@@ -72,6 +73,22 @@ webhooks.get('/endpoints', async (c) => {
       created_at: e.createdAt,
     })),
   });
+});
+
+// POST /endpoints/:id/rotate-secret — REVIEW.md H-1. Generates a fresh
+// whsec_ and returns it ONCE. The old secret is discarded; in-flight
+// deliveries using the old secret will mismatch on the client's HMAC
+// check. Clients must update their verification secret immediately.
+webhooks.post('/endpoints/:id/rotate-secret', async (c) => {
+  const clientId = c.get('clientId');
+  const id = c.req.param('id');
+  const result = await rotateEndpointSecret(clientId, id);
+  if (!result) {
+    // Same 404 treatment as DELETE — unknown id + wrong-tenant id are
+    // indistinguishable on purpose.
+    return c.json({ error: 'Webhook endpoint not found' }, 404);
+  }
+  return c.json({ id: result.id, secret: result.secret });
 });
 
 webhooks.delete('/endpoints/:id', async (c) => {
