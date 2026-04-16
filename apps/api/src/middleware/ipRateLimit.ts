@@ -25,33 +25,17 @@ import { logger } from '../logger.ts';
 import { getRedis } from '../redis.ts';
 import type { AppEnv } from '../types.ts';
 import { memoryRateLimiter } from './memoryRateLimit.ts';
+import { getClientIp } from './trustedProxy.ts';
 
 const WINDOW_MS = 60_000; // 1 minute
 const WINDOW_SECONDS = Math.ceil(WINDOW_MS / 1000);
 const DEFAULT_IP_LIMIT = 300; // requests/minute per source IP, pre-auth
 
-function clientIp(c: Parameters<MiddlewareHandler>[0]): string {
-  // Trust order: dedicated proxy header → standard XFF → fallback to "unknown".
-  // We deliberately do NOT parse XFF chains beyond the first entry — multi-hop
-  // proxies need to be configured in front, not parsed in app code.
-  const cfIp = c.req.header('cf-connecting-ip');
-  if (cfIp) return cfIp;
-
-  const xff = c.req.header('x-forwarded-for');
-  if (xff) {
-    const first = xff.split(',')[0]?.trim();
-    if (first) return first;
-  }
-
-  // Hono doesn't always expose the raw socket — use a static fallback
-  // bucket so we still rate-limit unknown sources together. This is the
-  // safe-default: under attack, "unknown" gets rate-limited as one bucket
-  // rather than waved through.
-  return 'unknown';
-}
-
 export const ipRateLimit: MiddlewareHandler<AppEnv> = async (c, next) => {
-  const ip = clientIp(c);
+  // REVIEW.md M-1: IP extraction respects the TRUSTED_PROXY_IPS allowlist.
+  // See trustedProxy.ts for the full reasoning. Without that env var set,
+  // behavior is unchanged.
+  const ip = getClientIp(c);
   const limit = Number(process.env.IP_RATE_LIMIT ?? DEFAULT_IP_LIMIT);
 
   const redis = getRedis();

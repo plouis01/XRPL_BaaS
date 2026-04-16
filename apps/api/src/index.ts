@@ -62,7 +62,13 @@ app.route('/v1', v1);
 const port = Number(process.env.API_PORT ?? 3000);
 logger.info({ port }, 'RailForge API starting');
 
+// REVIEW.md M-1: thread Bun's `server` into Hono's env so middleware can
+// call `server.requestIP(request)` to get the socket peer IP. Used by
+// the trustedProxy helper to validate forwarded headers. On runtimes that
+// don't pass `server` (test harness), env.server is undefined and the
+// helper falls back to 'unknown' — conservative when the allowlist is on.
 export default {
   port,
-  fetch: app.fetch,
+  // biome-ignore lint/suspicious/noExplicitAny: Bun runtime types aren't imported here
+  fetch: (req: Request, server: any) => app.fetch(req, { server }),
 };
