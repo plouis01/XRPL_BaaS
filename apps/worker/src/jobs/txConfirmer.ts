@@ -108,6 +108,14 @@ export async function processTxConfirmJob(job: Job<TxConfirmJobData>): Promise<v
       } catch (err) {
         log.error({ err }, 'domain mutation outcome failed (non-fatal)');
       }
+      // REVIEW.md C-1 partner: clear delegations.pending_revocation on
+      // expiry so the delegate row stays 'active' (matching the unchanged
+      // on-ledger signer list). Best-effort.
+      try {
+        await applyDelegationRevocationOutcome(txId, false, log);
+      } catch (err) {
+        log.error({ err }, 'delegation revocation outcome failed (non-fatal)');
+      }
       return; // done — do NOT throw, or BullMQ will retry a dead job
     }
 
@@ -231,6 +239,16 @@ export async function processTxConfirmJob(job: Job<TxConfirmJobData>): Promise<v
     await applyDomainMutationOutcome(txId, isSuccess, log);
   } catch (err) {
     log.error({ err }, 'domain mutation outcome failed (non-fatal)');
+  }
+
+  // REVIEW.md C-1 partner: finalize delegation revocation. tesSUCCESS
+  // flips status='revoked' + revokedAt=now and clears pendingRevocation.
+  // Any failure drops pendingRevocation only so the delegation stays
+  // 'active' — matching the unchanged on-ledger signer list.
+  try {
+    await applyDelegationRevocationOutcome(txId, isSuccess, log);
+  } catch (err) {
+    log.error({ err }, 'delegation revocation outcome failed (non-fatal)');
   }
 
   // 6. Backfill tokens.mpt_issuance_id from tx metadata.
@@ -591,6 +609,74 @@ export async function applyDomainMutationOutcome(
       .where(eq(schema.domains.id, domainDbId));
     log.info({ domainDbId }, 'domain deletion staging cleared (failure)');
   }
+}
+
+/**
+ * Partner to the REVIEW.md C-1 fix. `revokePermission` stages
+ * `pendingRevocation=true` on the delegations row and enqueues a
+ * SignerListSet tx; this helper finalizes the DB state once rippled
+ * validates (or expires) that tx.
+ *
+ *   tesSUCCESS → status='revoked', revokedAt=now, pendingRevocation=false
+ *   failure/expiry → pendingRevocation=false (status stays 'active')
+ *
+ * Both branches are guarded by `pendingRevocation=true` so replays of a
+ * confirmation job are silent no-ops rather than overwrites. Only rows
+ * the service actually staged are touched — other SignerListSet txs
+ * (e.g. grantPermission) skip this helper because their requestBody has
+ * `op='grantPermission'`, not `op='revokePermission'`.
+ */
+export async function applyDelegationRevocationOutcome(
+  txId: string,
+  isSuccess: boolean,
+  log: Logger,
+): Promise<void> {
+  const rows = await db
+    .select({
+      txType: schema.transactions.txType,
+      requestBody: schema.transactions.requestBody,
+    })
+    .from(schema.transactions)
+    .where(eq(schema.transactions.id, txId))
+    .limit(1);
+
+  const row = rows[0];
+  if (!row || row.txType !== 'SignerListSet') return;
+
+  const body = row.requestBody as {
+    op?: unknown;
+    delegationId?: unknown;
+  } | null;
+  const op = typeof body?.op === 'string' ? body.op : null;
+  const delegationId = typeof body?.delegationId === 'string' ? body.delegationId : null;
+  // Only finalize revokePermission txs. grantPermission and other
+  // SignerListSet paths don't stage anything here.
+  if (op !== 'revokePermission' || !delegationId) return;
+
+  const setValues = isSuccess
+    ? { status: 'revoked', revokedAt: new Date(), pendingRevocation: false }
+    : { pendingRevocation: false };
+
+  const updated = await db
+    .update(schema.delegations)
+    .set(setValues)
+    .where(
+      and(eq(schema.delegations.id, delegationId), eq(schema.delegations.pendingRevocation, true)),
+    )
+    .returning({ id: schema.delegations.id });
+
+  if (updated.length === 0) {
+    log.debug(
+      { delegationId, isSuccess },
+      'delegation already transitioned out of pending_revocation (noop)',
+    );
+    return;
+  }
+
+  log.info(
+    { delegationId, newStatus: isSuccess ? 'revoked' : 'active' },
+    'delegation revocation outcome applied',
+  );
 }
 
 // Re-exported so tests can `expect.toThrow(TxNotYetValidated)`.
