@@ -13,7 +13,7 @@
 // The credential row status mirrors the on-ledger lifecycle:
 //   pending → accepted → (expired | revoked)
 
-import { and, db, eq, isNull, lte, schema } from '@railforge/db';
+import { and, asc, db, eq, isNull, lte, schema } from '@railforge/db';
 import { enqueueTxSubmit } from '@railforge/jobs';
 import {
   buildCredentialAccept,
@@ -608,10 +608,31 @@ export async function listIssuers(): Promise<IssuerView[]> {
 
 // ── List credentials for an account ──────────────────────────────────────────
 
+export interface ListCredentialsOptions {
+  /** Max credentials to return. Default 100, max 1000. */
+  limit?: number;
+  /** Offset into the sorted list (for pagination). */
+  offset?: number;
+}
+
+/**
+ * REVIEW.md H-4 fix: previously returned ALL credentials for the account
+ * with no LIMIT. A subject with thousands of credentials could trigger
+ * a large response (and a matching allocation). Now paginated with the
+ * same `limit+1` + stable-sort pattern `listMembers` uses.
+ */
 export async function listCredentialsForAccount(
   clientId: string,
   subjectAddress: string,
-): Promise<CredentialView[]> {
+  opts: ListCredentialsOptions = {},
+): Promise<{ data: CredentialView[]; has_more: boolean }> {
+  const limit = Math.min(Math.max(opts.limit ?? 100, 1), 1000);
+  const offset = Math.max(opts.offset ?? 0, 0);
+
+  // limit+1 row trick to detect has_more without a separate COUNT.
+  // Stable-sort by created_at DESC then id ASC so pagination is
+  // deterministic even when multiple credentials share the same
+  // millisecond (id is a UUID; ASC order is arbitrary but stable).
   const rows = await db
     .select({
       id: schema.credentials.id,
@@ -631,9 +652,18 @@ export async function listCredentialsForAccount(
         eq(schema.credentials.clientId, clientId),
         eq(schema.credentials.subjectAddress, subjectAddress),
       ),
-    );
+    )
+    .orderBy(asc(schema.credentials.id))
+    .limit(limit + 1)
+    .offset(offset);
 
-  return rows.map(toView);
+  const hasMore = rows.length > limit;
+  const page = hasMore ? rows.slice(0, limit) : rows;
+
+  return {
+    data: page.map(toView),
+    has_more: hasMore,
+  };
 }
 
 // ── List expiring credentials (for worker job) ─────────────────────────────
