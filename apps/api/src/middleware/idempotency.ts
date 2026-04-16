@@ -33,6 +33,7 @@
 // cache-hit check and the handler run so only one of N concurrent
 // duplicates progresses; the others get a 409 Conflict immediately.
 
+import { randomUUID } from 'node:crypto';
 import type { MiddlewareHandler } from 'hono';
 import { logger } from '../logger.ts';
 import { getRedis } from '../redis.ts';
@@ -45,6 +46,28 @@ const IDEMP_TTL_SECONDS = 24 * 60 * 60; // 24h
 // above p99 for any endpoint we currently expose.
 const IDEMP_LOCK_TTL_SECONDS = 60;
 const CACHEABLE_METHODS = new Set(['POST', 'PUT', 'DELETE', 'PATCH']);
+
+/**
+ * REVIEW.md H-3 fix: compare-and-delete on lock release. Atomically
+ * deletes the lock key ONLY if it still holds the token this request
+ * wrote. Prevents the following race:
+ *
+ *   1. Request A acquires the lock with TTL=60s but the handler takes
+ *      >60s (e.g. a slow downstream HTTP call).
+ *   2. Lock expires. Request B with the same key acquires a fresh lock.
+ *   3. Request A finishes and issues `DEL lockKey` — this would delete
+ *      B's lock, opening the door for a third concurrent request.
+ *
+ * The CAS script reads the current value, compares to our token, and
+ * only deletes on a match. Mirrors the sequencer's lock-release pattern.
+ */
+const RELEASE_LOCK_SCRIPT = `
+  if redis.call("GET", KEYS[1]) == ARGV[1] then
+    return redis.call("DEL", KEYS[1])
+  else
+    return 0
+  end
+`;
 
 interface CachedResponse {
   status: number;
@@ -119,9 +142,14 @@ export const idempotency: MiddlewareHandler<AppEnv> = async (c, next) => {
   // the handler. We lose TOCTOU protection in that mode but it's the same
   // degraded behavior the DB UNIQUE constraint was already compensating
   // for pre-fix — no regression, just no improvement.
+  // REVIEW.md H-3 fix: use a per-request unique token as the lock value
+  // so the CAS-release script can tell if this request still owns the
+  // lock. A fixed sentinel ('1') would let a stale DEL kill another
+  // request's lock after TTL expiry.
+  const lockToken = randomUUID();
   let holdingLock = false;
   try {
-    const acquired = await redis.set(lockKey, '1', 'EX', IDEMP_LOCK_TTL_SECONDS, 'NX');
+    const acquired = await redis.set(lockKey, lockToken, 'EX', IDEMP_LOCK_TTL_SECONDS, 'NX');
     if (acquired === 'OK') {
       holdingLock = true;
     } else {
@@ -156,7 +184,10 @@ export const idempotency: MiddlewareHandler<AppEnv> = async (c, next) => {
   } catch (err) {
     if (holdingLock) {
       try {
-        await redis.del(lockKey);
+        // CAS release: only deletes if the lock still holds OUR token.
+        // If TTL expired and another request acquired the lock, this is
+        // a no-op (script returns 0) rather than killing their lock.
+        await redis.eval(RELEASE_LOCK_SCRIPT, 1, lockKey, lockToken);
       } catch {
         // Non-fatal — the lock will expire via its TTL.
       }
@@ -193,11 +224,12 @@ export const idempotency: MiddlewareHandler<AppEnv> = async (c, next) => {
     }
   }
 
-  // 5. Release the lock. Runs on both 2xx/4xx/5xx success paths. Best
-  // effort — if DEL fails, the lock expires via its TTL.
+  // 5. Release the lock via CAS (see RELEASE_LOCK_SCRIPT comment). Runs
+  // on both 2xx/4xx/5xx success paths. Best effort — if eval fails, the
+  // lock expires via its TTL.
   if (holdingLock) {
     try {
-      await redis.del(lockKey);
+      await redis.eval(RELEASE_LOCK_SCRIPT, 1, lockKey, lockToken);
     } catch {
       // Non-fatal.
     }
