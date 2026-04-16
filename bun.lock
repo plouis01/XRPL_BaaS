@@ -92,6 +92,7 @@
         "bullmq": "^5.34.0",
         "ioredis": "^5.4.1",
         "pino": "^9.5.0",
+        "pkcs11js": "^2.1.6",
         "xrpl": "^4.6.0",
       },
       "devDependencies": {
@@ -1159,6 +1160,8 @@
     "pino-std-serializers": ["pino-std-serializers@7.1.0", "", {}, "sha512-BndPH67/JxGExRgiX1dX0w1FvZck5Wa4aal9198SrRhZjH3GxKQUKIBnYJTdj2HDN3UQAS06HlfcSbQj2OHmaw=="],
 
     "pirates": ["pirates@4.0.7", "", {}, "sha512-TfySrs/5nm8fQJDcBDuUng3VOUKsd7S+zqvbOTiGXHfxX4wK31ard+hoNuvkicM/2YFzlpDgABOevKSsB4G/FA=="],
+
+    "pkcs11js": ["pkcs11js@2.1.6", "", {}, "sha512-+t5jxzB749q8GaEd1yNx3l98xYuaVK6WW/Vjg1Mk1Iy5bMu/A5W4O/9wZGrpOknWF6lFQSb12FXX+eSNxdriwA=="],
 
     "pkg-types": ["pkg-types@1.3.1", "", { "dependencies": { "confbox": "^0.1.8", "mlly": "^1.7.4", "pathe": "^2.0.1" } }, "sha512-/Jm5M4RvtBFVkKWRu2BLUTNP8/M2a+UwuAX+ae4770q1qVGtfjG+WTCupoZixokjmHiry8uI+dlY8KXYV5HVVQ=="],
 
