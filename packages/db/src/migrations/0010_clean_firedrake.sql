@@ -1,0 +1,1 @@
+ALTER TABLE "delegations" ADD COLUMN "pending_revocation" boolean DEFAULT false NOT NULL;

@@ -188,6 +188,12 @@ export const delegations = pgTable('delegations', {
   /** Signer weight for this delegate on the signer list. */
   weight: integer('weight').notNull().default(1),
   status: text('status').notNull().default('active'),
+  // REVIEW.md C-1: staging slot for in-flight revocations. revokePermission
+  // sets this to true instead of mutating `status`; the txConfirmer commits
+  // (status='revoked', revokedAt=now) on tesSUCCESS or clears the flag on
+  // failure/expiry. A row with pendingRevocation=true rejects further
+  // revoke attempts (one revoke in flight at a time).
+  pendingRevocation: boolean('pending_revocation').notNull().default(false),
   ledgerIndex: text('ledger_index'),
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
   revokedAt: timestamp('revoked_at', { withTimezone: true }),
