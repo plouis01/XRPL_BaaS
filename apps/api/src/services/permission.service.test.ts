@@ -35,7 +35,16 @@ vi.mock('@railforge/db', () => {
           return { limit: vi.fn(async () => dbSelectResults.accounts) };
         }
         if (table.__name === 'delegations') {
-          return Promise.resolve(dbSelectResults.delegations);
+          // Support both plain `.where(...)` (listDelegations / siblings
+          // query) AND `.where(...).for('update').limit(1)` (revokePermission
+          // FOR UPDATE lock) in the same builder.
+          const awaitable = Object.assign(Promise.resolve(dbSelectResults.delegations), {
+            // biome-ignore lint/suspicious/noExplicitAny: self-referencing fluent mock
+            for: vi.fn((_mode: string): any => ({
+              limit: vi.fn(async () => dbSelectResults.delegations),
+            })),
+          });
+          return awaitable;
         }
         if (table.__name === 'audit_log') {
           return Promise.resolve(dbSelectResults.auditLog);
@@ -55,7 +64,7 @@ vi.mock('@railforge/db', () => {
   }));
 
   const transaction = vi.fn(async (cb: (tx: unknown) => Promise<unknown>) => {
-    return cb({ insert, select });
+    return cb({ insert, select, update });
   });
 
   return {
@@ -172,13 +181,15 @@ describe('PermissionService', () => {
   // ── revoke ────────────────────────────────────────────────────────────
 
   describe('revokePermission', () => {
-    it('enqueues a SignerListSet removal and soft-revokes delegation', async () => {
+    it('stages pending_revocation=true instead of status=revoked (REVIEW.md C-1)', async () => {
       dbSelectResults.delegations = [
         {
           id: 'deleg-1',
           delegateAddress: 'rDelegate',
           permissions: ['Payment'],
+          weight: 1,
           status: 'active',
+          pendingRevocation: false,
           createdAt: new Date(),
           revokedAt: null,
         },
@@ -190,6 +201,56 @@ describe('PermissionService', () => {
       });
       expect(result.tx_id).toBe('tx-uuid-1');
       expect(dbUpdateCalls.length).toBe(1);
+      // CRITICAL: must stage pendingRevocation, NOT flip status to 'revoked'.
+      // A failed on-chain tx with status='revoked' would leave the DB
+      // claiming revoked while the delegate still held signing authority.
+      expect(dbUpdateCalls[0]).toEqual({ pendingRevocation: true });
+    });
+
+    it('threads delegationId into requestBody for the txConfirmer hook', async () => {
+      dbSelectResults.delegations = [
+        {
+          id: 'deleg-abc',
+          delegateAddress: 'rDelegate',
+          permissions: ['Payment'],
+          weight: 1,
+          status: 'active',
+          pendingRevocation: false,
+          createdAt: new Date(),
+          revokedAt: null,
+        },
+      ];
+      await revokePermission({
+        clientId: 'client-1',
+        delegatorAddress: 'rDelegator',
+        delegateAddress: 'rDelegate',
+      });
+      const txInsert = dbInsertCalls.find((c) => c.table === 'transactions');
+      const body = (txInsert?.values as { requestBody: Record<string, unknown> })?.requestBody;
+      expect(body?.op).toBe('revokePermission');
+      expect(body?.delegationId).toBe('deleg-abc');
+    });
+
+    it('rejects when delegation already has pendingRevocation=true', async () => {
+      dbSelectResults.delegations = [
+        {
+          id: 'deleg-1',
+          delegateAddress: 'rDelegate',
+          permissions: ['Payment'],
+          weight: 1,
+          status: 'active',
+          pendingRevocation: true,
+          createdAt: new Date(),
+          revokedAt: null,
+        },
+      ];
+      await expect(
+        revokePermission({
+          clientId: 'client-1',
+          delegatorAddress: 'rDelegator',
+          delegateAddress: 'rDelegate',
+        }),
+      ).rejects.toThrow(/pending revocation/);
     });
 
     it('throws not_found when delegation does not exist', async () => {

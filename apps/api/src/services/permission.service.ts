@@ -271,47 +271,125 @@ export async function revokePermission(input: RevokePermissionInput): Promise<{ 
     throw new PermissionServiceError('not_managed', 'Delegator address is not a managed account');
   }
 
-  const existing = await getActiveDelegations(input.clientId, input.delegatorAddress);
-  const delegation = existing.find((d) => d.delegateAddress === input.delegateAddress);
-  if (!delegation) {
-    throw new PermissionServiceError('not_found', 'No active delegation found for this delegate');
+  // REVIEW.md C-1 fix: wrap the delegation lookup, signer-list rebuild,
+  // transactions insert, and staging UPDATE in a single db.transaction
+  // with SELECT FOR UPDATE on the delegation row. The prior implementation
+  // flipped status='revoked' before the on-chain tx even submitted, so a
+  // failed SignerListSet would leave the DB saying "revoked" while the
+  // delegate still held signing authority on-ledger.
+  //
+  // Staging contract (mirrors the #22 domain pattern):
+  //   - This fn sets `pendingRevocation=true` (NOT status='revoked').
+  //   - Rejects if pendingRevocation is already true — one revoke in flight
+  //     at a time per delegation.
+  //   - txConfirmer.applyDelegationRevocationOutcome() commits on tesSUCCESS
+  //     (status='revoked', revokedAt=now, pendingRevocation=false) or
+  //     clears the flag on failure/expiry (leaves status='active').
+  let txId: string;
+  let txJson: ReturnType<typeof buildSignerListSet>;
+  try {
+    const result = await db.transaction(async (tx) => {
+      const lockedRows = await tx
+        .select({
+          id: schema.delegations.id,
+          delegateAddress: schema.delegations.delegateAddress,
+          permissions: schema.delegations.permissions,
+          weight: schema.delegations.weight,
+          status: schema.delegations.status,
+          pendingRevocation: schema.delegations.pendingRevocation,
+        })
+        .from(schema.delegations)
+        .where(
+          and(
+            eq(schema.delegations.clientId, input.clientId),
+            eq(schema.delegations.delegatorAddress, input.delegatorAddress),
+            eq(schema.delegations.delegateAddress, input.delegateAddress),
+            eq(schema.delegations.status, 'active'),
+          ),
+        )
+        .for('update')
+        .limit(1);
+
+      const delegation = lockedRows[0];
+      if (!delegation) {
+        throw new PermissionServiceError(
+          'not_found',
+          'No active delegation found for this delegate',
+        );
+      }
+      if (delegation.pendingRevocation) {
+        throw new PermissionServiceError(
+          'invalid_input',
+          'Delegation has a pending revocation — wait for on-chain confirmation',
+        );
+      }
+
+      // Load siblings for signer-list rebuild. Siblings stay active even
+      // when the target is being revoked, so we query with the same
+      // helper; we just exclude the target in the map below.
+      const siblings = await getActiveDelegations(input.clientId, input.delegatorAddress);
+      const remainingSigners = siblings
+        .filter((d) => d.delegateAddress !== input.delegateAddress)
+        .map((d) => ({ address: d.delegateAddress, weight: d.weight }));
+
+      // If no signers remain, quorum=0 + empty list deletes the signer list.
+      const builtTxJson = buildSignerListSet({
+        account: input.delegatorAddress,
+        signerQuorum: remainingSigners.length > 0 ? 1 : 0,
+        signerEntries: remainingSigners,
+      });
+
+      const txInserted = await tx
+        .insert(schema.transactions)
+        .values({
+          clientId: input.clientId,
+          txType: 'SignerListSet',
+          sourceAddress: input.delegatorAddress,
+          status: 'queued',
+          idempotencyKey: input.idempotencyKey,
+          requestBody: {
+            op: 'revokePermission',
+            delegationId: delegation.id,
+            delegator: input.delegatorAddress,
+            delegate: input.delegateAddress,
+          },
+        })
+        .returning({ id: schema.transactions.id });
+      const txRow = txInserted[0];
+      if (!txRow) {
+        throw new PermissionServiceError('db_conflict', 'transactions insert returned no row');
+      }
+
+      // Stage the revocation. Guarded by status='active' + pendingRevocation=false
+      // so a race between this and the FOR UPDATE-released rollback can't
+      // double-stage.
+      await tx
+        .update(schema.delegations)
+        .set({ pendingRevocation: true })
+        .where(eq(schema.delegations.id, delegation.id));
+
+      return {
+        txId: txRow.id,
+        txJson: builtTxJson,
+        delegationId: delegation.id,
+      };
+    });
+    txId = result.txId;
+    txJson = result.txJson;
+  } catch (err) {
+    if (err instanceof PermissionServiceError) throw err;
+    // UNIQUE(client_id, idempotency_key) collision — same idempotency-key
+    // replay. Surface as db_conflict (409), mirroring acceptCredential.
+    if (
+      err &&
+      typeof err === 'object' &&
+      'code' in err &&
+      (err as { code: string }).code === '23505'
+    ) {
+      throw new PermissionServiceError('db_conflict', 'Duplicate idempotency key (retry)');
+    }
+    throw err;
   }
-
-  // Rebuild the signer list without the revoked delegate.
-  const remainingSigners = existing
-    .filter((d) => d.delegateAddress !== input.delegateAddress)
-    .map((d) => ({ address: d.delegateAddress, weight: d.weight }));
-
-  // If no signers remain, quorum=0 + empty list deletes the signer list.
-  const txJson = buildSignerListSet({
-    account: input.delegatorAddress,
-    signerQuorum: remainingSigners.length > 0 ? 1 : 0,
-    signerEntries: remainingSigners,
-  });
-
-  const txInserted = await db
-    .insert(schema.transactions)
-    .values({
-      clientId: input.clientId,
-      txType: 'SignerListSet',
-      sourceAddress: input.delegatorAddress,
-      status: 'queued',
-      idempotencyKey: input.idempotencyKey,
-      requestBody: {
-        op: 'revokePermission',
-        delegator: input.delegatorAddress,
-        delegate: input.delegateAddress,
-      },
-    })
-    .returning({ id: schema.transactions.id });
-  const txId = txInserted[0]?.id;
-  if (!txId) throw new PermissionServiceError('db_conflict', 'transactions insert returned no row');
-
-  // Soft-revoke the delegation.
-  await db
-    .update(schema.delegations)
-    .set({ status: 'revoked', revokedAt: new Date() })
-    .where(eq(schema.delegations.id, delegation.id));
 
   try {
     await enqueueTxSubmit({
@@ -324,7 +402,7 @@ export async function revokePermission(input: RevokePermissionInput): Promise<{ 
     throw new PermissionServiceError('enqueue_failed', 'Failed to enqueue permission revocation');
   }
 
-  log.info({ delegationId: delegation.id, txId }, 'permission revocation enqueued');
+  log.info({ txId }, 'permission revocation enqueued');
   return { tx_id: txId };
 }
 
