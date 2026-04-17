@@ -1,4 +1,5 @@
 import { Hono } from 'hono';
+import { bodyLimit } from 'hono/body-limit';
 import { logger } from './logger.ts';
 import { auditLog } from './middleware/auditLog.ts';
 import { auth } from './middleware/auth.ts';
@@ -41,6 +42,15 @@ app.get('/health', (c) => c.json({ status: 'ok' }));
 //   5. idempotency — enforces Idempotency-Key on state-changing methods.
 //   6. auditLog    — logs POST/PUT/DELETE to audit_log table (fire-and-forget).
 const v1 = new Hono<AppEnv>();
+// REVIEW.md L-3: cap request body to 1 MB. Without this, an attacker can
+// POST a multi-GB JSON payload and tie up a worker thread + memory.
+v1.use(
+  '*',
+  bodyLimit({
+    maxSize: 1024 * 1024,
+    onError: (c) => c.json({ error: 'Request body too large (max 1 MB)' }, 413),
+  }),
+);
 v1.use('*', ipRateLimit);
 v1.use('*', auth);
 v1.use('*', envGuard);
