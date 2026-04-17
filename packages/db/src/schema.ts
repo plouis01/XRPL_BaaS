@@ -237,6 +237,12 @@ export const transactions = pgTable(
     idempotencyKey: text('idempotency_key'),
     txType: text('tx_type').notNull(),
     sourceAddress: text('source_address').notNull(),
+    // REVIEW.md L-2: this column MUST stay NULL. The txSubmitter
+    // intentionally does NOT persist signed blobs (verified by the
+    // integration test invariant "txBlob is null"). The column exists
+    // for potential future forensic use only. If you're tempted to
+    // populate it "for debugging," don't — tx_blob is signature
+    // material and has no business sitting in Postgres long-term.
     txBlob: text('tx_blob'),
     txHash: text('tx_hash'),
     status: text('status').notNull().default('queued'),
