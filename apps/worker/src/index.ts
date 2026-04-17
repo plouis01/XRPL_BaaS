@@ -7,7 +7,11 @@ import { startTxConfirmWorker } from './jobs/txConfirmer.ts';
 import { startTxSubmitWorker } from './jobs/txSubmitter.ts';
 import { startWebhookDeliveryWorker } from './jobs/webhookDelivery.ts';
 import { logger } from './logger.ts';
-import { disconnectWorker, getSigner } from './queues.ts';
+import { assertMainnetHsmInvariant, disconnectWorker, getSigner } from './queues.ts';
+
+// HSM Phase 3 preflight: mainnet without HSM is a non-starter. Surface the
+// misconfig at boot rather than on the first tx.
+assertMainnetHsmInvariant();
 
 const redisUrl = process.env.REDIS_URL ?? 'redis://localhost:6379';
 const workerRedis = new Redis(redisUrl, {

@@ -62,7 +62,23 @@ export function getSigner(): Signer {
   // HSM Phase 2: pick signer based on HSM_PROVIDER env var.
   //   - 'aws_cloudhsm' → HsmSigner (prod, requires CloudHSM client daemon)
   //   - anything else   → DevSigner (dev/test; refuses NODE_ENV=production)
-  if (process.env.HSM_PROVIDER === 'aws_cloudhsm') {
+  //
+  // HSM Phase 3 guard: on mainnet, DevSigner is NEVER acceptable. A prod
+  // misconfig that silently falls back to DevSigner would sign real-money
+  // txs with a software-held key. Fail fast at signer-selection time so
+  // the worker refuses to start processing rather than producing one
+  // unsafe signature before anyone notices. Also enforced as a dedicated
+  // boot preflight (assertMainnetHsmInvariant) so the worker exits 1 on
+  // startup rather than on first tx.
+  const network = process.env.XRPL_NETWORK ?? 'testnet';
+  const provider = process.env.HSM_PROVIDER;
+  if (network === 'mainnet' && provider !== 'aws_cloudhsm') {
+    throw new Error(
+      'refusing to sign mainnet txs without HSM: set HSM_PROVIDER=aws_cloudhsm ' +
+        '(XRPL_NETWORK=mainnet requires a hardware signer)',
+    );
+  }
+  if (provider === 'aws_cloudhsm') {
     signer = new HsmSigner({
       slotId: Number(process.env.HSM_SLOT ?? '0'),
       pin: `${process.env.HSM_CU_USERNAME ?? ''}:${process.env.HSM_CU_PASSWORD ?? ''}`,
@@ -72,6 +88,23 @@ export function getSigner(): Signer {
     signer = new DevSigner();
   }
   return signer;
+}
+
+/**
+ * Boot-time preflight: refuse to start the worker if we're pointed at
+ * mainnet without an HSM-backed signer. Exists separately from
+ * getSigner() so the failure is surfaced at process start rather than
+ * on the first tx enqueue. Throws — callers should let the error bubble
+ * up and exit the process.
+ */
+export function assertMainnetHsmInvariant(): void {
+  const network = process.env.XRPL_NETWORK ?? 'testnet';
+  const provider = process.env.HSM_PROVIDER;
+  if (network === 'mainnet' && provider !== 'aws_cloudhsm') {
+    throw new Error(
+      'mainnet boot blocked: XRPL_NETWORK=mainnet requires HSM_PROVIDER=aws_cloudhsm',
+    );
+  }
 }
 
 // Tests and graceful shutdown use this.
