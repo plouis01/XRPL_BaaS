@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
+import { ApiError, api } from '../api.ts';
 import type { Network, Transaction } from '../types.ts';
-
-const API_BASE = import.meta.env.VITE_API_BASE ?? 'http://localhost:3000';
 
 const STATUS_COLORS: Record<Transaction['status'], { bg: string; color: string }> = {
   queued: { bg: '#e0e7ff', color: '#3730a3' },
@@ -17,13 +16,13 @@ export function Transactions({ network }: { network: Network }) {
   const fetchTxs = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await fetch(`${API_BASE}/v1/dashboard/transactions?network=${network}&limit=50`, {
-        credentials: 'include',
-      });
-      if (res.ok) {
-        const data = (await res.json()) as { data: Transaction[] };
-        setTxs(data.data);
-      }
+      const data = await api<{ data: Transaction[] }>(
+        `/v1/dashboard/transactions?network=${network}&limit=50`,
+      );
+      setTxs(data.data);
+    } catch (err) {
+      if (!(err instanceof ApiError)) throw err;
+      setTxs([]);
     } finally {
       setLoading(false);
     }

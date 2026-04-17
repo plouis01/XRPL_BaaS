@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
+import { ApiError, api } from '../api.ts';
 import type { ApiKey, Network } from '../types.ts';
-
-const API_BASE = import.meta.env.VITE_API_BASE ?? 'http://localhost:3000';
 
 export function ApiKeys({ network }: { network: Network }) {
   const [keys, setKeys] = useState<ApiKey[]>([]);
@@ -11,13 +10,11 @@ export function ApiKeys({ network }: { network: Network }) {
   const fetchKeys = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await fetch(`${API_BASE}/v1/dashboard/keys?environment=${network}`, {
-        credentials: 'include',
-      });
-      if (res.ok) {
-        const data = (await res.json()) as { data: ApiKey[] };
-        setKeys(data.data);
-      }
+      const data = await api<{ data: ApiKey[] }>(`/v1/dashboard/keys?environment=${network}`);
+      setKeys(data.data);
+    } catch (err) {
+      if (!(err instanceof ApiError)) throw err;
+      setKeys([]);
     } finally {
       setLoading(false);
     }
@@ -28,24 +25,26 @@ export function ApiKeys({ network }: { network: Network }) {
   }, [fetchKeys]);
 
   const createKey = async () => {
-    const res = await fetch(`${API_BASE}/v1/dashboard/keys`, {
-      method: 'POST',
-      credentials: 'include',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ environment: network }),
-    });
-    if (res.ok) {
-      const data = (await res.json()) as { api_key: string; prefix: string };
-      setNewKeySecret(data.api_key);
+    try {
+      const data = await api<{ key: string; prefix: string }>('/v1/dashboard/keys', {
+        method: 'POST',
+        body: { environment: network },
+      });
+      setNewKeySecret(data.key);
       void fetchKeys();
+    } catch (err) {
+      if (!(err instanceof ApiError)) throw err;
     }
   };
 
   const revokeKey = async (keyId: string) => {
-    await fetch(`${API_BASE}/v1/dashboard/keys/${keyId}/revoke`, {
-      method: 'POST',
-      credentials: 'include',
-    });
+    try {
+      await api<{ revoked: boolean }>(`/v1/dashboard/keys/${keyId}/revoke`, {
+        method: 'POST',
+      });
+    } catch (err) {
+      if (!(err instanceof ApiError)) throw err;
+    }
     void fetchKeys();
   };
 

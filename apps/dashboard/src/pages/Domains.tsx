@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
+import { ApiError, api } from '../api.ts';
 import type { Domain, Network } from '../types.ts';
-
-const API_BASE = import.meta.env.VITE_API_BASE ?? 'http://localhost:3000';
 
 export function Domains({ network }: { network: Network }) {
   const [domains, setDomains] = useState<Domain[]>([]);
@@ -10,13 +9,11 @@ export function Domains({ network }: { network: Network }) {
   const fetchDomains = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await fetch(`${API_BASE}/v1/dashboard/domains?environment=${network}`, {
-        credentials: 'include',
-      });
-      if (res.ok) {
-        const data = (await res.json()) as { data: Domain[] };
-        setDomains(data.data);
-      }
+      const data = await api<{ data: Domain[] }>(`/v1/dashboard/domains?environment=${network}`);
+      setDomains(data.data);
+    } catch (err) {
+      if (!(err instanceof ApiError)) throw err;
+      setDomains([]);
     } finally {
       setLoading(false);
     }
