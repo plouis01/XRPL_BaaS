@@ -87,6 +87,14 @@ vi.mock('@railforge/jobs', () => ({
       throw err;
     }
   }),
+  enqueueAccountSetup: vi.fn(async (data: unknown) => {
+    enqueueCalls.push(data);
+    if (enqueueShouldThrow.err) {
+      const err = enqueueShouldThrow.err;
+      enqueueShouldThrow.err = null;
+      throw err;
+    }
+  }),
 }));
 
 vi.mock('./spendPolicy.service.ts', () => ({

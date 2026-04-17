@@ -31,7 +31,7 @@
 // packages/logger/src/index.ts.
 
 import { and, db, eq, isNull, schema } from '@railforge/db';
-import { enqueueTxSubmit } from '@railforge/jobs';
+import { enqueueAccountSetup, enqueueTxSubmit } from '@railforge/jobs';
 import {
   buildAccountDelete,
   buildSetRegularKey,
@@ -120,46 +120,89 @@ export async function createAccount(input: CreateAccountInput): Promise<AccountV
     );
   }
 
-  // 2. Generate a fresh wallet. Wallet.generate() produces a keypair with
-  // a non-null seed; we assert it for the type system.
+  // ── HSM mode ───────────────────────────────────────────────────────────
+  // When HSM_PROVIDER=aws_cloudhsm, keypair generation happens in the HSM
+  // (worker-side) because the private key must never leave the HSM. The API
+  // inserts a placeholder accounts row and enqueues an ACCOUNT_SETUP job.
+  // The worker generates the key, updates the row with the real address +
+  // label, then enqueues the funding tx. The client polls by id.
+  if (process.env.HSM_PROVIDER === 'aws_cloudhsm') {
+    await enforceSpendPolicy(input.clientId, FUNDING_AMOUNT_DROPS);
+
+    const placeholderAddress = `pending-${crypto.randomUUID()}`;
+    const acctInserted = await db
+      .insert(schema.accounts)
+      .values({
+        clientId: input.clientId,
+        address: placeholderAddress,
+        masterKeyRef: 'pending',
+        regularKey: null,
+        custodyMode: input.custodyMode ?? 'semi',
+        label: input.label ?? null,
+        isFunded: false,
+        reserveBalance: '0',
+        metadata: {},
+      })
+      .returning({ id: schema.accounts.id });
+    const acctRow = acctInserted[0];
+    if (!acctRow) {
+      throw new AccountServiceError('db_conflict', 'accounts insert returned no row');
+    }
+
+    try {
+      await enqueueAccountSetup({
+        accountId: acctRow.id,
+        clientId: input.clientId,
+        treasuryAddress,
+        fundingAmountDrops: FUNDING_AMOUNT_DROPS,
+        label: input.label,
+        custodyMode: input.custodyMode ?? 'semi',
+      });
+    } catch (err) {
+      log.error({ err }, 'enqueueAccountSetup failed after DB commit');
+      throw new AccountServiceError(
+        'enqueue_failed',
+        'Failed to enqueue account setup — account row exists but is unfunded',
+      );
+    }
+
+    log.info({ accountId: acctRow.id }, 'HSM account setup enqueued');
+
+    return {
+      id: acctRow.id,
+      address: placeholderAddress,
+      regularKey: null,
+      custodyMode: input.custodyMode ?? 'semi',
+      label: input.label ?? null,
+      isFunded: false,
+      reserveBalance: '0',
+      fundingTxId: null,
+      createdAt: new Date(),
+    };
+  }
+
+  // ── DevSigner mode (dev/test) ─────────────────────────────────────────
+  // Generate a keypair locally and persist the seed in master_key_ref.
+  // The worker reconstructs the Wallet via loadKey(address, seed).
+
   const wallet = Wallet.generate();
   if (!wallet.seed) {
     throw new Error('Wallet.generate() returned no seed — should never happen');
   }
   const address = wallet.classicAddress;
 
-  // 3. Build the funding Payment. This is the same builder the token
-  // service uses for any XRP payment — treasury funding is just a
-  // Payment tx with specific source and destination.
   const txJson = buildXrpPayment({
     account: treasuryAddress,
     destination: address,
     amountDrops: FUNDING_AMOUNT_DROPS,
   });
 
-  // 3b. Spend policy check — account funding is an XRP payment from the
-  // treasury on behalf of this client. The spend policy limits apply to
-  // the client's cumulative XRP spend, not the treasury's.
   await enforceSpendPolicy(input.clientId, FUNDING_AMOUNT_DROPS);
 
-  // 4. Persist account + transactions row in a single DB transaction.
-  //
-  // Order matters: we insert the tx row first to get its id, then insert
-  // the account row with funding_tx_id already populated. Doing it the
-  // other way would require an UPDATE to backfill funding_tx_id, which
-  // would leave a brief window where the account row exists without a
-  // link to its funding tx. One atomic write is cleaner.
-  //
-  // If the wallet address collides with an existing row (2^-128 odds,
-  // but we handle it cleanly), Postgres returns 23505 which we translate
-  // to AccountServiceError('db_conflict').
   let accountId: string;
   let txId: string;
   try {
     const result = await db.transaction(async (tx) => {
-      // a. Insert the queued transactions row. sourceAddress is the
-      // treasury's address — the worker's signer must hold that key, or
-      // the job will fail with SIGNER_NO_KEY at submission time.
       const txInserted = await tx
         .insert(schema.transactions)
         .values({
@@ -168,9 +211,6 @@ export async function createAccount(input: CreateAccountInput): Promise<AccountV
           sourceAddress: treasuryAddress,
           status: 'queued',
           amountDrops: FUNDING_AMOUNT_DROPS,
-          // request_body is jsonb NOT NULL. Stash enough context for a
-          // debugging operator to understand why this tx exists without
-          // having to join other tables.
           requestBody: {
             purpose: 'account_funding',
             destination: address,
@@ -183,8 +223,6 @@ export async function createAccount(input: CreateAccountInput): Promise<AccountV
         throw new AccountServiceError('db_conflict', 'transactions insert returned no row');
       }
 
-      // b. Insert the account row, pre-linked to the funding tx. The
-      // txConfirmer will flip is_funded=true when the Payment validates.
       const acctInserted = await tx
         .insert(schema.accounts)
         .values({
@@ -210,10 +248,6 @@ export async function createAccount(input: CreateAccountInput): Promise<AccountV
     accountId = result.accountId;
     txId = result.txId;
   } catch (err) {
-    // Postgres unique-violation — either the wallet address collided
-    // (astronomically unlikely) or the idempotency-key unique constraint
-    // hit. Treat both as db_conflict; the client retries with a new
-    // idempotency key.
     if (
       err &&
       typeof err === 'object' &&
@@ -225,20 +259,8 @@ export async function createAccount(input: CreateAccountInput): Promise<AccountV
     throw err;
   }
 
-  // 5. Enqueue the tx-submit job. Done AFTER the DB commit so we never
-  // enqueue a job that references an uncommitted row. If the enqueue
-  // itself fails (Redis down, BullMQ error), the DB rows exist but no
-  // job is queued — an orphan state. A future reconciliation job can
-  // sweep orphaned 'queued' rows. For Sprint 3 we surface the failure
-  // to the client and accept the orphan; the alternative (rolling back
-  // the DB write) would require a second write and doesn't eliminate
-  // the race anyway.
   try {
-    await enqueueTxSubmit({
-      txId,
-      sourceAddress: treasuryAddress,
-      txJson,
-    });
+    await enqueueTxSubmit({ txId, sourceAddress: treasuryAddress, txJson });
   } catch (err) {
     log.error({ err }, 'enqueueTxSubmit failed after DB commit');
     throw new AccountServiceError(
@@ -249,8 +271,6 @@ export async function createAccount(input: CreateAccountInput): Promise<AccountV
 
   log.info({ address, txId }, 'account created, funding enqueued');
 
-  // 6. Return a redacted view. is_funded is FALSE — the client polls to
-  // observe the flip after the worker confirms the payment (~4s).
   return {
     id: accountId,
     address,

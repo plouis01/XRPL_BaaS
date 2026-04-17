@@ -28,6 +28,7 @@ import { Redis } from 'ioredis';
 export const TX_SUBMIT_QUEUE = 'railforge-tx-submit';
 export const TX_CONFIRM_QUEUE = 'railforge-tx-confirm';
 export const WEBHOOK_DELIVERY_QUEUE = 'railforge-webhook-delivery';
+export const ACCOUNT_SETUP_QUEUE = 'railforge-account-setup';
 
 // ── Job payload shapes ──────────────────────────────────────────────────────
 
@@ -69,6 +70,28 @@ export interface WebhookDeliveryJobData {
   deliveryId: string;
   /** webhook_endpoints.id — the destination subscription. */
   endpointId: string;
+}
+
+/**
+ * HSM Phase 2: when HSM_PROVIDER=aws_cloudhsm, the API can't generate a
+ * keypair itself (the key must never leave the HSM). Instead it inserts
+ * a placeholder accounts row and enqueues this job. The worker generates
+ * the keypair in the HSM, updates the row with the real address + label,
+ * and enqueues the funding tx.
+ */
+export interface AccountSetupJobData {
+  /** accounts.id — the placeholder row the worker will update. */
+  accountId: string;
+  /** clients.id — needed for the transactions row + spend policy. */
+  clientId: string;
+  /** Treasury XRPL address for the funding Payment. */
+  treasuryAddress: string;
+  /** Funding amount in drops. */
+  fundingAmountDrops: string;
+  /** Optional label for the account. */
+  label?: string;
+  /** Custody mode. */
+  custodyMode: string;
 }
 
 // ── Redis connection singleton ─────────────────────────────────────────────
@@ -164,6 +187,27 @@ export async function enqueueWebhookDelivery(data: WebhookDeliveryJobData): Prom
   await queue.add('deliver', data);
 }
 
+let accountSetupQueue: Queue<AccountSetupJobData> | null = null;
+
+function getAccountSetupQueue(): Queue<AccountSetupJobData> {
+  if (accountSetupQueue) return accountSetupQueue;
+  accountSetupQueue = new Queue<AccountSetupJobData>(ACCOUNT_SETUP_QUEUE, {
+    connection: getJobsRedis(),
+    defaultJobOptions: {
+      attempts: 3,
+      backoff: { type: 'exponential', delay: 2000 },
+      removeOnComplete: { count: 1000 },
+      removeOnFail: { count: 1000 },
+    },
+  });
+  return accountSetupQueue;
+}
+
+export async function enqueueAccountSetup(data: AccountSetupJobData): Promise<void> {
+  const queue = getAccountSetupQueue();
+  await queue.add('setup', data);
+}
+
 // ── Teardown ────────────────────────────────────────────────────────────────
 
 export async function disconnectJobs(): Promise<void> {
@@ -171,10 +215,12 @@ export async function disconnectJobs(): Promise<void> {
     txSubmitQueue?.close(),
     txConfirmQueue?.close(),
     webhookDeliveryQueue?.close(),
+    accountSetupQueue?.close(),
   ]);
   txSubmitQueue = null;
   txConfirmQueue = null;
   webhookDeliveryQueue = null;
+  accountSetupQueue = null;
   await redisConnection?.quit();
   redisConnection = null;
 }

@@ -1,5 +1,6 @@
 import { Queue } from 'bullmq';
 import { Redis } from 'ioredis';
+import { startAccountSetupWorker } from './jobs/accountSetup.ts';
 import { CREDENTIAL_EXPIRY_QUEUE, startCredentialExpiryWorker } from './jobs/credentialExpiry.ts';
 import { ORPHAN_RECONCILER_QUEUE, startOrphanReconcilerWorker } from './jobs/orphanReconciler.ts';
 import { startTxConfirmWorker } from './jobs/txConfirmer.ts';
@@ -72,6 +73,7 @@ const txConfirmWorker = startTxConfirmWorker(workerRedis);
 const webhookDeliveryWorker = startWebhookDeliveryWorker(workerRedis);
 const credentialExpiryWorker = startCredentialExpiryWorker(workerRedis);
 const orphanReconcilerWorker = startOrphanReconcilerWorker(workerRedis);
+const accountSetupWorker = startAccountSetupWorker(workerRedis);
 
 // Orphan reconciler repeat schedule (PLAN.md §9.2 G-1).
 //
@@ -129,6 +131,7 @@ logger.info(
       'webhook-delivery',
       'credential-expiry',
       'orphan-reconciler',
+      'account-setup',
     ],
     redis: redisUrl,
     network: process.env.XRPL_NETWORK ?? 'testnet',
@@ -145,6 +148,7 @@ async function shutdown(signal: string): Promise<void> {
     webhookDeliveryWorker.close(),
     credentialExpiryWorker.close(),
     orphanReconcilerWorker.close(),
+    accountSetupWorker.close(),
     orphanReconcilerScheduleQueue.close(),
     credentialExpiryScheduleQueue.close(),
   ]);
