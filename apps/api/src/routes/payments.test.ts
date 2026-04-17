@@ -5,6 +5,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AppEnv } from '../types.ts';
 
 const mockSendPayment = vi.fn();
+const mockSendBatchPayments = vi.fn();
 const mockGetPayment = vi.fn();
 const mockCreateEscrow = vi.fn();
 const mockFinishEscrow = vi.fn();
@@ -12,6 +13,7 @@ const mockCancelEscrow = vi.fn();
 
 vi.mock('../services/payment.service.ts', () => ({
   sendPayment: (...args: unknown[]) => mockSendPayment(...args),
+  sendBatchPayments: (...args: unknown[]) => mockSendBatchPayments(...args),
   getPayment: (...args: unknown[]) => mockGetPayment(...args),
   createEscrow: (...args: unknown[]) => mockCreateEscrow(...args),
   finishEscrow: (...args: unknown[]) => mockFinishEscrow(...args),
@@ -206,8 +208,106 @@ describe('POST /payments/escrows', () => {
   });
 });
 
-describe('POST /payments/batch', () => {
-  it('501 not implemented', async () => {
+describe('POST /payments/batch (XLS-56 sequential fallback)', () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  function validBody(overrides: Record<string, unknown> = {}) {
+    return {
+      payments: [
+        {
+          source: VALID_SRC,
+          destination: VALID_DST,
+          amount_drops: '1000000',
+        },
+        {
+          source: VALID_SRC,
+          destination: VALID_DST,
+          amount_drops: '2000000',
+        },
+      ],
+      ...overrides,
+    };
+  }
+
+  it('202 when all items queue successfully', async () => {
+    mockSendBatchPayments.mockResolvedValue({
+      mode: 'UNTIL_FAILURE',
+      results: [
+        { index: 0, txId: 'tx-a', status: 'queued' },
+        { index: 1, txId: 'tx-b', status: 'queued' },
+      ],
+    });
+
+    const app = makeApp();
+    const res = await app.request('/payments/batch', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(validBody()),
+    });
+
+    expect(res.status).toBe(202);
+    const body = (await res.json()) as {
+      mode: string;
+      results: Array<{ index: number; tx_id: string | null; status: string }>;
+    };
+    expect(body.mode).toBe('UNTIL_FAILURE');
+    expect(body.results).toHaveLength(2);
+    expect(body.results[0]?.tx_id).toBe('tx-a');
+  });
+
+  it('207 Multi-Status when some items errored', async () => {
+    mockSendBatchPayments.mockResolvedValue({
+      mode: 'INDEPENDENT',
+      results: [
+        { index: 0, txId: 'tx-a', status: 'queued' },
+        {
+          index: 1,
+          txId: null,
+          status: 'error',
+          errorCode: 'source_not_funded',
+          errorMessage: 'Source account is not yet funded',
+        },
+      ],
+    });
+
+    const app = makeApp();
+    const res = await app.request('/payments/batch', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(validBody({ mode: 'INDEPENDENT' })),
+    });
+
+    expect(res.status).toBe(207);
+    const body = (await res.json()) as {
+      results: Array<{ status: string; error_code?: string }>;
+    };
+    expect(body.results[1]?.status).toBe('error');
+    expect(body.results[1]?.error_code).toBe('source_not_funded');
+  });
+
+  it('400 rejects ALL_OR_NOTHING mode (needs XLS-56 V1.1)', async () => {
+    const app = makeApp();
+    const res = await app.request('/payments/batch', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(validBody({ mode: 'ALL_OR_NOTHING' })),
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it('400 rejects fewer than 2 payments', async () => {
+    const app = makeApp();
+    const res = await app.request('/payments/batch', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        payments: [{ source: VALID_SRC, destination: VALID_DST, amount_drops: '100' }],
+      }),
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it('400 on empty body', async () => {
     const app = makeApp();
     const res = await app.request('/payments/batch', {
       method: 'POST',
@@ -215,6 +315,6 @@ describe('POST /payments/batch', () => {
       body: JSON.stringify({}),
     });
 
-    expect(res.status).toBe(501);
+    expect(res.status).toBe(400);
   });
 });

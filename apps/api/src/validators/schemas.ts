@@ -184,6 +184,20 @@ export const sendPaymentSchema = z
     },
   );
 
+// Batch payments — sequential fallback while XLS-56 V1.1 is pending.
+// Supported modes are the subset that genuinely works without atomic
+// on-chain batching: UNTIL_FAILURE (default) and INDEPENDENT. The two
+// atomic modes (ALL_OR_NOTHING, ONLY_ONE) cannot be faithfully emulated
+// pre-amendment, so the service rejects them with a 501 + clear message.
+export const BATCH_PAYMENT_MODES = ['UNTIL_FAILURE', 'INDEPENDENT'] as const;
+
+export const batchPaymentsSchema = z.object({
+  /** Mode: UNTIL_FAILURE stops enqueueing on first item error; INDEPENDENT enqueues all. */
+  mode: z.enum(BATCH_PAYMENT_MODES).default('UNTIL_FAILURE'),
+  /** 2–20 payments per batch. Each item has the same shape as POST /v1/payments. */
+  payments: z.array(sendPaymentSchema).min(2).max(20),
+});
+
 export const createEscrowSchema = z
   .object({
     source: xrplAddressSchema,

@@ -5,7 +5,7 @@
 // POST   /v1/payments/escrows           → create escrow
 // POST   /v1/payments/escrows/:id/finish → finish escrow
 // POST   /v1/payments/escrows/:id/cancel → cancel escrow
-// POST   /v1/payments/batch             → TODO (XLS-56 V1.1 pending)
+// POST   /v1/payments/batch             → sequential fallback for XLS-56 (pre-amendment)
 //
 // All payments are idempotent — middleware enforces the Idempotency-Key header.
 
@@ -18,10 +18,12 @@ import {
   createEscrow,
   finishEscrow,
   getPayment,
+  sendBatchPayments,
   sendPayment,
 } from '../services/payment.service.ts';
 import type { AppEnv } from '../types.ts';
 import {
+  batchPaymentsSchema,
   cancelEscrowSchema,
   createEscrowSchema,
   finishEscrowSchema,
@@ -158,7 +160,46 @@ payments.post('/escrows/:id/cancel', zValidator('json', cancelEscrowSchema), asy
   }
 });
 
-// Batch payments (XLS-56 V1.1 pending — see ARCHITECTURE.md §6).
-payments.post('/batch', (c) => c.json({ error: 'not implemented' }, 501));
+// Batch payments — pre-XLS-56 sequential fallback. Supports UNTIL_FAILURE
+// (default) and INDEPENDENT. ALL_OR_NOTHING and ONLY_ONE are explicitly
+// rejected at the schema layer; the service only accepts the two modes
+// that can be faithfully emulated without atomic on-chain batching.
+payments.post('/batch', zValidator('json', batchPaymentsSchema), async (c) => {
+  const clientId = c.get('clientId');
+  const body = c.req.valid('json');
+
+  const result = await sendBatchPayments({
+    clientId,
+    mode: body.mode,
+    payments: body.payments.map((p) => ({
+      source: p.source,
+      destination: p.destination,
+      destinationTag: p.destination_tag,
+      memo: p.memo,
+      amountDrops: p.amount_drops,
+      mptIssuanceId: p.mpt_issuance_id,
+      value: p.value,
+      currency: p.currency,
+      issuer: p.issuer,
+    })),
+  });
+
+  // 207 Multi-Status when any item errored; otherwise 202 Accepted.
+  const anyError = result.results.some((r) => r.status === 'error');
+  const status = anyError ? 207 : 202;
+  return c.json(
+    {
+      mode: result.mode,
+      results: result.results.map((r) => ({
+        index: r.index,
+        tx_id: r.txId,
+        status: r.status,
+        error_code: r.errorCode,
+        error_message: r.errorMessage,
+      })),
+    },
+    status,
+  );
+});
 
 export default payments;

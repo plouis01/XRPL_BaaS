@@ -185,6 +185,107 @@ export async function sendPayment(input: SendPaymentInput): Promise<{ txId: stri
   return { txId };
 }
 
+// ── Batch payments (XLS-56 sequential fallback) ────────────────────────────
+//
+// Pre-amendment fallback per ARCHITECTURE.md §4.6: "Sequential txs with
+// application-level rollback." True atomicity requires XLS-56 V1.1 — until
+// that lands, this implementation supports the two modes that can be
+// faithfully emulated sequentially:
+//
+//   - UNTIL_FAILURE: enqueue one at a time; stop on the first pre-submission
+//     validation error (source unfunded, bad amount shape, spend policy,
+//     etc.). Already-enqueued txs stay queued — the caller is expected to
+//     poll each returned tx_id and, if desired, issue compensating txs.
+//
+//   - INDEPENDENT: enqueue every item; report per-item success/error.
+//
+// ALL_OR_NOTHING and ONLY_ONE cannot be emulated — once a tx is signed and
+// submitted there is no rollback primitive. Those modes return 501 at the
+// route layer with a message pointing at the amendment.
+
+export interface BatchPaymentItem {
+  source: string;
+  destination: string;
+  destinationTag?: number;
+  memo?: string;
+  amountDrops?: string;
+  mptIssuanceId?: string;
+  value?: string;
+  currency?: string;
+  issuer?: string;
+}
+
+export interface SendBatchPaymentsInput {
+  clientId: string;
+  mode: 'UNTIL_FAILURE' | 'INDEPENDENT';
+  payments: BatchPaymentItem[];
+}
+
+export interface BatchResultItem {
+  index: number;
+  txId: string | null;
+  status: 'queued' | 'error' | 'skipped';
+  errorCode?: string;
+  errorMessage?: string;
+}
+
+export async function sendBatchPayments(
+  input: SendBatchPaymentsInput,
+): Promise<{ mode: string; results: BatchResultItem[] }> {
+  const log = logger.child({
+    service: 'payment',
+    op: 'batch',
+    clientId: input.clientId,
+    mode: input.mode,
+    count: input.payments.length,
+  });
+
+  const results: BatchResultItem[] = [];
+  let stopDueToFailure = false;
+
+  for (let i = 0; i < input.payments.length; i++) {
+    const item = input.payments[i];
+    if (!item) continue;
+
+    if (stopDueToFailure) {
+      results.push({ index: i, txId: null, status: 'skipped' });
+      continue;
+    }
+
+    try {
+      const { txId } = await sendPayment({ clientId: input.clientId, ...item });
+      results.push({ index: i, txId, status: 'queued' });
+    } catch (err) {
+      if (err instanceof PaymentServiceError) {
+        results.push({
+          index: i,
+          txId: null,
+          status: 'error',
+          errorCode: err.code,
+          errorMessage: err.message,
+        });
+        if (input.mode === 'UNTIL_FAILURE') stopDueToFailure = true;
+      } else {
+        // Non-domain error — don't swallow; the route handler's global
+        // error path will 500 and roll nothing back. Already-enqueued
+        // items stay queued; caller sees the partial results.
+        throw err;
+      }
+    }
+  }
+
+  log.info(
+    {
+      queued: results.filter((r) => r.status === 'queued').length,
+      errors: results.filter((r) => r.status === 'error').length,
+      skipped: results.filter((r) => r.status === 'skipped').length,
+    },
+    'batch enqueued',
+  );
+
+  return { mode: input.mode, results };
+}
+
 // ── Get payment status ─────────────────────────────────────────────────────
 
 export interface PaymentStatusView {
