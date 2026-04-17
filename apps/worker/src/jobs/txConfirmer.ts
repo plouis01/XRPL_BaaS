@@ -10,7 +10,8 @@
 // backoff (~4s between polls, matching XRPL ledger close time). BullMQ's
 // `attempts` count gives us a natural upper bound on poll attempts; once
 // attempts are exhausted the job fails and the row is left in 'submitted'
-// state. A separate reconciliation job (deferred) would catch orphans.
+// state. The orphan-reconciler worker (jobs/orphanReconciler.ts) catches
+// these rows on its scheduled sweep.
 //
 // Sprint 3 webhook fan-out: when a tx validates (success OR failure), we
 // look up every active webhook_endpoints row for the client that
@@ -168,7 +169,7 @@ export async function processTxConfirmJob(job: Job<TxConfirmJobData>): Promise<v
   //
   // We only flip on tesSUCCESS. A failed funding payment leaves the
   // account row with is_funded=false; the orphan-account reconciler
-  // (deferred) will eventually surface it for manual review.
+  // (jobs/orphanReconciler.ts) surfaces it for manual review.
   //
   // Reserve balance: read it from the tx meta. The Payment Amount is
   // either a string (XRP drops) or an object (issued currency). For

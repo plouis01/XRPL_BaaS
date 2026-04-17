@@ -12,8 +12,9 @@
 //   on both ends. Hashing would prevent the worker from signing.
 //
 // - Listing endpoints does NOT include the secret. It's only returned at
-//   creation time. To rotate, the client deletes the old endpoint and
-//   creates a new one. (Sprint 4: rotate-secret endpoint.)
+//   creation time and once more on rotation via
+//   POST /webhooks/endpoints/:id/rotate-secret, which regenerates the
+//   secret in place (no delete/recreate required).
 //
 // - Cross-tenant isolation: every query is scoped by clientId. The
 //   handler reads clientId from the auth context, never the request body.
