@@ -11,6 +11,7 @@ import { ipRateLimit } from './middleware/ipRateLimit.ts';
 import { rateLimit } from './middleware/rateLimit.ts';
 import accountsRoute from './routes/accounts.ts';
 import credentialsRoute from './routes/credentials.ts';
+import dashboardRoute from './routes/dashboard.ts';
 import dexRoute from './routes/dex.ts';
 import domainsRoute from './routes/domains.ts';
 import paymentsRoute from './routes/payments.ts';
@@ -66,6 +67,7 @@ v1.route('/domains', domainsRoute);
 v1.route('/payments', paymentsRoute);
 v1.route('/dex', dexRoute);
 v1.route('/webhooks', webhooksRoute);
+v1.route('/dashboard', dashboardRoute);
 
 app.route('/v1', v1);
 
