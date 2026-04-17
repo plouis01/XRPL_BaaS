@@ -45,12 +45,24 @@ vi.mock('../middleware/revocationCheck.ts', () => ({
   revocationCheck: vi.fn(async (_c: unknown, next: () => Promise<void>) => next()),
 }));
 
+// Storage of the next `select()` result for the indexer-backed orderbook
+// path. Default empty — tests opt in by assigning before requesting.
+let nextOfferBookRows: unknown[] = [];
+
 vi.mock('@railforge/db', () => ({
-  db: {},
+  db: {
+    select: () => ({
+      from: () => ({
+        where: () => ({
+          limit: () => Promise.resolve(nextOfferBookRows),
+        }),
+      }),
+    }),
+  },
   eq: vi.fn(),
   and: vi.fn(),
   isNull: vi.fn(),
-  schema: { apiKeys: {} },
+  schema: { apiKeys: {}, offerBook: {} },
 }));
 
 const mockReadClientRequest = vi.fn();
@@ -173,6 +185,39 @@ describe('GET /dex/orderbook/:base/:counter', () => {
   it('400 on out-of-range limit', async () => {
     const app = makeApp();
     const res = await app.request(`/dex/orderbook/XRP/USD:${VALID_ISSUER}?limit=9999`);
+    expect(res.status).toBe(400);
+  });
+
+  it('?source=indexer reads offer_book, does NOT hit rippled', async () => {
+    nextOfferBookRows = [
+      {
+        account: VALID_ADDR,
+        sequence: 42,
+        takerPays: { currency: 'USD', issuer: VALID_ISSUER, value: '10' },
+        takerGets: '1000000',
+        domainId: null,
+        ledgerIndex: 7777,
+      },
+    ];
+    const app = makeApp();
+    const res = await app.request(`/dex/orderbook/XRP/USD:${VALID_ISSUER}?source=indexer`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      offers: Array<{ Account: string; Sequence: number }>;
+      ledger_index: number | null;
+      source: string;
+    };
+    expect(body.source).toBe('indexer');
+    expect(body.ledger_index).toBe(7777);
+    expect(body.offers).toHaveLength(1);
+    expect(body.offers[0]?.Sequence).toBe(42);
+    // The rippled client MUST NOT have been called.
+    expect(mockReadClientRequest).not.toHaveBeenCalled();
+  });
+
+  it('400 on unknown source value', async () => {
+    const app = makeApp();
+    const res = await app.request(`/dex/orderbook/XRP/USD:${VALID_ISSUER}?source=nonsense`);
     expect(res.status).toBe(400);
   });
 });

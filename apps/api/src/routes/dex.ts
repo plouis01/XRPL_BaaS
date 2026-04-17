@@ -21,6 +21,7 @@ import {
   toAssetAmount,
   toAssetCurrency,
 } from '../services/dex.service.ts';
+import { OrderbookSourceError, readOrderbookFromIndexer } from '../services/orderbookQuery.ts';
 import type { AppEnv } from '../types.ts';
 import {
   ammDepositSchema,
@@ -103,7 +104,10 @@ dex.delete('/offers/:id', zValidator('json', cancelOfferSchema), async (c) => {
   }
 });
 
-// GET /orderbook/:base/:counter — live rippled `book_offers` query.
+// GET /orderbook/:base/:counter — orderbook read.
+// Sources:
+//   default         → live rippled `book_offers` (authoritative)
+//   ?source=indexer → indexer's offer_book cache (fast, as fresh as the HWM)
 // Optional ?limit= (default 50, max 400).
 dex.get('/orderbook/:base/:counter', async (c) => {
   try {
@@ -114,6 +118,16 @@ dex.get('/orderbook/:base/:counter', async (c) => {
     if (Number.isNaN(limit) || limit < 1 || limit > 400) {
       return c.json({ error: 'limit must be an integer between 1 and 400' }, 400);
     }
+
+    const source = c.req.query('source') ?? 'rippled';
+    if (source === 'indexer') {
+      const result = await readOrderbookFromIndexer(base, counter, limit);
+      return c.json(result);
+    }
+    if (source !== 'rippled') {
+      return c.json({ error: 'source must be "rippled" (default) or "indexer"' }, 400);
+    }
+
     const client = await getReadClient();
     const resp = (await client.request({
       command: 'book_offers',
@@ -124,9 +138,13 @@ dex.get('/orderbook/:base/:counter', async (c) => {
     return c.json({
       offers: resp.result.offers ?? [],
       ledger_index: resp.result.ledger_index ?? null,
+      source: 'rippled' as const,
     });
   } catch (err) {
     if (err instanceof AssetParseError) return c.json({ error: err.message }, 400);
+    if (err instanceof OrderbookSourceError) {
+      return c.json({ error: err.message }, 400);
+    }
     throw err;
   }
 });
