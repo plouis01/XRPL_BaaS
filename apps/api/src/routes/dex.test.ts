@@ -53,6 +53,12 @@ vi.mock('@railforge/db', () => ({
   schema: { apiKeys: {} },
 }));
 
+const mockReadClientRequest = vi.fn();
+vi.mock('../xrpl/readClient.ts', () => ({
+  getReadClient: async () => ({ request: mockReadClientRequest }),
+  __setReadClientForTests: vi.fn(),
+}));
+
 const { default: dexRoute } = await import('./dex.ts');
 
 function makeApp(): Hono<AppEnv> {
@@ -130,17 +136,79 @@ describe('DELETE /dex/offers/:id', () => {
 });
 
 describe('GET /dex/orderbook/:base/:counter', () => {
-  it('501 not implemented', async () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it('200 with offers when rippled returns them', async () => {
+    mockReadClientRequest.mockResolvedValue({
+      result: {
+        offers: [{ Account: VALID_ADDR, Sequence: 1 }],
+        ledger_index: 12345,
+      },
+    });
     const app = makeApp();
-    const res = await app.request('/dex/orderbook/XRP/USD');
-    expect(res.status).toBe(501);
+    const res = await app.request(`/dex/orderbook/XRP/USD:${VALID_ISSUER}`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      offers: unknown[];
+      ledger_index: number;
+    };
+    expect(body.offers).toHaveLength(1);
+    expect(body.ledger_index).toBe(12345);
+    expect(mockReadClientRequest).toHaveBeenCalledWith(
+      expect.objectContaining({
+        command: 'book_offers',
+        taker_gets: { currency: 'XRP' },
+        taker_pays: { currency: 'USD', issuer: VALID_ISSUER },
+        limit: 50,
+      }),
+    );
+  });
+
+  it('400 on invalid asset format', async () => {
+    const app = makeApp();
+    const res = await app.request('/dex/orderbook/USDonly/XRP');
+    expect(res.status).toBe(400);
+  });
+
+  it('400 on out-of-range limit', async () => {
+    const app = makeApp();
+    const res = await app.request(`/dex/orderbook/XRP/USD:${VALID_ISSUER}?limit=9999`);
+    expect(res.status).toBe(400);
   });
 });
 
 describe('GET /dex/amm/:asset1/:asset2', () => {
-  it('501 not implemented', async () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it('200 with pool info when pool exists', async () => {
+    mockReadClientRequest.mockResolvedValue({
+      result: { amm: { account: VALID_ADDR, amount: '100' }, ledger_index: 99 },
+    });
     const app = makeApp();
-    const res = await app.request('/dex/amm/XRP/USD');
-    expect(res.status).toBe(501);
+    const res = await app.request(`/dex/amm/XRP/USD:${VALID_ISSUER}`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { amm: unknown; ledger_index: number };
+    expect(body.amm).toBeDefined();
+    expect(body.ledger_index).toBe(99);
+  });
+
+  it('404 when rippled returns no amm', async () => {
+    mockReadClientRequest.mockResolvedValue({ result: {} });
+    const app = makeApp();
+    const res = await app.request(`/dex/amm/XRP/USD:${VALID_ISSUER}`);
+    expect(res.status).toBe(404);
+  });
+
+  it('404 when rippled throws actNotFound', async () => {
+    mockReadClientRequest.mockRejectedValue({ data: { error: 'actNotFound' } });
+    const app = makeApp();
+    const res = await app.request(`/dex/amm/XRP/USD:${VALID_ISSUER}`);
+    expect(res.status).toBe(404);
+  });
+
+  it('400 on invalid asset format', async () => {
+    const app = makeApp();
+    const res = await app.request('/dex/amm/nonsense/XRP');
+    expect(res.status).toBe(400);
   });
 });

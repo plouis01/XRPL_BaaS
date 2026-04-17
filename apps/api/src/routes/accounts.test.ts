@@ -50,6 +50,12 @@ vi.mock('@railforge/db', () => ({
   schema: { apiKeys: {} },
 }));
 
+const mockReadClientRequest = vi.fn();
+vi.mock('../xrpl/readClient.ts', () => ({
+  getReadClient: async () => ({ request: mockReadClientRequest }),
+  __setReadClientForTests: vi.fn(),
+}));
+
 const { default: accountsRoute } = await import('./accounts.ts');
 const { AccountServiceError } = await import('../services/account.service.ts');
 
@@ -166,6 +172,71 @@ describe('GET /accounts/:address', () => {
     const res = await app.request('/accounts/rUnknown');
 
     expect(res.status).toBe(404);
+  });
+});
+
+describe('GET /accounts/:address/balances (PLAN.md §9.2 G-4)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('200 with xrp+trustlines+mpts from rippled', async () => {
+    mockGetAccount.mockResolvedValue({ id: 'acct-1' });
+    mockReadClientRequest
+      .mockResolvedValueOnce({
+        result: { account_data: { Balance: '9990000' } },
+      })
+      .mockResolvedValueOnce({
+        result: {
+          lines: [{ currency: 'USD', account: 'rIssuer', balance: '42' }],
+        },
+      })
+      .mockResolvedValueOnce({
+        result: {
+          account_objects: [{ MPTokenIssuanceID: 'AABB', MPTAmount: '100' }],
+        },
+      });
+
+    const app = makeApp();
+    const res = await app.request('/accounts/rAddr/balances');
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      address: string;
+      xrp_drops: string;
+      trustlines: Array<{ currency: string; issuer: string; balance: string }>;
+      mpts: Array<{ mpt_issuance_id: string; balance: string }>;
+    };
+    expect(body.xrp_drops).toBe('9990000');
+    expect(body.trustlines).toEqual([{ currency: 'USD', issuer: 'rIssuer', balance: '42' }]);
+    expect(body.mpts).toEqual([{ mpt_issuance_id: 'AABB', balance: '100' }]);
+  });
+
+  it("404 when the account isn't managed by the client", async () => {
+    mockGetAccount.mockResolvedValue(null);
+
+    const app = makeApp();
+    const res = await app.request('/accounts/rAddr/balances');
+    expect(res.status).toBe(404);
+  });
+
+  it('treats rippled actNotFound as zero XRP, empty lines/mpts', async () => {
+    mockGetAccount.mockResolvedValue({ id: 'acct-1' });
+    mockReadClientRequest.mockRejectedValue({
+      data: { error: 'actNotFound' },
+    });
+
+    const app = makeApp();
+    const res = await app.request('/accounts/rAddr/balances');
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      xrp_drops: string;
+      trustlines: unknown[];
+      mpts: unknown[];
+    };
+    expect(body.xrp_drops).toBe('0');
+    expect(body.trustlines).toEqual([]);
+    expect(body.mpts).toEqual([]);
   });
 });
 
