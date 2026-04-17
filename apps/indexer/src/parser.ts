@@ -1,12 +1,14 @@
-// Parses raw XRPL ledger close events into normalized RailForge events.
+// Parses validated XRPL ledger + transaction payloads into normalized
+// RailForge events. Pure — no I/O, no side effects. The store consumes
+// these events and performs idempotent UPSERTs keyed by tx_hash.
 //
-// Sprint 3 scope: ledger-level events only (LedgerCloseEvent → IndexedLedger).
-// Sprint 4+ adds transaction-level parsing (payment.confirmed, credential.issued,
-// etc.) once the indexer subscribes to individual transactions.
+// Two entry points:
+//   - parseLedgerClose(event) → IndexedLedger (Sprint 3, high-water mark)
+//   - parseTransaction(raw)  → IndexedTransaction | null (Sprint 4+)
 //
-// This module is the single source of truth for the internal event schema.
-// Both the store (for DB writes) and the webhook fan-out (for client-facing
-// payloads) should derive from these types.
+// parseTransaction dispatches by `TransactionType` and returns a
+// discriminated union the store can switch on. Unknown tx types return
+// a generic `OtherTx` event so the dedup marker still gets written.
 
 import type { LedgerCloseEvent } from './subscriber.ts';
 
@@ -35,7 +37,6 @@ export interface IndexedLedger {
 export function parseLedgerClose(event: LedgerCloseEvent): IndexedLedger | null {
   if (!event.ledgerIndex || !event.ledgerHash) return null;
 
-  // Convert XRPL epoch seconds → Unix epoch → ISO string.
   const unixMs = (event.closeTime + XRPL_EPOCH_OFFSET) * 1000;
   const closedAt = new Date(unixMs).toISOString();
 
@@ -45,4 +46,306 @@ export function parseLedgerClose(event: LedgerCloseEvent): IndexedLedger | null 
     closedAt,
     txCount: event.txCount,
   };
+}
+
+// ── Transaction-level events ───────────────────────────────────────────────
+
+/**
+ * Discriminator union of events emitted for a single validated tx.
+ * The store dispatches on `kind` to the appropriate UPSERT path.
+ *
+ * `success` is derived from meta.TransactionResult === 'tesSUCCESS'.
+ * Failed txs still land on-ledger (and still burn a fee) — we record
+ * them so replay is idempotent and so "validated but failed" surfaces
+ * correctly in reads.
+ */
+export interface TxEventBase {
+  txHash: string;
+  ledgerIndex: number;
+  success: boolean;
+}
+
+/** XRPL currency shape as it appears in Payment Amount / Balance. */
+export type XrplAmount =
+  | string // XRP in drops
+  | { currency: string; issuer: string; value: string }
+  | { mpt_issuance_id: string; value: string };
+
+export interface PaymentEvent extends TxEventBase {
+  kind: 'payment';
+  account: string;
+  destination: string;
+  amount: XrplAmount;
+  destinationTag?: number;
+}
+
+export interface CredentialCreateEvent extends TxEventBase {
+  kind: 'credential_create';
+  issuer: string;
+  subject: string;
+  credentialType: string;
+  expiration?: number;
+}
+
+export interface CredentialAcceptEvent extends TxEventBase {
+  kind: 'credential_accept';
+  account: string;
+  issuer: string;
+  credentialType: string;
+}
+
+export interface CredentialDeleteEvent extends TxEventBase {
+  kind: 'credential_delete';
+  account: string;
+  issuer?: string;
+  subject?: string;
+  credentialType: string;
+}
+
+export interface OfferCreateEvent extends TxEventBase {
+  kind: 'offer_create';
+  account: string;
+  sequence: number;
+  takerPays: XrplAmount;
+  takerGets: XrplAmount;
+  domainId?: string;
+}
+
+export interface OfferCancelEvent extends TxEventBase {
+  kind: 'offer_cancel';
+  account: string;
+  offerSequence: number;
+}
+
+export interface DomainSetEvent extends TxEventBase {
+  kind: 'domain_set';
+  account: string;
+  domainId?: string;
+  acceptedCredentials?: Array<{ issuer: string; credentialType: string }>;
+}
+
+export interface DomainDeleteEvent extends TxEventBase {
+  kind: 'domain_delete';
+  account: string;
+  domainId: string;
+}
+
+/** Fallback for tx types we don't yet normalize — still dedup-tracked. */
+export interface OtherTxEvent extends TxEventBase {
+  kind: 'other';
+  txType: string;
+}
+
+export type TxEvent =
+  | PaymentEvent
+  | CredentialCreateEvent
+  | CredentialAcceptEvent
+  | CredentialDeleteEvent
+  | OfferCreateEvent
+  | OfferCancelEvent
+  | DomainSetEvent
+  | DomainDeleteEvent
+  | OtherTxEvent;
+
+// ── Transaction parser ─────────────────────────────────────────────────────
+
+/**
+ * Shape of a validated tx from `ledger` command with `expand: true`.
+ * xrpl.js typing is loose here — the field layout is either
+ * `{ tx_blob?, meta?, metaData?, tx?, ...txFields }` or the tx fields
+ * inlined at top-level with a sibling `metaData`. We normalize by
+ * reading from whichever is present.
+ */
+interface RawValidatedTx {
+  hash?: string;
+  ledger_index?: number;
+  TransactionType?: string;
+  meta?: unknown;
+  metaData?: unknown;
+  tx?: Record<string, unknown>;
+  [k: string]: unknown;
+}
+
+function metaResult(raw: RawValidatedTx): string | null {
+  const m = (raw.meta ?? raw.metaData) as { TransactionResult?: string } | undefined;
+  return typeof m?.TransactionResult === 'string' ? m.TransactionResult : null;
+}
+
+function pickTxFields(raw: RawValidatedTx): Record<string, unknown> {
+  // With `expand: true` some rippled versions nest tx fields under `tx`,
+  // others inline them. Prefer the nested `tx` object when present.
+  if (raw.tx && typeof raw.tx === 'object') return raw.tx;
+  return raw as Record<string, unknown>;
+}
+
+function amountFromField(v: unknown): XrplAmount | null {
+  if (typeof v === 'string') return v;
+  if (v && typeof v === 'object') {
+    const obj = v as Record<string, unknown>;
+    if (typeof obj.currency === 'string' && typeof obj.issuer === 'string') {
+      return {
+        currency: obj.currency,
+        issuer: obj.issuer,
+        value: String(obj.value ?? '0'),
+      };
+    }
+    if (typeof obj.mpt_issuance_id === 'string') {
+      return {
+        mpt_issuance_id: obj.mpt_issuance_id,
+        value: String(obj.value ?? '0'),
+      };
+    }
+  }
+  return null;
+}
+
+/**
+ * Parse a validated transaction payload into a normalized TxEvent.
+ * Returns null when the payload is malformed or missing identifying
+ * fields (hash / ledger_index / TransactionType). The caller should
+ * treat null as "skip without dedup" — we never want to mark a tx
+ * processed without knowing what it was.
+ */
+export function parseTransaction(raw: unknown): TxEvent | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const r = raw as RawValidatedTx;
+
+  const txHash = typeof r.hash === 'string' ? r.hash : null;
+  const ledgerIndex = typeof r.ledger_index === 'number' ? r.ledger_index : null;
+  const fields = pickTxFields(r);
+  const txType =
+    typeof fields.TransactionType === 'string'
+      ? fields.TransactionType
+      : typeof r.TransactionType === 'string'
+        ? r.TransactionType
+        : null;
+
+  if (!txHash || !ledgerIndex || !txType) return null;
+
+  const success = metaResult(r) === 'tesSUCCESS';
+  const base: TxEventBase = { txHash, ledgerIndex, success };
+
+  switch (txType) {
+    case 'Payment': {
+      const account = String(fields.Account ?? '');
+      const destination = String(fields.Destination ?? '');
+      const amount = amountFromField(fields.Amount);
+      if (!account || !destination || !amount) return { kind: 'other', txType, ...base };
+      const destinationTag =
+        typeof fields.DestinationTag === 'number' ? fields.DestinationTag : undefined;
+      return {
+        kind: 'payment',
+        account,
+        destination,
+        amount,
+        destinationTag,
+        ...base,
+      };
+    }
+    case 'CredentialCreate': {
+      const issuer = String(fields.Account ?? '');
+      const subject = String(fields.Subject ?? '');
+      const credentialType = String(fields.CredentialType ?? '');
+      if (!issuer || !subject || !credentialType) return { kind: 'other', txType, ...base };
+      const expiration = typeof fields.Expiration === 'number' ? fields.Expiration : undefined;
+      return {
+        kind: 'credential_create',
+        issuer,
+        subject,
+        credentialType,
+        expiration,
+        ...base,
+      };
+    }
+    case 'CredentialAccept': {
+      const account = String(fields.Account ?? '');
+      const issuer = String(fields.Issuer ?? '');
+      const credentialType = String(fields.CredentialType ?? '');
+      if (!account || !issuer || !credentialType) return { kind: 'other', txType, ...base };
+      return {
+        kind: 'credential_accept',
+        account,
+        issuer,
+        credentialType,
+        ...base,
+      };
+    }
+    case 'CredentialDelete': {
+      const account = String(fields.Account ?? '');
+      const credentialType = String(fields.CredentialType ?? '');
+      const issuer = typeof fields.Issuer === 'string' ? (fields.Issuer as string) : undefined;
+      const subject = typeof fields.Subject === 'string' ? (fields.Subject as string) : undefined;
+      if (!account || !credentialType) return { kind: 'other', txType, ...base };
+      return {
+        kind: 'credential_delete',
+        account,
+        issuer,
+        subject,
+        credentialType,
+        ...base,
+      };
+    }
+    case 'OfferCreate': {
+      const account = String(fields.Account ?? '');
+      const sequence = typeof fields.Sequence === 'number' ? fields.Sequence : null;
+      const takerPays = amountFromField(fields.TakerPays);
+      const takerGets = amountFromField(fields.TakerGets);
+      if (!account || sequence === null || !takerPays || !takerGets)
+        return { kind: 'other', txType, ...base };
+      const domainId =
+        typeof fields.DomainID === 'string' ? (fields.DomainID as string) : undefined;
+      return {
+        kind: 'offer_create',
+        account,
+        sequence,
+        takerPays,
+        takerGets,
+        domainId,
+        ...base,
+      };
+    }
+    case 'OfferCancel': {
+      const account = String(fields.Account ?? '');
+      const offerSequence = typeof fields.OfferSequence === 'number' ? fields.OfferSequence : null;
+      if (!account || offerSequence === null) return { kind: 'other', txType, ...base };
+      return { kind: 'offer_cancel', account, offerSequence, ...base };
+    }
+    case 'PermissionedDomainSet': {
+      const account = String(fields.Account ?? '');
+      if (!account) return { kind: 'other', txType, ...base };
+      const domainId =
+        typeof fields.DomainID === 'string' ? (fields.DomainID as string) : undefined;
+      const rawAccepted = fields.AcceptedCredentials;
+      const acceptedCredentials = Array.isArray(rawAccepted)
+        ? rawAccepted
+            .map((entry) => {
+              const e = (
+                entry as {
+                  Credential?: { Issuer?: string; CredentialType?: string };
+                }
+              )?.Credential;
+              if (!e || typeof e.Issuer !== 'string' || typeof e.CredentialType !== 'string') {
+                return null;
+              }
+              return { issuer: e.Issuer, credentialType: e.CredentialType };
+            })
+            .filter((x): x is { issuer: string; credentialType: string } => x !== null)
+        : undefined;
+      return {
+        kind: 'domain_set',
+        account,
+        domainId,
+        acceptedCredentials,
+        ...base,
+      };
+    }
+    case 'PermissionedDomainDelete': {
+      const account = String(fields.Account ?? '');
+      const domainId = typeof fields.DomainID === 'string' ? (fields.DomainID as string) : '';
+      if (!account || !domainId) return { kind: 'other', txType, ...base };
+      return { kind: 'domain_delete', account, domainId, ...base };
+    }
+    default:
+      return { kind: 'other', txType, ...base };
+  }
 }

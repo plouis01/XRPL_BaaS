@@ -1,22 +1,26 @@
 // WebSocket subscriber for the XRPL validated ledger stream.
 //
 // Connects to the configured XRPL_WS_URL, sends the `subscribe` command
-// for the `ledger` stream, and emits parsed LedgerClose events via a
-// callback. Handles reconnection with exponential backoff so a transient
-// rippled restart doesn't kill the indexer process.
+// for the `ledger` stream, and emits two kinds of events:
 //
-// The subscriber does NOT parse individual transactions from the stream.
-// Sprint 3 scope is ledger-level indexing (close events + high-water mark).
-// Transaction-level parsing (for "all credentials issued by X" queries)
-// is Sprint 4+ and will use the `transactions_proposed` stream or the
-// `ledger` command to fetch full tx sets per closed ledger.
+//   1. ledger close    → LedgerCloseEvent (ledger-level high-water mark)
+//   2. validated tx    → raw tx payload (one per tx in the just-closed ledger)
+//
+// Option-B per-tx fetch: rather than subscribing to the firehose
+// `transactions` stream, we wait for each `ledgerClosed` then issue a
+// single `ledger` command with `transactions: true, expand: true`. This
+// gives us a deterministic, replayable per-ledger batch keyed by the
+// ledger index. Replay-on-restart is trivial — the indexer reads the
+// high-water mark, then fetches every ledger from hwm+1 to current.
+//
+// Reconnect policy: exponential backoff 1s → 30s. The existing reconnect
+// test (subscriber.reconnect.test.ts) covers the lifecycle.
 
 import { Client } from 'xrpl';
 import { logger } from './logger.ts';
 
 const log = logger.child({ component: 'subscriber' });
 
-// Reconnect policy: start at 1s, double each attempt, cap at 30s.
 const INITIAL_RECONNECT_MS = 1_000;
 const MAX_RECONNECT_MS = 30_000;
 
@@ -32,26 +36,37 @@ export interface LedgerCloseEvent {
 }
 
 export type LedgerCloseHandler = (event: LedgerCloseEvent) => void | Promise<void>;
+export type TransactionHandler = (raw: unknown) => void | Promise<void>;
+
+export interface SubscriberHandlers {
+  onLedgerClose: LedgerCloseHandler;
+  /**
+   * Called once per validated transaction in each closed ledger. The
+   * payload shape matches what `ledger` returns with `expand: true`:
+   * the tx fields with a sibling `meta` (or `metaData`) object and a
+   * top-level `hash` + `ledger_index`.
+   */
+  onTransaction?: TransactionHandler;
+}
 
 /**
- * Manages the lifecycle of a single WebSocket connection to rippled's
- * `ledger` stream. Call `start()` to connect and `stop()` to tear down.
- *
- * The subscriber is intentionally a thin pipe — it transforms the raw
- * rippled message into a typed `LedgerCloseEvent` and hands it to the
- * registered handler. The handler (see store.ts) decides what to persist.
+ * Manages a single WebSocket connection to rippled's `ledger` stream
+ * and per-ledger tx fetches. Call `start()` to connect, `stop()` to
+ * tear down.
  */
 export class LedgerSubscriber {
   private client: Client | null = null;
-  private handler: LedgerCloseHandler;
+  private handlers: SubscriberHandlers;
   private wsUrl: string;
   private running = false;
   private reconnectMs = INITIAL_RECONNECT_MS;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
-  constructor(wsUrl: string, handler: LedgerCloseHandler) {
+  constructor(wsUrl: string, handlers: SubscriberHandlers | LedgerCloseHandler) {
     this.wsUrl = wsUrl;
-    this.handler = handler;
+    // Backwards-compat: if passed a bare function, treat it as
+    // onLedgerClose only. Existing callers (reconnect test) rely on this.
+    this.handlers = typeof handlers === 'function' ? { onLedgerClose: handlers } : handlers;
   }
 
   async start(): Promise<void> {
@@ -95,26 +110,28 @@ export class LedgerSubscriber {
       await this.client.connect();
       log.info({ wsUrl: this.wsUrl }, 'connected to rippled');
 
-      // Reset backoff on successful connect.
       this.reconnectMs = INITIAL_RECONNECT_MS;
 
-      // Subscribe to the ledger stream. rippled pushes a message
-      // every time a new ledger closes (~3-5s on mainnet/testnet).
       await this.client.request({
         command: 'subscribe',
         streams: ['ledger'],
       });
       log.info('subscribed to ledger stream');
 
-      // xrpl.js emits 'ledgerClosed' on each validated ledger close.
-      // Payload shape: https://xrpl.org/subscribe.html#ledger-stream
       this.client.on('ledgerClosed', (raw) => {
         try {
           const event = this.parseLedgerClose(raw);
-          if (event) {
-            // Fire-and-forget: the handler (store.ts) owns error handling.
-            Promise.resolve(this.handler(event)).catch((err) => {
-              log.error({ err }, 'ledger close handler failed');
+          if (!event) return;
+          // Fire ledger-close handler first; don't await — the tx fetch
+          // happens in parallel so a slow DB write on the store side
+          // doesn't block the next ledger.
+          Promise.resolve(this.handlers.onLedgerClose(event)).catch((err) => {
+            log.error({ err }, 'ledger close handler failed');
+          });
+          // Per-tx fan-out (optional).
+          if (this.handlers.onTransaction) {
+            this.fetchAndEmitTransactions(event.ledgerIndex).catch((err) => {
+              log.error({ err, ledgerIndex: event.ledgerIndex }, 'tx fetch failed');
             });
           }
         } catch (err) {
@@ -127,6 +144,31 @@ export class LedgerSubscriber {
         'failed to connect to rippled',
       );
       this.scheduleReconnect();
+    }
+  }
+
+  private async fetchAndEmitTransactions(ledgerIndex: number): Promise<void> {
+    const handler = this.handlers.onTransaction;
+    if (!handler || !this.client) return;
+    const resp = (await this.client.request({
+      command: 'ledger',
+      ledger_index: ledgerIndex,
+      transactions: true,
+      expand: true,
+    })) as { result: { ledger?: { transactions?: unknown[] } } };
+    const txs = resp.result.ledger?.transactions ?? [];
+    for (const tx of txs) {
+      // Rippled omits ledger_index inside each expanded tx entry — thread
+      // it through so the parser has it.
+      const enriched =
+        tx && typeof tx === 'object'
+          ? { ...(tx as Record<string, unknown>), ledger_index: ledgerIndex }
+          : tx;
+      try {
+        await handler(enriched);
+      } catch (err) {
+        log.error({ err, ledgerIndex }, 'tx handler failed');
+      }
     }
   }
 
@@ -153,8 +195,6 @@ export class LedgerSubscriber {
   /**
    * Parse a raw rippled ledgerClosed event into our typed shape.
    * Returns null if the message is malformed (log + skip, never throw).
-   *
-   * Exported as a static for unit testing without a live WebSocket.
    */
   parseLedgerClose(raw: unknown): LedgerCloseEvent | null {
     if (!raw || typeof raw !== 'object') return null;
