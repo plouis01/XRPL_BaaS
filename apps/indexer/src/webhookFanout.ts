@@ -6,10 +6,19 @@
 // activity — a third-party KYC issuer creating a credential for one of
 // our accounts, an outside party paying one of our accounts, etc.
 //
-// txConfirmer already fires `transaction.validated` / `transaction.failed`
-// for txs that our own worker submitted (it knows the tx id). To avoid
-// double-firing, this path skips any tx whose hash is present in
-// `transactions.tx_hash` — that's the hash our submitter recorded.
+// Interaction with txConfirmer:
+//   - `transaction.validated` / `transaction.failed` — txConfirmer fires
+//     these for INTERNAL txs (ones our worker submitted). To avoid double-
+//     firing, this path skips internal txs FOR THOSE TWO EVENT TYPES ONLY
+//     by looking up `transactions.tx_hash`.
+//   - `credential.*` / `domain.*` — txConfirmer does NOT fire these
+//     (verified: its `fanOutWebhooks` helper is hard-typed to the two
+//     transaction.* strings). So the indexer is the single source for
+//     these event types and must fire for BOTH internal and external
+//     observations; otherwise clients issuing credentials through our
+//     API would never receive `credential.issued`.
+//   - `credential.expiring` — fired only by the credentialExpiry sweep
+//     job, not here. No overlap.
 //
 // Event kind → webhook event type mapping (only kinds we fan out):
 //
@@ -125,21 +134,33 @@ function mapEvent(event: TxEvent): {
  * of deliveries enqueued (0 when no managed account is involved or the
  * tx is one of ours).
  */
+// Event types that txConfirmer ALSO fires for internal txs. For these,
+// the indexer must skip internal txs to avoid double-firing. All other
+// event types (credential.*, domain.*) are indexer-only and fire for
+// both internal and external observations.
+const TX_CONFIRMER_HANDLED = new Set(['transaction.validated', 'transaction.failed']);
+
 export async function fanOutExternalTxEvent(event: TxEvent): Promise<number> {
   const mapped = mapEvent(event);
   if (!mapped) return 0;
 
-  // Skip if this tx was submitted by our own system — txConfirmer already
-  // fires the equivalent webhook via its own fan-out path, and double-
-  // firing would confuse clients.
-  const ownRows = await db
-    .select({ id: schema.transactions.id })
-    .from(schema.transactions)
-    .where(eq(schema.transactions.txHash, event.txHash))
-    .limit(1);
-  if (ownRows.length > 0) {
-    log.debug({ txHash: event.txHash }, 'tx was internal — skip external fan-out');
-    return 0;
+  // Only skip internal txs for event types that txConfirmer also fires.
+  // For credential.*/domain.*, the indexer is the single source — if we
+  // skipped internal txs here, clients would never receive `credential.issued`
+  // for credentials they created through our own API.
+  if (TX_CONFIRMER_HANDLED.has(mapped.eventType)) {
+    const ownRows = await db
+      .select({ id: schema.transactions.id })
+      .from(schema.transactions)
+      .where(eq(schema.transactions.txHash, event.txHash))
+      .limit(1);
+    if (ownRows.length > 0) {
+      log.debug(
+        { txHash: event.txHash, eventType: mapped.eventType },
+        'tx was internal — txConfirmer will fire this event',
+      );
+      return 0;
+    }
   }
 
   // Find managed accounts whose address matches any of the event's

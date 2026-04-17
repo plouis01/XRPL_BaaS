@@ -114,7 +114,7 @@ beforeEach(() => {
 });
 
 describe('fanOutExternalTxEvent', () => {
-  it('skips internal txs (hash exists in transactions)', async () => {
+  it('skips internal txs for transaction.validated (txConfirmer handles it)', async () => {
     state.ownTxRows = [{ id: 't1' }];
     state.accountRows = [{ clientId: 'c1', address: 'rDest' }];
     state.endpointRows = [{ id: 'e1', clientId: 'c1', events: ['transaction.validated'] }];
@@ -129,6 +129,40 @@ describe('fanOutExternalTxEvent', () => {
     });
     expect(enqueued).toBe(0);
     expect(enqueueCalls).toHaveLength(0);
+  });
+
+  it('FIRES credential.issued for internal txs — txConfirmer does NOT handle credential.*', async () => {
+    // Same tx hash exists in `transactions` (internal), but credential.issued
+    // is indexer-only so it must still fire.
+    state.ownTxRows = [{ id: 't1' }];
+    state.accountRows = [{ clientId: 'c1', address: 'rSubject' }];
+    state.endpointRows = [{ id: 'e1', clientId: 'c1', events: ['credential.issued'] }];
+    const enqueued = await fanOutExternalTxEvent({
+      kind: 'credential_create',
+      txHash: 'H-internal-cred',
+      ledgerIndex: 1,
+      success: true,
+      issuer: 'rIssuer',
+      subject: 'rSubject',
+      credentialType: 'KYC',
+    });
+    expect(enqueued).toBe(1);
+    expect(state.insertedDeliveries[0]?.eventType).toBe('credential.issued');
+  });
+
+  it('FIRES domain.deleted for internal domain-delete tx', async () => {
+    state.ownTxRows = [{ id: 't1' }];
+    state.accountRows = [{ clientId: 'c1', address: 'rOwner' }];
+    state.endpointRows = [{ id: 'e1', clientId: 'c1', events: ['domain.deleted'] }];
+    const enqueued = await fanOutExternalTxEvent({
+      kind: 'domain_delete',
+      txHash: 'H-internal-dom',
+      ledgerIndex: 1,
+      success: true,
+      account: 'rOwner',
+      domainId: 'D1',
+    });
+    expect(enqueued).toBe(1);
   });
 
   it('returns 0 when no managed account matches', async () => {
