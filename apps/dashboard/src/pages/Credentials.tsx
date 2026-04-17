@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
+import { ApiError, api } from '../api.ts';
 import type { Credential, Network } from '../types.ts';
-
-const API_BASE = import.meta.env.VITE_API_BASE ?? 'http://localhost:3000';
 
 export function Credentials({ network }: { network: Network }) {
   const [credentials, setCredentials] = useState<Credential[]>([]);
@@ -10,13 +9,13 @@ export function Credentials({ network }: { network: Network }) {
   const fetchCredentials = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await fetch(`${API_BASE}/v1/dashboard/credentials?environment=${network}`, {
-        credentials: 'include',
-      });
-      if (res.ok) {
-        const data = (await res.json()) as { data: Credential[] };
-        setCredentials(data.data);
-      }
+      const data = await api<{ data: Credential[] }>(
+        `/v1/dashboard/credentials?environment=${network}`,
+      );
+      setCredentials(data.data);
+    } catch (err) {
+      if (!(err instanceof ApiError)) throw err;
+      setCredentials([]);
     } finally {
       setLoading(false);
     }
