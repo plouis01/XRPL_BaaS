@@ -61,9 +61,30 @@ function makeSelect(): Select {
   } as unknown as Select;
 }
 
+let nextInsertReturning: unknown[] = [];
+let nextUpdateReturning: unknown[] = [];
+const insertCalls: Array<{ table: string; values: unknown }> = [];
+
 vi.mock('@railforge/db', () => ({
   db: {
     select: () => makeSelect(),
+    insert: (table: { __tableName: string }) => ({
+      values(v: unknown) {
+        insertCalls.push({ table: table.__tableName, values: v });
+        return {
+          returning: () => Promise.resolve(nextInsertReturning),
+        };
+      },
+    }),
+    update: (_table: { __tableName: string }) => ({
+      set(_v: unknown) {
+        return {
+          where(_p: unknown) {
+            return { returning: () => Promise.resolve(nextUpdateReturning) };
+          },
+        };
+      },
+    }),
   },
   eq: vi.fn(() => ({ __predicate: 'eq' })),
   and: vi.fn(() => ({ __predicate: 'and' })),
@@ -135,6 +156,12 @@ function makeApp(): Hono<AppEnv> {
 beforeEach(() => {
   nextRows = [];
   nextKeyCheckRows = [];
+  nextInsertReturning = [];
+  nextUpdateReturning = [];
+  insertCalls.length = 0;
+  // The hashApiKey helper reads API_KEY_SALT at call time; set a fake so
+  // the create-key test doesn't hit the production-guard throw.
+  process.env.API_KEY_SALT = 'test-salt';
 });
 
 describe('GET /dashboard/transactions', () => {
@@ -244,5 +271,106 @@ describe('GET /dashboard/keys', () => {
     expect(body.data[0]?.prefix).toBe('rf_test_');
     expect(body.data[0]?.environment).toBe('testnet');
     expect(body.data[0]?.is_active).toBe(true);
+  });
+});
+
+describe('POST /dashboard/keys', () => {
+  it('201 returns the raw key once, persists a hash, never the key itself', async () => {
+    nextInsertReturning = [
+      {
+        id: 'k-new',
+        prefix: 'rf_test_',
+        environment: 'testnet',
+        isActive: true,
+        createdAt: new Date('2026-01-01'),
+      },
+    ];
+    const app = makeApp();
+    const res = await app.request('/dashboard/keys', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ environment: 'testnet', label: 'dev laptop' }),
+    });
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as {
+      id: string;
+      key: string;
+      prefix: string;
+      environment: string;
+    };
+    expect(body.id).toBe('k-new');
+    expect(body.environment).toBe('testnet');
+    expect(body.key).toMatch(/^rf_test_/);
+
+    // The raw key must never have been written to storage.
+    const keyRow = insertCalls.find((c) => c.table === 'api_keys');
+    expect(keyRow).toBeDefined();
+    const vals = keyRow?.values as Record<string, unknown>;
+    expect(vals.keyHash).not.toBe(body.key); // stored as hash, not plaintext
+    expect(typeof vals.keyHash).toBe('string');
+    expect((vals.keyHash as string).length).toBe(64); // hex-encoded SHA-256
+  });
+
+  it('uses live prefix for mainnet keys', async () => {
+    nextInsertReturning = [
+      {
+        id: 'k-live',
+        prefix: 'rf_live_',
+        environment: 'mainnet',
+        isActive: true,
+        createdAt: new Date('2026-01-01'),
+      },
+    ];
+    const app = makeApp();
+    const res = await app.request('/dashboard/keys', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ environment: 'mainnet' }),
+    });
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as { key: string };
+    expect(body.key).toMatch(/^rf_live_/);
+  });
+
+  it('400 on invalid environment', async () => {
+    const app = makeApp();
+    const res = await app.request('/dashboard/keys', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ environment: 'devnet' }),
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it('400 on missing body', async () => {
+    const app = makeApp();
+    const res = await app.request('/dashboard/keys', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: 'not-json',
+    });
+    expect(res.status).toBe(400);
+  });
+});
+
+describe('POST /dashboard/keys/:id/revoke', () => {
+  it('200 when the key belongs to the client', async () => {
+    nextUpdateReturning = [{ id: 'k-1' }];
+    const app = makeApp();
+    const res = await app.request('/dashboard/keys/k-1/revoke', {
+      method: 'POST',
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { revoked: boolean };
+    expect(body.revoked).toBe(true);
+  });
+
+  it("404 when the key doesn't exist or belongs to another tenant", async () => {
+    nextUpdateReturning = [];
+    const app = makeApp();
+    const res = await app.request('/dashboard/keys/k-other/revoke', {
+      method: 'POST',
+    });
+    expect(res.status).toBe(404);
   });
 });

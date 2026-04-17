@@ -25,8 +25,11 @@ const KEY_PREFIX_LENGTH = 8;
  * HMAC-SHA256 of the API key under the server-side pepper. The pepper is
  * intentionally read at module-load time so a missing salt fails fast at
  * boot, not on the first request.
+ *
+ * Exported so the dashboard key-create endpoint hashes with the exact same
+ * function — divergence would produce valid-looking keys that fail auth.
  */
-function hashApiKey(rawKey: string): string {
+export function hashApiKey(rawKey: string): string {
   const salt = process.env.API_KEY_SALT;
   if (!salt) {
     throw new Error(
@@ -144,7 +147,7 @@ export const auth: MiddlewareHandler<AppEnv> = async (c, next) => {
   return;
 };
 
-// Re-exported so tests can verify the hash function directly without
-// reimplementing the HMAC logic. Keeping it private would force the test to
-// duplicate the algorithm and drift over time.
-export { hashApiKey, safeEqual };
+// Re-export safeEqual for tests that want to verify timing-safe compares
+// without importing the whole middleware. hashApiKey is already exported
+// inline above.
+export { safeEqual };

@@ -25,9 +25,11 @@
 // for the sandbox toggle UX; a per-row environment column would be a
 // schema change deferred to a real mainnet rollout.
 
+import { randomBytes } from 'node:crypto';
 import { and, db, desc, eq, schema } from '@railforge/db';
 import { Hono } from 'hono';
 import { z } from 'zod';
+import { hashApiKey } from '../middleware/auth.ts';
 import type { AppEnv } from '../types.ts';
 
 const dashboard = new Hono<AppEnv>();
@@ -219,6 +221,89 @@ dashboard.get('/keys', async (c) => {
       revoked_at: r.revokedAt,
     })),
   });
+});
+
+// POST /keys — create a new API key for the authenticated client. The
+// key plaintext is returned ONCE in this response; the server only
+// stores the HMAC-SHA256(pepper, key). The dashboard must copy it out
+// immediately — there is no recovery path if the client loses it.
+//
+// Body: { environment: 'testnet' | 'mainnet', label?: string }.
+// Rate limit: piggybacks on the per-client rateLimit middleware above.
+const createKeySchema = z.object({
+  environment: networkSchema,
+  label: z.string().min(1).max(200).optional(),
+});
+
+dashboard.post('/keys', async (c) => {
+  const clientId = c.get('clientId');
+
+  let body: { environment: 'testnet' | 'mainnet'; label?: string };
+  try {
+    body = createKeySchema.parse(await c.req.json());
+  } catch {
+    return c.json({ error: 'invalid request body' }, 400);
+  }
+
+  // Wire format matches the existing `rf_<env>_<random>` convention used
+  // across the codebase (see SETUP.md and k6 load-test env). 32 random
+  // bytes → 43 base64url chars → ~258 bits of entropy. Prefix tag is
+  // intentionally short ('test'/'live') to match existing keys.
+  const envTag = body.environment === 'mainnet' ? 'live' : 'test';
+  const rawKey = `rf_${envTag}_${randomBytes(32).toString('base64url')}`;
+  const keyHash = hashApiKey(rawKey);
+  // keyPrefix is the first N chars of the raw key, persisted for display
+  // only. Matches the existing auth.ts KEY_PREFIX_LENGTH = 8.
+  const keyPrefix = rawKey.slice(0, 8);
+
+  const inserted = await db
+    .insert(schema.apiKeys)
+    .values({
+      clientId,
+      keyHash,
+      keyPrefix,
+      label: body.label ?? null,
+      environment: body.environment,
+      isActive: true,
+    })
+    .returning({
+      id: schema.apiKeys.id,
+      prefix: schema.apiKeys.keyPrefix,
+      environment: schema.apiKeys.environment,
+      isActive: schema.apiKeys.isActive,
+      createdAt: schema.apiKeys.createdAt,
+    });
+  const row = inserted[0];
+  if (!row) throw new Error('api_keys insert returned no row');
+
+  return c.json(
+    {
+      id: row.id,
+      prefix: row.prefix,
+      environment: row.environment,
+      is_active: row.isActive,
+      created_at: row.createdAt,
+      key: rawKey, // ← ONLY returned here. Never re-readable afterward.
+    },
+    201,
+  );
+});
+
+// POST /keys/:id/revoke — flip is_active=false and stamp revoked_at.
+// Idempotent: revoking an already-revoked key is a no-op 200.
+dashboard.post('/keys/:id/revoke', async (c) => {
+  const clientId = c.get('clientId');
+  const id = c.req.param('id');
+
+  const updated = await db
+    .update(schema.apiKeys)
+    .set({ isActive: false, revokedAt: new Date() })
+    .where(and(eq(schema.apiKeys.id, id), eq(schema.apiKeys.clientId, clientId)))
+    .returning({ id: schema.apiKeys.id });
+  if (updated.length === 0) {
+    return c.json({ error: 'API key not found' }, 404);
+  }
+  return c.json({ id, revoked: true });
 });
 
 export default dashboard;
