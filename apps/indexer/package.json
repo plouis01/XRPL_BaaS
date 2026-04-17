@@ -13,6 +13,7 @@
   },
   "dependencies": {
     "@railforge/db": "workspace:*",
+    "@railforge/jobs": "workspace:*",
     "@railforge/logger": "workspace:*",
     "@railforge/xrpl-core": "workspace:*",
     "ioredis": "^5.10.1",

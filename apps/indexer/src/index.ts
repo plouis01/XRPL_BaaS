@@ -13,6 +13,7 @@ import { logger } from './logger.ts';
 import { parseLedgerClose, parseTransaction } from './parser.ts';
 import { getHighWaterMark, initStore, persistLedger, persistTransaction } from './store.ts';
 import { LedgerSubscriber } from './subscriber.ts';
+import { fanOutExternalTxEvent } from './webhookFanout.ts';
 
 const wsUrl = process.env.XRPL_WS_URL ?? 'wss://s.altnet.rippletest.net:51233';
 const redisUrl = process.env.REDIS_URL ?? 'redis://localhost:6379';
@@ -36,13 +37,28 @@ const subscriber = new LedgerSubscriber(wsUrl, {
   onTransaction: async (raw) => {
     const txEvent = parseTransaction(raw);
     if (!txEvent) return;
+    let firstSeen = false;
     try {
-      await persistTransaction(txEvent);
+      firstSeen = await persistTransaction(txEvent);
     } catch (err) {
       // Persist errors are logged inside the store and rolled back via
       // the dedup-row rollback. Swallow here so one bad tx doesn't kill
       // the subscription loop — the next replay will retry.
       logger.error({ err, txHash: txEvent.txHash }, 'persistTransaction failed');
+      return;
+    }
+    if (!firstSeen) return;
+    // Webhook fan-out for EXTERNAL txs involving managed accounts. Runs
+    // only on first observation (the `firstSeen` gate skips replays) and
+    // is best-effort — a failure here must not roll back the dedup row,
+    // otherwise a retry would duplicate the side-table writes.
+    // Internal txs (ours) are skipped inside fanOutExternalTxEvent via a
+    // `transactions.tx_hash` lookup so txConfirmer stays the sole source
+    // for those events.
+    try {
+      await fanOutExternalTxEvent(txEvent);
+    } catch (err) {
+      logger.error({ err, txHash: txEvent.txHash }, 'external webhook fan-out failed');
     }
   },
 });
