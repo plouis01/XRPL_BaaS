@@ -33,6 +33,7 @@ import {
   deleteAccountSchema,
   rotateRegularKeySchema,
 } from '../validators/schemas.ts';
+import { getReadClient } from '../xrpl/readClient.ts';
 
 const accounts = new Hono<AppEnv>();
 
@@ -105,6 +106,92 @@ accounts.get('/:address', async (c) => {
     reserve_balance: account.reserveBalance,
     funding_tx_id: account.fundingTxId,
     created_at: account.createdAt,
+  });
+});
+
+// GET /:address/balances — live rippled balances snapshot (PLAN.md §9.2 G-4).
+// Scope: XRP (account_info), trust-line balances (account_lines), MPTs
+// (account_objects filtered to MPToken). Authoritative — no indexer lag.
+accounts.get('/:address/balances', async (c) => {
+  const clientId = c.get('clientId');
+  const address = c.req.param('address');
+
+  const account = await getAccount(clientId, address);
+  if (!account) {
+    return c.json({ error: 'Account not found' }, 404);
+  }
+
+  const client = await getReadClient();
+
+  // XRP balance via account_info. If the account doesn't exist on-ledger
+  // (e.g. treasury funding hasn't confirmed), rippled returns actNotFound.
+  let xrpDrops = '0';
+  try {
+    const info = (await client.request({
+      command: 'account_info',
+      account: address,
+      ledger_index: 'validated',
+    })) as { result: { account_data?: { Balance?: string } } };
+    xrpDrops = info.result.account_data?.Balance ?? '0';
+  } catch (err) {
+    const e = err as { data?: { error?: string } };
+    if (e?.data?.error !== 'actNotFound') throw err;
+  }
+
+  // Trust-line balances.
+  let trustlines: Array<{ currency: string; issuer: string; balance: string }> = [];
+  try {
+    const lines = (await client.request({
+      command: 'account_lines',
+      account: address,
+      ledger_index: 'validated',
+    })) as {
+      result: {
+        lines?: Array<{ currency: string; account: string; balance: string }>;
+      };
+    };
+    trustlines = (lines.result.lines ?? []).map((l) => ({
+      currency: l.currency,
+      issuer: l.account,
+      balance: l.balance,
+    }));
+  } catch (err) {
+    const e = err as { data?: { error?: string } };
+    if (e?.data?.error !== 'actNotFound') throw err;
+  }
+
+  // MPT balances via account_objects filtered to MPToken entries.
+  let mpts: Array<{ mpt_issuance_id: string; balance: string }> = [];
+  try {
+    const objs = (await client.request({
+      command: 'account_objects',
+      account: address,
+      type: 'mptoken',
+      ledger_index: 'validated',
+    })) as {
+      result: {
+        account_objects?: Array<{
+          MPTokenIssuanceID?: string;
+          MPTAmount?: string;
+        }>;
+      };
+    };
+    mpts = (objs.result.account_objects ?? [])
+      .filter((o) => typeof o.MPTokenIssuanceID === 'string')
+      .map((o) => ({
+        mpt_issuance_id: o.MPTokenIssuanceID as string,
+        balance: o.MPTAmount ?? '0',
+      }));
+  } catch (err) {
+    const e = err as { data?: { error?: string } };
+    if (e?.data?.error !== 'actNotFound') throw err;
+  }
+
+  return c.json({
+    address,
+    xrp_drops: xrpDrops,
+    trustlines,
+    mpts,
   });
 });
 

@@ -3,14 +3,15 @@
 //
 // POST   /offers                     → create offer
 // DELETE /offers/:id                 → cancel offer (id = sequence number)
-// GET    /orderbook/:base/:counter   → get orderbook (read-only, 501 until indexer)
+// GET    /orderbook/:base/:counter   → get orderbook (live rippled query)
 // POST   /amm/deposit                → AMM deposit
 // POST   /amm/withdraw               → AMM withdraw
-// GET    /amm/:asset1/:asset2        → AMM pool info (read-only, 501 until indexer)
+// GET    /amm/:asset1/:asset2        → AMM pool info (live rippled query)
 
 import { zValidator } from '@hono/zod-validator';
 import { Hono } from 'hono';
 import { revocationCheck } from '../middleware/revocationCheck.ts';
+import { AssetParseError, parseAssetParam, rippledAssetSpec } from '../services/assetQuery.ts';
 import {
   DexServiceError,
   ammDeposit,
@@ -27,6 +28,7 @@ import {
   cancelOfferSchema,
   createOfferSchema,
 } from '../validators/schemas.ts';
+import { getReadClient } from '../xrpl/readClient.ts';
 
 const dex = new Hono<AppEnv>();
 
@@ -101,11 +103,33 @@ dex.delete('/offers/:id', zValidator('json', cancelOfferSchema), async (c) => {
   }
 });
 
-// GET /orderbook/:base/:counter — read-only orderbook query
-// Requires indexer integration — deferred to Sprint 7.
-dex.get('/orderbook/:base/:counter', (c) =>
-  c.json({ error: 'Orderbook queries not yet implemented — requires indexer' }, 501),
-);
+// GET /orderbook/:base/:counter — live rippled `book_offers` query.
+// Optional ?limit= (default 50, max 400).
+dex.get('/orderbook/:base/:counter', async (c) => {
+  try {
+    const base = parseAssetParam(c.req.param('base'));
+    const counter = parseAssetParam(c.req.param('counter'));
+    const limitParam = c.req.query('limit');
+    const limit = limitParam ? Number.parseInt(limitParam, 10) : 50;
+    if (Number.isNaN(limit) || limit < 1 || limit > 400) {
+      return c.json({ error: 'limit must be an integer between 1 and 400' }, 400);
+    }
+    const client = await getReadClient();
+    const resp = (await client.request({
+      command: 'book_offers',
+      taker_gets: rippledAssetSpec(base),
+      taker_pays: rippledAssetSpec(counter),
+      limit,
+    })) as { result: { offers?: unknown[]; ledger_index?: number } };
+    return c.json({
+      offers: resp.result.offers ?? [],
+      ledger_index: resp.result.ledger_index ?? null,
+    });
+  } catch (err) {
+    if (err instanceof AssetParseError) return c.json({ error: err.message }, 400);
+    throw err;
+  }
+});
 
 // POST /amm/deposit — deposit liquidity into an AMM pool
 dex.post('/amm/deposit', zValidator('json', ammDepositSchema), async (c) => {
@@ -161,10 +185,34 @@ dex.post('/amm/withdraw', zValidator('json', ammWithdrawSchema), async (c) => {
   }
 });
 
-// GET /amm/:asset1/:asset2 — AMM pool info (read-only)
-// Requires indexer integration — deferred to Sprint 7.
-dex.get('/amm/:asset1/:asset2', (c) =>
-  c.json({ error: 'AMM pool info not yet implemented — requires indexer' }, 501),
-);
+// GET /amm/:asset1/:asset2 — live rippled `amm_info` query.
+dex.get('/amm/:asset1/:asset2', async (c) => {
+  try {
+    const asset1 = parseAssetParam(c.req.param('asset1'));
+    const asset2 = parseAssetParam(c.req.param('asset2'));
+    const client = await getReadClient();
+    const resp = (await client.request({
+      command: 'amm_info',
+      asset: rippledAssetSpec(asset1),
+      asset2: rippledAssetSpec(asset2),
+    })) as { result: { amm?: unknown; ledger_index?: number } };
+    if (!resp.result.amm) {
+      return c.json({ error: 'AMM pool not found for the given asset pair' }, 404);
+    }
+    return c.json({
+      amm: resp.result.amm,
+      ledger_index: resp.result.ledger_index ?? null,
+    });
+  } catch (err) {
+    if (err instanceof AssetParseError) return c.json({ error: err.message }, 400);
+    // rippled returns an error object when the pool doesn't exist — catch
+    // the xrpl.js exception wrapping it and surface as 404.
+    const e = err as { data?: { error?: string }; message?: string };
+    if (e?.data?.error === 'actNotFound' || e?.message?.includes('actNotFound')) {
+      return c.json({ error: 'AMM pool not found for the given asset pair' }, 404);
+    }
+    throw err;
+  }
+});
 
 export default dex;
