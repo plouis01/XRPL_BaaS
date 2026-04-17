@@ -322,6 +322,99 @@ export const spendPolicies = pgTable('spend_policies', {
   updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow(),
 });
 
+// ── Indexer state ────────────────────────────────────────────────────────────
+// Tables written exclusively by the indexer process. These are derived
+// views of on-ledger state — the ledger is authoritative, these rows are
+// only convenient for SQL. Idempotency is the single load-bearing
+// correctness property: rippled can (and will) replay validated ledgers
+// after a reconnect, so every indexer write must be keyed on tx_hash
+// (or a composite that the ledger itself guarantees unique).
+
+// processedTransactions is the dedup gate. Every indexed transaction
+// writes its hash here first with ON CONFLICT DO NOTHING — if the insert
+// returned zero rows, the tx was already processed and the downstream
+// UPSERTs are skipped.
+export const processedTransactions = pgTable(
+  'processed_transactions',
+  {
+    txHash: text('tx_hash').primaryKey(),
+    ledgerIndex: bigint('ledger_index', { mode: 'number' }).notNull(),
+    txType: text('tx_type').notNull(),
+    processedAt: timestamp('processed_at', { withTimezone: true }).defaultNow(),
+  },
+  (t) => ({
+    ledgerIdx: index('idx_processed_tx_ledger').on(t.ledgerIndex),
+  }),
+);
+
+// accountBalances stores per-(address, asset) balance snapshots derived
+// from validated Payment / MPTokenAuthorize meta. assetKind='xrp' uses
+// assetKey='XRP'; assetKind='iou' uses assetKey='<currency>:<issuer>';
+// assetKind='mpt' uses assetKey='<mpt_issuance_id>'. The composite
+// unique makes UPSERTs trivial.
+export const accountBalances = pgTable(
+  'account_balances',
+  {
+    id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+    address: text('address').notNull(),
+    assetKind: text('asset_kind').notNull(),
+    assetKey: text('asset_key').notNull(),
+    balance: text('balance').notNull().default('0'),
+    ledgerIndex: bigint('ledger_index', { mode: 'number' }),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow(),
+  },
+  (t) => ({
+    addressIdx: index('idx_account_balances_address').on(t.address),
+    assetUnique: unique('uniq_balance_address_asset').on(t.address, t.assetKind, t.assetKey),
+  }),
+);
+
+// offerBook stores open DEX offers for orderbook reads. Keyed by
+// (account, sequence) which uniquely identifies an offer on-chain.
+// taker_pays / taker_gets are stored as JSONB to handle both XRP
+// (string drops) and issued-currency ({currency, issuer, value}) shapes.
+export const offerBook = pgTable(
+  'offer_book',
+  {
+    account: text('account').notNull(),
+    sequence: bigint('sequence', { mode: 'number' }).notNull(),
+    takerPays: jsonb('taker_pays').notNull(),
+    takerGets: jsonb('taker_gets').notNull(),
+    // Derived pair key: canonical `${base}_${counter}` sorted so both
+    // sides of an orderbook query hit the same index regardless of order.
+    pairKey: text('pair_key').notNull(),
+    domainId: text('domain_id'),
+    ledgerIndex: bigint('ledger_index', { mode: 'number' }),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow(),
+  },
+  (t) => ({
+    pk: unique('pk_offer_account_sequence').on(t.account, t.sequence),
+    pairIdx: index('idx_offer_pair').on(t.pairKey),
+  }),
+);
+
+// ammPools stores AMM pool state keyed by the unordered asset pair.
+// assetKey fields follow the same convention as accountBalances.
+export const ammPools = pgTable(
+  'amm_pools',
+  {
+    id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+    asset1Kind: text('asset1_kind').notNull(),
+    asset1Key: text('asset1_key').notNull(),
+    asset2Kind: text('asset2_kind').notNull(),
+    asset2Key: text('asset2_key').notNull(),
+    asset1Balance: text('asset1_balance').notNull().default('0'),
+    asset2Balance: text('asset2_balance').notNull().default('0'),
+    lpTokenBalance: text('lp_token_balance').notNull().default('0'),
+    tradingFee: integer('trading_fee').notNull().default(0),
+    ledgerIndex: bigint('ledger_index', { mode: 'number' }),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow(),
+  },
+  (t) => ({
+    pairUnique: unique('uniq_amm_pair').on(t.asset1Kind, t.asset1Key, t.asset2Kind, t.asset2Key),
+  }),
+);
+
 // ── Webhook deliveries ───────────────────────────────────────────────────────
 
 export const webhookDeliveries = pgTable(
