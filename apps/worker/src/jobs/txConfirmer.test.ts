@@ -532,7 +532,12 @@ describe('extractMptIssuanceIdFromMeta', () => {
     expect(extractMptIssuanceIdFromMeta(result)).toBe('FFFFEEEE');
   });
 
-  it('returns the LedgerIndex of the created node when neither id field is present', () => {
+  it('REVIEW.md LOW-06: returns null when only LedgerIndex is present (no MPT id field)', () => {
+    // Pre-LOW-06 this fell through to LedgerIndex as a last-ditch fallback.
+    // That was wrong: LedgerIndex is the 256-bit ledger entry hash, NOT
+    // the 192-bit MPT issuance id. A write under that value would poison
+    // tokens.mpt_issuance_id and every later lookup by id would miss.
+    // Fail closed so the operator sees the rippled version mismatch.
     const result = {
       meta: {
         AffectedNodes: [
@@ -546,7 +551,7 @@ describe('extractMptIssuanceIdFromMeta', () => {
         ],
       },
     };
-    expect(extractMptIssuanceIdFromMeta(result)).toBe('1234ABCD');
+    expect(extractMptIssuanceIdFromMeta(result)).toBeNull();
   });
 
   it('ignores ModifiedNode entries (only CreatedNode counts)', () => {
