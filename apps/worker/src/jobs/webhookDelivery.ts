@@ -34,6 +34,21 @@ import { SsrfBlockedError, resolveAndValidateHostname } from '../ssrfGuard.ts';
 const DELIVERY_TIMEOUT_MS = 10_000;
 
 const SIGNATURE_HEADER = 'X-RailForge-Signature';
+const TIMESTAMP_HEADER = 'X-RailForge-Timestamp';
+
+/**
+ * Replay-window documented for receivers implementing verification. Any
+ * timestamp older than this (in seconds) should be rejected by a strict
+ * receiver. 5 minutes is the same tolerance Stripe uses.
+ *
+ * REVIEW.md MED-02: before this change, the signature covered only the
+ * body — there was nothing to reject stale replays on. Receivers with
+ * clock drift had no way to bound how far back a signed payload could
+ * have been captured. We now sign `timestamp + "." + body` (Stripe's
+ * `t=<unix>,v1=<sig>` shape with the parts split into two headers) so
+ * receivers can pin the replay window.
+ */
+export const WEBHOOK_REPLAY_WINDOW_SECONDS = 300;
 
 /**
  * Thrown by processWebhookDeliveryJob when the failure is transient and
@@ -49,15 +64,18 @@ export class WebhookDeliveryRetryable extends Error {
 /**
  * Compute the X-RailForge-Signature header value for a payload.
  *
- * Format: hex-encoded HMAC-SHA256 of the JSON body using the endpoint's
- * shared secret. The receiver verifies by repeating the computation with
- * the same secret and constant-time-comparing the hex strings.
+ * REVIEW.md MED-02: the signed string is now `<unix-timestamp>.<body>`,
+ * not the body alone. Receivers MUST reconstruct the same signing-input
+ * (by concatenating the X-RailForge-Timestamp header with a literal `.`
+ * and the raw body they received) before computing their HMAC. The
+ * receiver should also reject requests whose timestamp is more than
+ * WEBHOOK_REPLAY_WINDOW_SECONDS old.
  *
  * Exported so unit tests can call it directly without spinning up the
  * delivery pipeline.
  */
-export function signWebhookPayload(secret: string, body: string): string {
-  return createHmac('sha256', secret).update(body).digest('hex');
+export function signWebhookPayload(secret: string, body: string, timestamp: number): string {
+  return createHmac('sha256', secret).update(`${timestamp}.${body}`).digest('hex');
 }
 
 /**
@@ -188,7 +206,13 @@ export async function processWebhookDeliveryJob(job: Job<WebhookDeliveryJobData>
     type: delivery.eventType,
     data: delivery.payload,
   });
-  const signature = signWebhookPayload(endpoint.secret, body);
+  // REVIEW.md MED-02: emit X-RailForge-Timestamp alongside the signature
+  // and include the timestamp in the signing input. Receivers that
+  // implement the documented verification (signWebhookPayload contract)
+  // can now reject replays outside the WEBHOOK_REPLAY_WINDOW_SECONDS
+  // tolerance.
+  const timestamp = Math.floor(Date.now() / 1000);
+  const signature = signWebhookPayload(endpoint.secret, body, timestamp);
 
   // 4. POST. We use AbortSignal.timeout to bound the wait — a slow
   // subscriber must not stall the worker concurrency slot indefinitely.
@@ -199,6 +223,7 @@ export async function processWebhookDeliveryJob(job: Job<WebhookDeliveryJobData>
       headers: {
         'Content-Type': 'application/json',
         [SIGNATURE_HEADER]: signature,
+        [TIMESTAMP_HEADER]: String(timestamp),
         'User-Agent': 'RailForge-Webhooks/1.0',
       },
       body,

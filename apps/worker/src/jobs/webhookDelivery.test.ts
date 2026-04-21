@@ -153,22 +153,33 @@ function makeFetchResponse(status: number): Response {
 // ── Tests ───────────────────────────────────────────────────────────────────
 
 describe('signWebhookPayload', () => {
+  const FIXED_TS = 1_700_000_000;
+
   it('produces a deterministic 64-char hex digest', () => {
-    const sig = signWebhookPayload('whsec_test', '{"a":1}');
+    const sig = signWebhookPayload('whsec_test', '{"a":1}', FIXED_TS);
     expect(sig).toMatch(/^[a-f0-9]{64}$/);
     // Same inputs → same signature.
-    expect(signWebhookPayload('whsec_test', '{"a":1}')).toBe(sig);
+    expect(signWebhookPayload('whsec_test', '{"a":1}', FIXED_TS)).toBe(sig);
   });
 
   it('different secrets produce different signatures (even with same body)', () => {
-    const sig1 = signWebhookPayload('whsec_one', '{"a":1}');
-    const sig2 = signWebhookPayload('whsec_two', '{"a":1}');
+    const sig1 = signWebhookPayload('whsec_one', '{"a":1}', FIXED_TS);
+    const sig2 = signWebhookPayload('whsec_two', '{"a":1}', FIXED_TS);
     expect(sig1).not.toBe(sig2);
   });
 
   it('different bodies produce different signatures (even with same secret)', () => {
-    const sig1 = signWebhookPayload('whsec_test', '{"a":1}');
-    const sig2 = signWebhookPayload('whsec_test', '{"a":2}');
+    const sig1 = signWebhookPayload('whsec_test', '{"a":1}', FIXED_TS);
+    const sig2 = signWebhookPayload('whsec_test', '{"a":2}', FIXED_TS);
+    expect(sig1).not.toBe(sig2);
+  });
+
+  // REVIEW.md MED-02: the timestamp must be part of the signing input so
+  // a replayed body with a different timestamp no longer matches a
+  // previously-captured signature.
+  it('different timestamps produce different signatures (replay window enforcement)', () => {
+    const sig1 = signWebhookPayload('whsec_test', '{"a":1}', FIXED_TS);
+    const sig2 = signWebhookPayload('whsec_test', '{"a":1}', FIXED_TS + 1);
     expect(sig1).not.toBe(sig2);
   });
 });
@@ -219,18 +230,22 @@ describe('processWebhookDeliveryJob', () => {
     expect(url).toBe('https://hook.example/webhook');
     expect(init.method).toBe('POST');
 
-    // Headers: signature, content-type, user-agent.
+    // Headers: signature, timestamp, content-type, user-agent.
     const headers = init.headers as Record<string, string>;
     expect(headers['Content-Type']).toBe('application/json');
     expect(headers['User-Agent']).toMatch(/^RailForge-Webhooks/);
     expect(headers['X-RailForge-Signature']).toMatch(/^[a-f0-9]{64}$/);
+    // REVIEW.md MED-02: receivers now also get a timestamp so they can
+    // pin replay windows. Must be a unix-seconds string.
+    expect(headers['X-RailForge-Timestamp']).toMatch(/^\d{10}$/);
 
     // The signature must match what signWebhookPayload would produce on the
-    // exact body bytes. CRITICAL: re-serializing parsed JSON would produce a
-    // different signature than what we sent on the wire.
+    // exact body bytes + timestamp. CRITICAL: re-serializing parsed JSON
+    // would produce a different signature than what we sent on the wire.
     const sentBody = init.body as string;
+    const sentTs = Number.parseInt(headers['X-RailForge-Timestamp'] ?? '', 10);
     expect(headers['X-RailForge-Signature']).toBe(
-      signWebhookPayload('whsec_test_secret', sentBody),
+      signWebhookPayload('whsec_test_secret', sentBody, sentTs),
     );
 
     // Payload shape matches the public webhook envelope.
