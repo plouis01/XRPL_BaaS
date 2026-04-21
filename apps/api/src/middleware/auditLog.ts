@@ -12,6 +12,7 @@ import { db, schema } from '@railforge/db';
 import type { MiddlewareHandler } from 'hono';
 import { logger } from '../logger.ts';
 import type { AppEnv } from '../types.ts';
+import { getClientIp } from './trustedProxy.ts';
 
 const AUDITED_METHODS = new Set(['POST', 'PUT', 'DELETE', 'PATCH']);
 
@@ -41,11 +42,11 @@ export const auditLog: MiddlewareHandler<AppEnv> = async (c, next) => {
     // Body may not be readable (e.g., already consumed). Skip hash.
   }
 
-  // Same trust order as ipRateLimit.ts: CF-Connecting-IP → XFF → null.
-  const ip =
-    c.req.header('cf-connecting-ip') ??
-    c.req.header('x-forwarded-for')?.split(',')[0]?.trim() ??
-    null;
+  // REVIEW.md HIGH-06: route through the trusted-proxy allowlist so an
+  // attacker hitting the API directly cannot forge the source IP via
+  // X-Forwarded-For / CF-Connecting-IP and poison the audit record.
+  // Same helper as auth.ts / ipRateLimit.ts.
+  const ip = getClientIp(c);
 
   // Fire-and-forget — don't await in the response path.
   db.insert(schema.auditLog)
