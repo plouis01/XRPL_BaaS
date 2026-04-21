@@ -140,13 +140,13 @@ vi.mock('@railforge/db', () => ({
 
 const { default: dashboardRoute } = await import('./dashboard.ts');
 
-function makeApp(): Hono<AppEnv> {
+function makeApp(callerEnv: 'testnet' | 'mainnet' = 'testnet'): Hono<AppEnv> {
   const app = new Hono<AppEnv>();
   app.use('*', async (c, next) => {
     c.set('clientId', 'client-1');
     c.set('apiKeyId', 'key-1');
     c.set('rateLimit', 100);
-    c.set('environment', 'testnet');
+    c.set('environment', callerEnv);
     await next();
   });
   app.route('/dashboard', dashboardRoute);
@@ -311,7 +311,7 @@ describe('POST /dashboard/keys', () => {
     expect((vals.keyHash as string).length).toBe(64); // hex-encoded SHA-256
   });
 
-  it('uses live prefix for mainnet keys', async () => {
+  it('uses live prefix for mainnet keys (mainnet-scoped caller)', async () => {
     nextInsertReturning = [
       {
         id: 'k-live',
@@ -321,7 +321,7 @@ describe('POST /dashboard/keys', () => {
         createdAt: new Date('2026-01-01'),
       },
     ];
-    const app = makeApp();
+    const app = makeApp('mainnet');
     const res = await app.request('/dashboard/keys', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -330,6 +330,31 @@ describe('POST /dashboard/keys', () => {
     expect(res.status).toBe(201);
     const body = (await res.json()) as { key: string };
     expect(body.key).toMatch(/^rf_live_/);
+  });
+
+  it('HIGH-02: refuses to mint a mainnet key from a testnet-scoped caller', async () => {
+    const app = makeApp('testnet');
+    const res = await app.request('/dashboard/keys', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ environment: 'mainnet' }),
+    });
+    expect(res.status).toBe(403);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toBe('Forbidden');
+    // Crucially — no insert happened.
+    expect(insertCalls.find((c) => c.table === 'api_keys')).toBeUndefined();
+  });
+
+  it('HIGH-02: refuses to mint a testnet key from a mainnet-scoped caller', async () => {
+    const app = makeApp('mainnet');
+    const res = await app.request('/dashboard/keys', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ environment: 'testnet' }),
+    });
+    expect(res.status).toBe(403);
+    expect(insertCalls.find((c) => c.table === 'api_keys')).toBeUndefined();
   });
 
   it('400 on invalid environment', async () => {

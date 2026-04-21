@@ -237,12 +237,32 @@ const createKeySchema = z.object({
 
 dashboard.post('/keys', async (c) => {
   const clientId = c.get('clientId');
+  const callerEnv = c.get('environment');
 
   let body: { environment: 'testnet' | 'mainnet'; label?: string };
   try {
     body = createKeySchema.parse(await c.req.json());
   } catch {
     return c.json({ error: 'invalid request body' }, 400);
+  }
+
+  // REVIEW.md HIGH-02: privilege separation for key minting. Without this
+  // check, a stolen testnet-scoped key could mint a brand-new mainnet key
+  // and survive revocation of the original (different prefix, different id).
+  //
+  // Rule: the new key's environment must match the caller's. Cross-env
+  // minting — especially testnet → mainnet — is the exact lateral-escalation
+  // move the review flagged. A key holder who genuinely needs the other
+  // environment must have obtained a key for that environment through the
+  // normal onboarding path, not by calling this endpoint.
+  if (body.environment !== callerEnv) {
+    return c.json(
+      {
+        error: 'Forbidden',
+        detail: `Cannot mint a ${body.environment} key from a ${callerEnv}-scoped API key. Authenticate with a ${body.environment} key to mint ${body.environment} keys.`,
+      },
+      403,
+    );
   }
 
   // Wire format matches the existing `rf_<env>_<random>` convention used
