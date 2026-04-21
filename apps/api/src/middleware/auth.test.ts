@@ -176,7 +176,7 @@ describe('auth middleware', () => {
     expect(body.environment).toBe('mainnet');
   });
 
-  it('exposes the X-RailForge-Key-Prefix header on success but never the full key', async () => {
+  it('does NOT echo the key prefix in the response header (HIGH-10)', async () => {
     const app = makeApp();
     limitMock.mockResolvedValueOnce([activeRow()]);
 
@@ -184,12 +184,12 @@ describe('auth middleware', () => {
     const res = await app.request('/protected', {
       headers: { 'x-api-key': apiKey },
     });
-    const prefix = res.headers.get('x-railforge-key-prefix');
-    expect(prefix).toBe('rf_test_'); // first 8 chars only
-    expect(prefix).not.toBe(apiKey);
+    // Prefix must never be on the wire — any non-browser MITM / proxy / log
+    // pipeline would otherwise capture it.
+    expect(res.headers.get('x-railforge-key-prefix')).toBeNull();
   });
 
-  it('does not include the key prefix on rejected requests (avoid confirming format)', async () => {
+  it('does not include the key prefix on rejected requests either', async () => {
     const app = makeApp();
     limitMock.mockResolvedValueOnce([]);
     const res = await app.request('/protected', {

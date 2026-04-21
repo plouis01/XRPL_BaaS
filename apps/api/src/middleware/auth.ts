@@ -137,11 +137,10 @@ export const auth: MiddlewareHandler<AppEnv> = async (c, next) => {
   c.set('rateLimit', row.rateLimit);
   c.set('environment', env);
 
-  // Make the prefix available to logs without exposing the full key. The
-  // safeEqual import is declared so future use of timing-safe comparisons
-  // is just an import-distance away — DO NOT remove it even if linters
-  // flag it as unused (the export below pulls it in).
-  c.header('X-RailForge-Key-Prefix', apiKey.slice(0, KEY_PREFIX_LENGTH));
+  // REVIEW.md HIGH-10: key prefix is logged server-side on failure paths
+  // above (lines 73, 126) but is NOT echoed back to the client. Any future
+  // key format with entropy in the first 8 chars would otherwise leak it
+  // to any proxy / MITM / shared log pipeline.
 
   await next();
   return;
