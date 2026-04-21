@@ -15,9 +15,18 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { and, db, eq, isNull, schema } from '@railforge/db';
 import type { MiddlewareHandler } from 'hono';
+import { getCookie } from 'hono/cookie';
 import { logger } from '../logger.ts';
 import type { AppEnv } from '../types.ts';
 import { getClientIp } from './trustedProxy.ts';
+
+/**
+ * REVIEW.md HIGH-03: the dashboard uses an httpOnly cookie-backed session
+ * instead of localStorage so an XSS in the dashboard origin cannot
+ * exfiltrate the key. The cookie name is shared between the dashboard
+ * session endpoints and this auth middleware.
+ */
+export const SESSION_COOKIE_NAME = 'railforge_session';
 
 const KEY_PREFIX_LENGTH = 8;
 
@@ -51,7 +60,12 @@ function safeEqual(a: string, b: string): boolean {
 }
 
 export const auth: MiddlewareHandler<AppEnv> = async (c, next) => {
-  const apiKey = c.req.header('x-api-key');
+  // REVIEW.md HIGH-03: accept the API key from the httpOnly cookie as a
+  // fallback when the X-API-Key header is absent. Server-to-server callers
+  // continue to use the header; the dashboard (browser context) sends the
+  // cookie via `credentials: 'include'` and never stores the key in JS-
+  // accessible storage.
+  const apiKey = c.req.header('x-api-key') ?? getCookie(c, SESSION_COOKIE_NAME);
   // REVIEW.md M-1: IP extraction respects the TRUSTED_PROXY_IPS allowlist.
   // Same logic as ipRateLimit.ts — forwarded headers are only honored from
   // configured proxy peers. Unset env var keeps legacy behavior.

@@ -12,6 +12,7 @@ import { rateLimit } from './middleware/rateLimit.ts';
 import accountsRoute from './routes/accounts.ts';
 import credentialsRoute from './routes/credentials.ts';
 import dashboardRoute from './routes/dashboard.ts';
+import dashboardSessionRoute from './routes/dashboardSession.ts';
 import dexRoute from './routes/dex.ts';
 import domainsRoute from './routes/domains.ts';
 import paymentsRoute from './routes/payments.ts';
@@ -30,6 +31,15 @@ app.use('*', corsMiddleware);
 
 // Public health check
 app.get('/health', (c) => c.json({ status: 'ok' }));
+
+// REVIEW.md HIGH-03: dashboard session endpoints (login / logout). Mounted
+// BEFORE the /v1 auth chain because login supplies the key in the body —
+// the request is pre-auth by definition. IP rate limit still applies so
+// brute-force attempts bottleneck on the same pre-auth bucket.
+const sessionRoot = new Hono<AppEnv>();
+sessionRoot.use('*', ipRateLimit);
+sessionRoot.route('/', dashboardSessionRoute);
+app.route('/v1/dashboard/session', sessionRoot);
 
 // All /v1/* routes are authenticated, rate-limited, and idempotency-aware.
 //
