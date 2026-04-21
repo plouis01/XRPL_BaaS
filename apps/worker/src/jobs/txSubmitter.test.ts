@@ -24,16 +24,45 @@ import type { TxSubmitJobData } from '../queues.ts';
 
 // DB mock — chain ends in .where() which records the update payload. The
 // select() chain is for the cold-start seed lookup added in task 50.
+//
+// REVIEW.md HIGH-08: the double-submit guard adds a `.where(...).returning()`
+// chain that the old mock didn't support. The first UPDATE (status='queued'
+// → 'submitting') uses returning(); all later UPDATEs use the thenable path.
+// `claimShouldReturn` controls whether the claim is simulated as won (array
+// of one) or lost (empty array — another worker already claimed).
 const dbUpdateCalls: Array<{ table: unknown; set: unknown; where: unknown }> = [];
 const dbSelectResult = {
   current: [] as Array<{ masterKeyRef: string }>,
 };
+const claimShouldReturn = {
+  current: [{ id: 'tx-uuid-1', txHash: null }] as Array<{
+    id: string;
+    txHash: string | null;
+  }>,
+};
+let updateCallCount = 0;
 vi.mock('@railforge/db', () => {
   const update = vi.fn((table: unknown) => ({
     set: vi.fn((payload: unknown) => ({
       where: vi.fn((cond: unknown) => {
-        dbUpdateCalls.push({ table, set: payload, where: cond });
-        return Promise.resolve();
+        updateCallCount += 1;
+        const call = updateCallCount;
+        // First update in each job invocation is the HIGH-08 claim (status
+        // 'queued' → 'submitting'). We do NOT push it into dbUpdateCalls
+        // so the existing tests — which expect the status/hash payload at
+        // index 0 — keep working. The claim is observed via updateCallCount.
+        const isClaim =
+          call === 1 &&
+          typeof payload === 'object' &&
+          payload !== null &&
+          (payload as { status?: string }).status === 'submitting';
+        if (!isClaim) dbUpdateCalls.push({ table, set: payload, where: cond });
+        const asPromise = Promise.resolve();
+        return Object.assign(asPromise, {
+          returning: vi.fn(async () =>
+            isClaim ? claimShouldReturn.current : [{ id: 'tx-uuid-1' }],
+          ),
+        });
       }),
     })),
   }));
@@ -47,10 +76,11 @@ vi.mock('@railforge/db', () => {
   return {
     db: { update, select },
     schema: {
-      transactions: { id: 'id' },
+      transactions: { id: 'id', status: 'status', txHash: 'txHash' },
       accounts: { address: 'address', masterKeyRef: 'masterKeyRef' },
     },
     eq: vi.fn((col: unknown, val: unknown) => ({ col, val })),
+    and: vi.fn((...parts: unknown[]) => ({ and: parts })),
   };
 });
 
@@ -113,6 +143,8 @@ describe('processTxSubmitJob', () => {
   beforeEach(() => {
     dbUpdateCalls.length = 0;
     dbSelectResult.current = [];
+    updateCallCount = 0;
+    claimShouldReturn.current = [{ id: 'tx-uuid-1', txHash: null }];
     // Default stub behavior — each test overrides as needed.
     stubs.sequencerNext.mockResolvedValue(42);
     stubs.sequencerInvalidate.mockResolvedValue(undefined);
@@ -380,6 +412,23 @@ describe('processTxSubmitJob', () => {
     const update = dbUpdateCalls[0]!.set as Record<string, unknown>;
     expect(update.status).toBe('failed');
     expect(update.resultCode).toBe('NETWORK_ERROR');
+  });
+
+  it('HIGH-08 double-submit guard: skips when row is not in queued state', async () => {
+    // Simulate a retry after a successful submit — the conditional UPDATE
+    // returns zero rows because status is no longer 'queued'.
+    claimShouldReturn.current = [];
+
+    await processTxSubmitJob(makeJob(baseJobData()));
+
+    // Only the claim UPDATE happened (not recorded in dbUpdateCalls); no
+    // downstream work.
+    expect(updateCallCount).toBe(1);
+    expect(dbUpdateCalls).toHaveLength(0);
+    expect(stubs.sequencerNext).not.toHaveBeenCalled();
+    expect(stubs.signerSign).not.toHaveBeenCalled();
+    expect(stubs.clientRequest).not.toHaveBeenCalled();
+    expect(stubs.confirmQueueAdd).not.toHaveBeenCalled();
   });
 
   // Note: the "signed tx_blob never appears in logs" invariant is enforced

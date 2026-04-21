@@ -16,7 +16,7 @@
 //     reconstruct the on-ledger state, the blob is signature material.
 //   - LastLedgerSequence is MANDATORY on every submitted tx.
 
-import { db, eq, schema } from '@railforge/db';
+import { and, db, eq, schema } from '@railforge/db';
 import { DEFAULT_FEE_DROPS, LAST_LEDGER_OFFSET } from '@railforge/xrpl-core';
 import { type Job, Worker } from 'bullmq';
 import type { Redis } from 'ioredis';
@@ -55,6 +55,32 @@ const SEQUENCE_ERROR_CODES = new Set([
 export async function processTxSubmitJob(job: Job<TxSubmitJobData>): Promise<void> {
   const { txId, sourceAddress, txJson } = job.data;
   const log = logger.child({ job: 'tx-submit', txId, sourceAddress });
+
+  // REVIEW.md HIGH-08 — double-submit guard.
+  //
+  // Failure mode this prevents: the worker's submit() reaches rippled but
+  // the response TCP connection drops. The old code called markFailed() +
+  // threw, which BullMQ turns into a retry. On retry, we'd re-sign with a
+  // fresh Sequence and emit a SECOND on-chain tx — for a funding Payment
+  // that's a double-fund; for an MPT Payment, a double-send.
+  //
+  // Fix: conditionally claim the row under `status='queued'`. If the row
+  // is already in a post-queued state (submitted/failed/validated, or has
+  // a non-null tx_hash from a prior attempt), this retry must NOT re-sign
+  // and re-submit. We treat it as a no-op and let the confirmer pick up
+  // the existing tx_hash if any.
+  const claimed = await db
+    .update(schema.transactions)
+    .set({ status: 'submitting' })
+    .where(and(eq(schema.transactions.id, txId), eq(schema.transactions.status, 'queued')))
+    .returning({
+      id: schema.transactions.id,
+      txHash: schema.transactions.txHash,
+    });
+  if (claimed.length === 0) {
+    log.warn('tx row already claimed or submitted — skipping to prevent double-submit');
+    return;
+  }
 
   // 1. Grab shared singletons (BullMQ runs one worker per process — safe).
   const [pool, sequencer] = await Promise.all([getXrplPool(), getSequencer()]);
