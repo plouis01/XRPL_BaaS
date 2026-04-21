@@ -72,10 +72,16 @@ export interface HsmConfig {
  * Cached entry for a loaded key. `privateKeyHandle` is the PKCS#11 handle
  * used by C_Sign. `compressedPubkey` is the 33-byte secp256k1 pubkey we
  * put in SigningPubKey on every signed tx.
+ *
+ * `label` is the canonical CKA_LABEL (`railforge:<address>`) — persisted
+ * so the MED-13 recovery path can re-resolve the handle after a forced
+ * session reset (handles are session-scoped; a new session invalidates
+ * the cached handle but the label is stable).
  */
 interface LoadedKey {
   privateKeyHandle: Handle;
   compressedPubkey: Buffer;
+  label: string;
 }
 
 /**
@@ -179,7 +185,11 @@ export class HsmSigner implements Signer {
       }
 
       const compressedPubkey = this.extractCompressedPubkey(session, publicKeyHandle);
-      this.keys.set(address, { privateKeyHandle, compressedPubkey });
+      this.keys.set(address, {
+        privateKeyHandle,
+        compressedPubkey,
+        label: ref,
+      });
     } catch (err) {
       if (err instanceof SignerError) throw err;
       // Sanitize — never let a raw pkcs11 error propagate with PII.
@@ -268,12 +278,34 @@ export class HsmSigner implements Signer {
       this.pkcs11.C_SignInit(session, { mechanism: pkcs11js.CKM_ECDSA }, loaded.privateKeyHandle);
       rawSig = this.pkcs11.C_Sign(session, hashInput, Buffer.alloc(64));
     } catch (err) {
-      // Session may have expired — retry once after re-login.
+      // REVIEW.md MED-13: previous implementation called C_SignInit again on
+      // the SAME session after a failed C_Sign. Strict PKCS#11 implementations
+      // (SoftHSM v2, some CloudHSM configs) reject that with CKR_OPERATION_ACTIVE
+      // because the prior C_SignInit context is not cleared by a failed C_Sign.
+      // The only portable recovery is to tear the session down and rebuild it.
       if (isNotLoggedInError(err)) {
-        this.loggedIn = false;
-        this.ensureLoggedIn();
-        this.pkcs11.C_SignInit(session, { mechanism: pkcs11js.CKM_ECDSA }, loaded.privateKeyHandle);
-        rawSig = this.pkcs11.C_Sign(session, hashInput, Buffer.alloc(64));
+        await this.close();
+        this.ensureInitialized();
+        const freshSession = this.session;
+        if (!freshSession) {
+          throw new SignerError('sign_failed', 'HSM session reset failed during re-login');
+        }
+        // close() cleared this.keys — re-resolve the handle by label.
+        const refreshedPriv = this.findObjectByLabel(
+          freshSession,
+          loaded.label,
+          pkcs11js.CKO_PRIVATE_KEY,
+        );
+        if (!refreshedPriv) {
+          throw new SignerError('no_key', 'Private key disappeared after HSM session reset');
+        }
+        this.keys.set(address, {
+          privateKeyHandle: refreshedPriv,
+          compressedPubkey: loaded.compressedPubkey,
+          label: loaded.label,
+        });
+        this.pkcs11.C_SignInit(freshSession, { mechanism: pkcs11js.CKM_ECDSA }, refreshedPriv);
+        rawSig = this.pkcs11.C_Sign(freshSession, hashInput, Buffer.alloc(64));
       } else {
         throw new SignerError('sign_failed', 'HSM signing failed');
       }
@@ -390,6 +422,7 @@ export class HsmSigner implements Signer {
       this.keys.set(address, {
         privateKeyHandle: keys.privateKey,
         compressedPubkey,
+        label: finalLabel,
       });
 
       return { address, keyHandle: finalLabel };
@@ -501,6 +534,17 @@ export function rawEcdsaToDer(raw: Buffer): Buffer {
   }
   const r = BigInt(`0x${raw.subarray(0, 32).toString('hex')}`);
   let s = BigInt(`0x${raw.subarray(32, 64).toString('hex')}`);
+  // REVIEW.md MED-01: a compromised or buggy HSM returning (0, 0) or values
+  // >= curve order n produces a structurally-valid-but-cryptographically-
+  // invalid signature. Each attempt would burn a fee + consume a sequence
+  // slot before rippled rejects it. Validate BEFORE low-S normalization so
+  // we also reject s = 0 (normalization would otherwise map s = n to 0).
+  if (r <= 0n || r >= SECP256K1_N) {
+    throw new SignerError('sign_failed', 'HSM returned invalid signature r');
+  }
+  if (s <= 0n || s >= SECP256K1_N) {
+    throw new SignerError('sign_failed', 'HSM returned invalid signature s');
+  }
   if (s > SECP256K1_N_HALF) {
     s = SECP256K1_N - s;
   }
@@ -551,18 +595,17 @@ function stripSignatureFields(tx: Transaction): Transaction {
 }
 
 /**
- * Detect CKR_USER_NOT_LOGGED_IN from a pkcs11 error. pkcs11js throws
- * an error whose `code` is the raw PKCS#11 error number (0x101 for this
- * condition). Rather than pull the constant in (layout-dependent), we
- * check by name on the message as well.
+ * Detect CKR_USER_NOT_LOGGED_IN from a pkcs11 error. REVIEW.md MED-13:
+ * previously also matched on a substring of `err.message`, but that's
+ * fragile — different PKCS#11 implementations format the message differently,
+ * and a future message change would silently alter recovery behavior. The
+ * numeric code is the spec-stable surface.
  */
 function isNotLoggedInError(err: unknown): boolean {
   const CKR_USER_NOT_LOGGED_IN = 0x00000101;
   if (err && typeof err === 'object') {
     const code = (err as { code?: number }).code;
     if (code === CKR_USER_NOT_LOGGED_IN) return true;
-    const message = (err as { message?: string }).message;
-    if (typeof message === 'string' && message.includes('CKR_USER_NOT_LOGGED_IN')) return true;
   }
   return false;
 }
