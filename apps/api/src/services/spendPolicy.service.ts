@@ -305,3 +305,57 @@ export async function enforceSpendPolicy(clientId: string, amountDrops: string):
 export function clearPolicyCache(): void {
   policyCache.clear();
 }
+
+/**
+ * Decrement the client's daily spend counter by `amountDrops`. Called by
+ * the txConfirmer when a tx that enforceSpendPolicy accepted transitions
+ * to a terminal `failed` state (either pre-submission or on-ledger), so
+ * the client gets their budget back instead of the counter over-counting
+ * for the rest of the 24h window.
+ *
+ * REVIEW.md MED-04: before this, the counter was append-only — a
+ * malicious client deliberately spamming failing transactions (bad
+ * destination, `tecNO_DST`, intentionally-malformed MPT issuance, etc.)
+ * could pin the daily budget at zero against legit traffic until the
+ * 24h window rolled over. Now each failure refunds the counter.
+ *
+ * Never throws — best-effort. Wrapped in try/catch because:
+ *   - The counter may not exist (policy wasn't active at enforcement time)
+ *   - Redis may be down (we already tolerate that in the enforcement path)
+ *   - DECRBY may drive the counter below zero on a race (harmless — it
+ *     just means the client has a tiny slack window on reseed).
+ */
+export async function refundSpendCounter(clientId: string, amountDrops: string): Promise<void> {
+  if (!amountDrops || amountDrops === '0') return;
+  const policy = await getPolicy(clientId).catch(() => null);
+  if (!policy || policy.dailyXrpLimitDrops === null) return;
+
+  let amount: bigint;
+  try {
+    amount = BigInt(amountDrops);
+  } catch {
+    return; // malformed — nothing to refund
+  }
+  if (amount <= 0n) return;
+
+  try {
+    const redis = getRedis();
+    const key = dailyCounterKey(clientId);
+    // DECRBY is a no-op if the key is missing (it creates the key at 0
+    // then decrements, resulting in -amount — which is wrong). Guard
+    // with EXISTS so we don't synthesize a negative counter that would
+    // later pass every check.
+    const exists = await redis.exists(key);
+    if (exists === 0) return;
+    await redis.decrby(key, amount.toString());
+  } catch (err) {
+    logger.warn(
+      {
+        err: err instanceof Error ? err.message : String(err),
+        clientId,
+        amountDrops,
+      },
+      'spend policy: refund decrement failed (best-effort)',
+    );
+  }
+}

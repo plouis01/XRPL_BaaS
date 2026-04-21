@@ -20,6 +20,7 @@
 // delivery worker handles retries independently from this job.
 
 import { and, db, eq, isNull, schema, sql } from '@railforge/db';
+import { getJobsRedis } from '@railforge/jobs';
 import type { Logger } from '@railforge/logger';
 import { type Job, Worker } from 'bullmq';
 import type { Redis } from 'ioredis';
@@ -32,6 +33,56 @@ import {
   getSequencer,
   getXrplPool,
 } from '../queues.ts';
+
+/**
+ * Refund the API-side spend-policy Redis counter on a terminal tx failure.
+ *
+ * REVIEW.md MED-04: the counter only ever INCR'd in the API's
+ * enforceSpendPolicy path. A client deliberately submitting failing txs
+ * (bad destination, tecNO_DST, malformed MPT issuance) could pin the
+ * daily budget at zero against legit traffic for up to 24h. Refunding on
+ * the terminal-failed transitions below gives the budget back.
+ *
+ * Key pattern + best-effort semantics mirror apps/api/src/services/
+ * spendPolicy.service.ts refundSpendCounter — this is the worker-side
+ * mirror (no shared package yet; it's ~15 lines, not worth carving out).
+ * If the key names drift, the bug is silent — keep them synced.
+ */
+async function refundSpendCounterBestEffort(txId: string, log: Logger): Promise<void> {
+  let row: { clientId: string; amountDrops: string | null } | undefined;
+  try {
+    const rows = await db
+      .select({
+        clientId: schema.transactions.clientId,
+        amountDrops: schema.transactions.amountDrops,
+      })
+      .from(schema.transactions)
+      .where(eq(schema.transactions.id, txId))
+      .limit(1);
+    row = rows[0];
+  } catch (err) {
+    log.warn({ err }, 'spend-policy refund: failed to fetch tx amount (non-fatal)');
+    return;
+  }
+  if (!row || !row.amountDrops) return;
+  let amount: bigint;
+  try {
+    amount = BigInt(row.amountDrops);
+  } catch {
+    return;
+  }
+  if (amount <= 0n) return;
+
+  try {
+    const redis = getJobsRedis();
+    const key = `railforge:spendpolicy:daily:${row.clientId}`;
+    const exists = await redis.exists(key);
+    if (exists === 0) return;
+    await redis.decrby(key, amount.toString());
+  } catch (err) {
+    log.warn({ err }, 'spend-policy refund: Redis decrby failed (non-fatal)');
+  }
+}
 
 /**
  * Thrown when we've polled and the tx isn't validated yet, but the
@@ -94,6 +145,9 @@ export async function processTxConfirmJob(job: Job<TxConfirmJobData>): Promise<v
           errorMessage: 'Transaction expired before validation',
         })
         .where(eq(schema.transactions.id, txId));
+      // REVIEW.md MED-04: release the client's daily spend budget for
+      // this expired tx. Best-effort — no retry on refund failure.
+      await refundSpendCounterBestEffort(txId, log);
       // Partner to the acceptCredential TOCTOU fix: if this expired tx
       // was a CredentialAccept, revert the credential row out of the
       // 'accepting' intermediate state back to 'pending' so the subject
@@ -157,6 +211,13 @@ export async function processTxConfirmJob(job: Job<TxConfirmJobData>): Promise<v
       ...(isSuccess ? {} : { errorMessage: `validated with ${resultCode}` }),
     })
     .where(eq(schema.transactions.id, txId));
+
+  // REVIEW.md MED-04: on-ledger failure (validated-with-non-tesSUCCESS)
+  // is the second terminal-failed path. Refund the spend counter here too
+  // so tec-coded failures don't pin the daily budget.
+  if (!isSuccess) {
+    await refundSpendCounterBestEffort(txId, log);
+  }
 
   log.info({ ledgerIndex, resultCode }, 'tx validated');
 
