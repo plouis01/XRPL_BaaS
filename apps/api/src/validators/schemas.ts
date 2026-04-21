@@ -3,6 +3,18 @@ import { z } from 'zod';
 // Zod schemas — single source of truth for request/response shapes.
 // Each route imports its schemas from here. Keep them grouped by resource.
 
+// REVIEW.md LOW-08: free-form metadata fields used to be `z.record(z.unknown())`
+// with no size bound, so a tenant could stuff up to ~1 MB (the app-wide
+// bodyLimit) per credential / token. That's a storage-amplification surface
+// and a slow-query vector on later SELECTs. 8 KB is ~100× the realistic
+// metadata payload (a handful of tag/value pairs) and still permissive.
+const METADATA_MAX_BYTES = 8 * 1024;
+const boundedMetadataSchema = z
+  .record(z.unknown())
+  .refine((v) => JSON.stringify(v).length <= METADATA_MAX_BYTES, {
+    message: `metadata must serialize to ${METADATA_MAX_BYTES} bytes or fewer`,
+  });
+
 // ── Accounts ─────────────────────────────────────────────────────────────────
 
 // Re-used XRPL r-address shape (24-34 base58 chars after 'r').
@@ -85,7 +97,7 @@ export const createTokenSchema = z.object({
   /** Max supply as a decimal string. Optional — unbounded if omitted. */
   max_supply: z.string().optional(),
   /** Optional metadata (key/value JSON). Merged into tokens.metadata. */
-  metadata: z.record(z.unknown()).optional(),
+  metadata: boundedMetadataSchema.optional(),
   /**
    * Trust line opt-in only: the limit a trust line will hold. Required when
    * type='trustline'. The Zod refine below enforces this so we never reach
@@ -256,7 +268,7 @@ export const issueCredentialSchema = z.object({
     .regex(/^[0-9a-fA-F]*$/, 'uri must be hex-encoded')
     .optional(),
   /** Optional metadata (key/value JSON). */
-  metadata: z.record(z.unknown()).optional(),
+  metadata: boundedMetadataSchema.optional(),
 });
 
 export const acceptCredentialSchema = z.object({
