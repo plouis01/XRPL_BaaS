@@ -10,6 +10,7 @@
 
 import { zValidator } from '@hono/zod-validator';
 import { Hono } from 'hono';
+import { dexReadRateLimit } from '../middleware/dexReadRateLimit.ts';
 import { revocationCheck } from '../middleware/revocationCheck.ts';
 import { AssetParseError, parseAssetParam, rippledAssetSpec } from '../services/assetQuery.ts';
 import {
@@ -109,7 +110,9 @@ dex.delete('/offers/:id', zValidator('json', cancelOfferSchema), async (c) => {
 //   default         → live rippled `book_offers` (authoritative)
 //   ?source=indexer → indexer's offer_book cache (fast, as fresh as the HWM)
 // Optional ?limit= (default 50, max 400).
-dex.get('/orderbook/:base/:counter', async (c) => {
+// REVIEW.md MED-09: tighter rate limit on the read routes to stop a
+// free-tier key from scraping XRPL through rippled + our bandwidth.
+dex.get('/orderbook/:base/:counter', dexReadRateLimit, async (c) => {
   try {
     const base = parseAssetParam(c.req.param('base'));
     const counter = parseAssetParam(c.req.param('counter'));
@@ -204,7 +207,7 @@ dex.post('/amm/withdraw', zValidator('json', ammWithdrawSchema), async (c) => {
 });
 
 // GET /amm/:asset1/:asset2 — live rippled `amm_info` query.
-dex.get('/amm/:asset1/:asset2', async (c) => {
+dex.get('/amm/:asset1/:asset2', dexReadRateLimit, async (c) => {
   try {
     const asset1 = parseAssetParam(c.req.param('asset1'));
     const asset2 = parseAssetParam(c.req.param('asset2'));
