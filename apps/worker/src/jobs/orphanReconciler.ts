@@ -28,7 +28,7 @@
 // enough that a normal enqueue (sub-second) is never racing with the
 // sweep, short enough that genuine orphans don't sit for hours.
 
-import { and, db, eq, lt, schema } from '@railforge/db';
+import { and, db, eq, isNull, like, lt, schema } from '@railforge/db';
 import { Worker } from 'bullmq';
 import type { Redis } from 'ioredis';
 import { logger } from '../logger.ts';
@@ -58,6 +58,12 @@ export interface OrphanReconcileJobData {
 export interface OrphanReconcileResult {
   orphanedCount: number;
   accountsSoftDeleted: number;
+  /**
+   * REVIEW.md HIGH-09: count of HSM-mode `accounts` rows soft-deleted
+   * because they never got a funding tx (generateInHsm failed permanently,
+   * so fundingTxId is NULL and the tx-based sweep can't reach them).
+   */
+  hsmOrphansSoftDeleted: number;
 }
 
 /**
@@ -87,13 +93,12 @@ export async function processOrphanReconcileSweep(
     .where(and(eq(schema.transactions.status, 'queued'), lt(schema.transactions.createdAt, cutoff)))
     .limit(BATCH_SIZE);
 
-  if (stale.length === 0) {
-    log.debug('no orphan transactions found');
-    return { orphanedCount: 0, accountsSoftDeleted: 0 };
-  }
-
   let orphanedCount = 0;
   let accountsSoftDeleted = 0;
+
+  if (stale.length === 0) {
+    log.debug('no orphan transactions found');
+  }
 
   for (const row of stale) {
     // Claim the row by flipping status under a status='queued' guard.
@@ -151,11 +156,54 @@ export async function processOrphanReconcileSweep(
     }
   }
 
+  // REVIEW.md HIGH-09: HSM pre-funding sweep.
+  //
+  // In HSM mode the API inserts an `accounts` row with a placeholder
+  // address (`pending-<uuid>`) and masterKeyRef='pending' BEFORE the worker
+  // generates the keypair. If the ACCOUNT_SETUP job fails permanently, the
+  // funding `transactions` row is never created — so fundingTxId is NULL
+  // and the tx-based sweep above cannot reach these rows. They accumulate
+  // forever, bloating the table and counting against the client's
+  // isFunded=false account limits.
+  //
+  // Fix: sweep for pending-% rows older than the cutoff that never
+  // received a funding tx, and soft-delete them. The client can then call
+  // createAccount again. Cap per-sweep work the same way as the tx sweep.
+  const pendingHsmOrphans = await db
+    .update(schema.accounts)
+    .set({ deletedAt: new Date() })
+    .where(
+      and(
+        like(schema.accounts.address, 'pending-%'),
+        eq(schema.accounts.isFunded, false),
+        isNull(schema.accounts.fundingTxId),
+        isNull(schema.accounts.deletedAt),
+        lt(schema.accounts.createdAt, cutoff),
+      ),
+    )
+    .returning({ id: schema.accounts.id });
+
+  const hsmOrphansSoftDeleted = pendingHsmOrphans.length;
+  if (hsmOrphansSoftDeleted > 0) {
+    log.warn(
+      {
+        accountIds: pendingHsmOrphans.map((a) => a.id),
+        count: hsmOrphansSoftDeleted,
+      },
+      'HSM-mode accounts soft-deleted (no funding tx after grace window)',
+    );
+  }
+
   log.info(
-    { orphanedCount, accountsSoftDeleted, scannedCount: stale.length },
+    {
+      orphanedCount,
+      accountsSoftDeleted,
+      hsmOrphansSoftDeleted,
+      scannedCount: stale.length,
+    },
     'orphan reconciliation sweep complete',
   );
-  return { orphanedCount, accountsSoftDeleted };
+  return { orphanedCount, accountsSoftDeleted, hsmOrphansSoftDeleted };
 }
 
 /**

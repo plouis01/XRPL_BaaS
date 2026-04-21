@@ -67,6 +67,8 @@ vi.mock('@railforge/db', () => {
     eq: vi.fn(),
     and: vi.fn((...args: unknown[]) => ({ and: args })),
     lt: vi.fn(),
+    like: vi.fn(),
+    isNull: vi.fn(),
     schema: {
       transactions: {
         __name: 'transactions',
@@ -118,8 +120,15 @@ describe('processOrphanReconcileSweep', () => {
 
     const result = await processOrphanReconcileSweep();
 
-    expect(result).toEqual({ orphanedCount: 0, accountsSoftDeleted: 0 });
-    expect(recordedUpdates).toEqual([]);
+    expect(result).toEqual({
+      orphanedCount: 0,
+      accountsSoftDeleted: 0,
+      hsmOrphansSoftDeleted: 0,
+    });
+    // HIGH-09: the HSM pre-funding sweep runs unconditionally at the end.
+    // With no matching rows it still records one accounts UPDATE.
+    expect(recordedUpdates).toHaveLength(1);
+    expect(recordedUpdates[0]?.table).toBe('accounts');
   });
 
   it('marks a single orphan failed and soft-deletes the linked account', async () => {
@@ -129,10 +138,15 @@ describe('processOrphanReconcileSweep', () => {
 
     const result = await processOrphanReconcileSweep();
 
-    expect(result).toEqual({ orphanedCount: 1, accountsSoftDeleted: 1 });
+    expect(result).toEqual({
+      orphanedCount: 1,
+      accountsSoftDeleted: 1,
+      hsmOrphansSoftDeleted: 0,
+    });
 
-    // Two updates: transactions (mark failed) then accounts (soft-delete).
-    expect(recordedUpdates).toHaveLength(2);
+    // Three updates: transactions (mark failed), accounts (soft-delete),
+    // and the HIGH-09 HSM pre-funding sweep (another accounts UPDATE).
+    expect(recordedUpdates).toHaveLength(3);
     expect(recordedUpdates[0]?.table).toBe('transactions');
     expect(recordedUpdates[0]?.set).toMatchObject({
       status: 'failed',
@@ -156,9 +170,13 @@ describe('processOrphanReconcileSweep', () => {
 
     const result = await processOrphanReconcileSweep();
 
-    expect(result).toEqual({ orphanedCount: 1, accountsSoftDeleted: 0 });
-    // Both UPDATEs still ran — the accounts UPDATE just matched zero rows.
-    expect(recordedUpdates).toHaveLength(2);
+    expect(result).toEqual({
+      orphanedCount: 1,
+      accountsSoftDeleted: 0,
+      hsmOrphansSoftDeleted: 0,
+    });
+    // Both per-orphan UPDATEs + the HIGH-09 HSM pre-funding sweep = 3.
+    expect(recordedUpdates).toHaveLength(3);
     expect(recordedUpdates[1]?.table).toBe('accounts');
   });
 
@@ -174,11 +192,16 @@ describe('processOrphanReconcileSweep', () => {
 
     const result = await processOrphanReconcileSweep();
 
-    expect(result).toEqual({ orphanedCount: 1, accountsSoftDeleted: 1 });
-    // Updates recorded: tx-3 claim attempt (returned []), tx-4 claim (returned id), accounts (returned id).
-    // The accounts UPDATE for tx-3 should be skipped because the claim lost.
+    expect(result).toEqual({
+      orphanedCount: 1,
+      accountsSoftDeleted: 1,
+      hsmOrphansSoftDeleted: 0,
+    });
+    // Updates recorded: tx-3 claim attempt (returned []), tx-4 claim
+    // (returned id), accounts soft-delete (returned id), + the HIGH-09
+    // HSM pre-funding sweep at the end.
     const tableSequence = recordedUpdates.map((u) => u.table);
-    expect(tableSequence).toEqual(['transactions', 'transactions', 'accounts']);
+    expect(tableSequence).toEqual(['transactions', 'transactions', 'accounts', 'accounts']);
   });
 
   it('processes multiple orphans in a single sweep', async () => {
@@ -192,9 +215,14 @@ describe('processOrphanReconcileSweep', () => {
 
     const result = await processOrphanReconcileSweep();
 
-    expect(result).toEqual({ orphanedCount: 3, accountsSoftDeleted: 2 });
-    // 3 transactions UPDATEs + 3 accounts UPDATEs.
-    expect(recordedUpdates).toHaveLength(6);
+    expect(result).toEqual({
+      orphanedCount: 3,
+      accountsSoftDeleted: 2,
+      hsmOrphansSoftDeleted: 0,
+    });
+    // 3 transactions UPDATEs + 3 per-orphan accounts UPDATEs + 1 HSM
+    // pre-funding sweep at the end.
+    expect(recordedUpdates).toHaveLength(7);
   });
 
   it('honors the gracePeriodMs override (smoke check that the parameter wires through)', async () => {
@@ -203,6 +231,32 @@ describe('processOrphanReconcileSweep', () => {
     // filter, but we want to make sure the override is accepted and the
     // sweep doesn't throw.
     const result = await processOrphanReconcileSweep(60_000);
-    expect(result).toEqual({ orphanedCount: 0, accountsSoftDeleted: 0 });
+    expect(result).toEqual({
+      orphanedCount: 0,
+      accountsSoftDeleted: 0,
+      hsmOrphansSoftDeleted: 0,
+    });
+  });
+
+  it('HIGH-09: soft-deletes pending-<uuid> accounts that never got a funding tx', async () => {
+    // The HSM sweep soft-deletes accounts whose address starts with
+    // 'pending-' and have NULL fundingTxId — these are rows where
+    // generateInHsm failed permanently and the tx-based sweep can't
+    // reach them (no fundingTxId to match on).
+    staleSelectResults.current = [];
+    // Queue one row for the HSM-sweep UPDATE (index 0 since no earlier
+    // per-orphan updates precede it in this test).
+    accountsDeleteQueue.push([{ id: 'acct-hsm-orphan-1' }]);
+
+    const result = await processOrphanReconcileSweep();
+
+    expect(result).toEqual({
+      orphanedCount: 0,
+      accountsSoftDeleted: 0,
+      hsmOrphansSoftDeleted: 1,
+    });
+    expect(recordedUpdates).toHaveLength(1);
+    expect(recordedUpdates[0]?.table).toBe('accounts');
+    expect(recordedUpdates[0]?.set).toHaveProperty('deletedAt');
   });
 });

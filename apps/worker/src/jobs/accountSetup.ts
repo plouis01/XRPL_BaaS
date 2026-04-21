@@ -39,16 +39,26 @@ export async function processAccountSetupJob(job: Job<AccountSetupJobData>): Pro
   const signer = getSigner();
 
   // 1. Generate keypair in the HSM.
+  //
+  // REVIEW.md HIGH-07: pass a stable `tempLabel` derived from accountId so
+  // a BullMQ retry of this job adopts the prior partial state instead of
+  // generating a fresh orphan keypair. Combined with the try/catch cleanup
+  // inside generateInHsm, HSM slot usage is bounded by the number of
+  // distinct accountIds, not the number of retry attempts.
   if (typeof (signer as { generateInHsm?: unknown }).generateInHsm !== 'function') {
     throw new Error(
       'accountSetup job requires HsmSigner with generateInHsm() — check HSM_PROVIDER',
     );
   }
+  const tempLabel = `railforge:pending:${accountId}`;
   const { address, keyHandle } = await (
     signer as unknown as {
-      generateInHsm: () => Promise<{ address: string; keyHandle: string }>;
+      generateInHsm: (opts: { tempLabel: string }) => Promise<{
+        address: string;
+        keyHandle: string;
+      }>;
     }
-  ).generateInHsm();
+  ).generateInHsm({ tempLabel });
 
   log.info({ address, keyHandle }, 'HSM keypair generated');
 

@@ -305,7 +305,10 @@ export class HsmSigner implements Signer {
    * The private key never leaves the HSM. `CKA_TOKEN=true` persists the
    * key across HSM sessions — a worker restart can find it by label.
    */
-  async generateInHsm(): Promise<{ address: string; keyHandle: string }> {
+  async generateInHsm(opts: { tempLabel?: string } = {}): Promise<{
+    address: string;
+    keyHandle: string;
+  }> {
     this.ensureInitialized();
     const session = this.session;
     if (!session) throw new SignerError('sign_failed', 'HSM session not open');
@@ -314,53 +317,97 @@ export class HsmSigner implements Signer {
     // `railforge:<address>` label once we've derived the address. This
     // two-step ceremony is necessary because the address depends on the
     // pubkey, which only exists after generation.
-    const tempLabel = `railforge:pending:${Date.now()}:${Math.random().toString(36).slice(2, 10)}`;
+    //
+    // REVIEW.md HIGH-07: callers (accountSetup) pass a stable label
+    // derived from accountId so job retries can find and adopt prior
+    // partial state instead of generating a fresh orphaned keypair on
+    // every retry. If caller provides none, fall back to a random one.
+    const tempLabel =
+      opts.tempLabel ??
+      `railforge:pending:${Date.now()}:${Math.random().toString(36).slice(2, 10)}`;
 
-    const publicKeyTemplate = [
-      { type: pkcs11js.CKA_TOKEN, value: true },
-      { type: pkcs11js.CKA_PRIVATE, value: false },
-      { type: pkcs11js.CKA_VERIFY, value: true },
-      { type: pkcs11js.CKA_EC_PARAMS, value: SECP256K1_OID_DER },
-      { type: pkcs11js.CKA_LABEL, value: tempLabel },
-    ];
-    const privateKeyTemplate = [
-      { type: pkcs11js.CKA_TOKEN, value: true },
-      { type: pkcs11js.CKA_PRIVATE, value: true },
-      { type: pkcs11js.CKA_SENSITIVE, value: true },
-      { type: pkcs11js.CKA_EXTRACTABLE, value: false },
-      { type: pkcs11js.CKA_SIGN, value: true },
-      { type: pkcs11js.CKA_LABEL, value: tempLabel },
-    ];
-
+    // Retry-dedup: if a prior call for this tempLabel already generated
+    // but failed to rename, adopt the existing keys rather than leaving
+    // them orphaned and generating a second pair.
     this.ensureLoggedIn();
-    const keys = this.pkcs11.C_GenerateKeyPair(
-      session,
-      { mechanism: pkcs11js.CKM_EC_KEY_PAIR_GEN },
-      publicKeyTemplate,
-      privateKeyTemplate,
-    );
+    const existingPub = this.findObjectByLabel(session, tempLabel, pkcs11js.CKO_PUBLIC_KEY);
+    const existingPriv = this.findObjectByLabel(session, tempLabel, pkcs11js.CKO_PRIVATE_KEY);
+    let keys: { publicKey: Handle; privateKey: Handle };
+    if (existingPub && existingPriv) {
+      keys = { publicKey: existingPub, privateKey: existingPriv };
+    } else {
+      const publicKeyTemplate = [
+        { type: pkcs11js.CKA_TOKEN, value: true },
+        { type: pkcs11js.CKA_PRIVATE, value: false },
+        { type: pkcs11js.CKA_VERIFY, value: true },
+        { type: pkcs11js.CKA_EC_PARAMS, value: SECP256K1_OID_DER },
+        { type: pkcs11js.CKA_LABEL, value: tempLabel },
+      ];
+      const privateKeyTemplate = [
+        { type: pkcs11js.CKA_TOKEN, value: true },
+        { type: pkcs11js.CKA_PRIVATE, value: true },
+        { type: pkcs11js.CKA_SENSITIVE, value: true },
+        { type: pkcs11js.CKA_EXTRACTABLE, value: false },
+        { type: pkcs11js.CKA_SIGN, value: true },
+        { type: pkcs11js.CKA_LABEL, value: tempLabel },
+      ];
+      keys = this.pkcs11.C_GenerateKeyPair(
+        session,
+        { mechanism: pkcs11js.CKM_EC_KEY_PAIR_GEN },
+        publicKeyTemplate,
+        privateKeyTemplate,
+      );
+    }
 
-    const compressedPubkey = this.extractCompressedPubkey(session, keys.publicKey);
-    const address = xrplDeriveAddress(compressedPubkey.toString('hex').toUpperCase());
-    const finalLabel = `railforge:${address}`;
+    // REVIEW.md HIGH-07: any failure after C_GenerateKeyPair must destroy
+    // the now-orphaned handles. CloudHSM slots are finite — accumulated
+    // orphans from failed setup attempts eventually produce
+    // CKR_DEVICE_MEMORY and halt account creation platform-wide.
+    try {
+      const compressedPubkey = this.extractCompressedPubkey(session, keys.publicKey);
+      const address = xrplDeriveAddress(compressedPubkey.toString('hex').toUpperCase());
 
-    // Rename both objects to the canonical label. C_SetAttributeValue is
-    // one call per object.
-    this.pkcs11.C_SetAttributeValue(session, keys.publicKey, [
-      { type: pkcs11js.CKA_LABEL, value: finalLabel },
-    ]);
-    this.pkcs11.C_SetAttributeValue(session, keys.privateKey, [
-      { type: pkcs11js.CKA_LABEL, value: finalLabel },
-    ]);
+      // Validate derived address — a malformed string would produce a
+      // permanently-unaddressable key persisted under the 'pending'
+      // tempLabel, exactly the orphan pattern we're trying to avoid.
+      if (typeof address !== 'string' || !/^r[1-9A-HJ-NP-Za-km-z]{24,34}$/.test(address)) {
+        throw new SignerError('sign_failed', 'HSM produced an invalid classic address');
+      }
 
-    // Pre-populate the cache so the caller can sign immediately without
-    // re-finding the key by label.
-    this.keys.set(address, {
-      privateKeyHandle: keys.privateKey,
-      compressedPubkey,
-    });
+      const finalLabel = `railforge:${address}`;
 
-    return { address, keyHandle: finalLabel };
+      // Rename both objects to the canonical label. C_SetAttributeValue is
+      // one call per object.
+      this.pkcs11.C_SetAttributeValue(session, keys.publicKey, [
+        { type: pkcs11js.CKA_LABEL, value: finalLabel },
+      ]);
+      this.pkcs11.C_SetAttributeValue(session, keys.privateKey, [
+        { type: pkcs11js.CKA_LABEL, value: finalLabel },
+      ]);
+
+      // Pre-populate the cache so the caller can sign immediately without
+      // re-finding the key by label.
+      this.keys.set(address, {
+        privateKeyHandle: keys.privateKey,
+        compressedPubkey,
+      });
+
+      return { address, keyHandle: finalLabel };
+    } catch (err) {
+      // Best-effort cleanup. If C_DestroyObject itself throws we swallow
+      // it — the caller's original error is what matters.
+      try {
+        this.pkcs11.C_DestroyObject(session, keys.privateKey);
+      } catch {
+        /* noop */
+      }
+      try {
+        this.pkcs11.C_DestroyObject(session, keys.publicKey);
+      } catch {
+        /* noop */
+      }
+      throw err;
+    }
   }
 
   /** Close the PKCS#11 session. Call on graceful shutdown. */
