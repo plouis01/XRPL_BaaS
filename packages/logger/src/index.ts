@@ -13,6 +13,24 @@
 
 import pino from 'pino';
 
+/**
+ * XRPL seed pattern. Matches the secret-seed format (`s` + 28 chars from the
+ * base58 alphabet). Same pattern as Hook 5 (secret-scan on commit).
+ *
+ * REVIEW.md MED-07: Pino's `redact.paths` only scrubs field *names* — it does
+ * nothing for seed fragments that end up inside `err.message` or `err.stack`.
+ * xrpl.js has historically included seed fragments in error strings when a
+ * Wallet is constructed with a malformed seed, and any error-path log call
+ * that serializes the error with the default serializer would leak it. The
+ * `err` serializer below runs this regex over `message` and `stack` before
+ * the log event is emitted.
+ */
+const XRPL_SEED_PATTERN = /\bs[a-zA-HJ-NP-Z1-9]{28}\b/g;
+
+function scrubSeeds(text: string): string {
+  return text.replace(XRPL_SEED_PATTERN, '[SEED_REDACTED]');
+}
+
 export const REDACT_PATHS = [
   // Top-level wallet object — redact wholesale.
   'wallet',
@@ -58,6 +76,17 @@ export function createLogger(opts: LoggerOptions): pino.Logger {
     redact: {
       paths: REDACT_PATHS,
       censor: '[REDACTED]',
+    },
+    // REVIEW.md MED-07: override Pino's default err serializer so both
+    // `err.message` and `err.stack` are scrubbed for XRPL seed fragments
+    // before emission. The default serializer copies message/stack verbatim.
+    serializers: {
+      err: (err: Error) => {
+        const name = typeof err?.name === 'string' ? err.name : (err?.constructor?.name ?? 'Error');
+        const message = typeof err?.message === 'string' ? scrubSeeds(err.message) : '';
+        const stack = typeof err?.stack === 'string' ? scrubSeeds(err.stack) : undefined;
+        return { type: name, message, stack };
+      },
     },
     ...(isProd
       ? {}
