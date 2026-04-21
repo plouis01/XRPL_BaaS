@@ -8,12 +8,37 @@
 //
 // This runs AFTER auth (which sets c.get('environment')) and BEFORE any
 // route handler.
+//
+// REVIEW.md HIGH-05: XRPL_NETWORK is mandatory. Previously we defaulted to
+// 'testnet' when unset — that silently turned a mainnet deploy with a
+// forgotten env var into "rejects mainnet keys, accepts testnet keys against
+// the mainnet rippled pool." Now we refuse to boot without an explicit
+// setting in {testnet, mainnet, devnet}.
 
 import type { MiddlewareHandler } from 'hono';
 import { logger } from '../logger.ts';
 import type { AppEnv } from '../types.ts';
 
-const SERVER_NETWORK = process.env.XRPL_NETWORK ?? 'testnet';
+const ALLOWED_NETWORKS = ['testnet', 'mainnet', 'devnet'] as const;
+type ServerNetwork = (typeof ALLOWED_NETWORKS)[number];
+
+export function resolveServerNetwork(): ServerNetwork {
+  const raw = process.env.XRPL_NETWORK;
+  if (!raw || raw.trim().length === 0) {
+    throw new Error(
+      'XRPL_NETWORK is required. Set it to one of testnet | mainnet | devnet ' +
+        'in your .env (see .env.example). Defaulting silently would mask a ' +
+        'mainnet misconfiguration.',
+    );
+  }
+  const normalized = raw.trim().toLowerCase();
+  if (!ALLOWED_NETWORKS.includes(normalized as ServerNetwork)) {
+    throw new Error(`XRPL_NETWORK=${raw} is not one of ${ALLOWED_NETWORKS.join(' | ')}.`);
+  }
+  return normalized as ServerNetwork;
+}
+
+const SERVER_NETWORK: ServerNetwork = resolveServerNetwork();
 
 export const envGuard: MiddlewareHandler<AppEnv> = async (c, next) => {
   const keyEnv = c.get('environment');

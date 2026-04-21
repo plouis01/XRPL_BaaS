@@ -48,3 +48,55 @@ describe('envGuard', () => {
     );
   });
 });
+
+describe('resolveServerNetwork (HIGH-05 fail-fast)', () => {
+  it('throws when XRPL_NETWORK is unset', async () => {
+    const { resolveServerNetwork } = await import('./envGuard.ts');
+    const prior = process.env.XRPL_NETWORK;
+    // Reflect.deleteProperty is a true unset — assigning `undefined` coerces
+    // to the literal string "undefined" in process.env.
+    Reflect.deleteProperty(process.env, 'XRPL_NETWORK');
+    try {
+      expect(() => resolveServerNetwork()).toThrow(/XRPL_NETWORK is required/);
+    } finally {
+      process.env.XRPL_NETWORK = prior;
+    }
+  });
+
+  it('throws when XRPL_NETWORK is empty', async () => {
+    const { resolveServerNetwork } = await import('./envGuard.ts');
+    const prior = process.env.XRPL_NETWORK;
+    process.env.XRPL_NETWORK = '   ';
+    try {
+      expect(() => resolveServerNetwork()).toThrow(/XRPL_NETWORK is required/);
+    } finally {
+      process.env.XRPL_NETWORK = prior;
+    }
+  });
+
+  it('throws on an unknown value', async () => {
+    const { resolveServerNetwork } = await import('./envGuard.ts');
+    const prior = process.env.XRPL_NETWORK;
+    process.env.XRPL_NETWORK = 'staging';
+    try {
+      expect(() => resolveServerNetwork()).toThrow(/not one of/);
+    } finally {
+      process.env.XRPL_NETWORK = prior;
+    }
+  });
+
+  it('accepts and lowercases mainnet/MAINNET/TestNet', async () => {
+    const { resolveServerNetwork } = await import('./envGuard.ts');
+    const prior = process.env.XRPL_NETWORK;
+    try {
+      process.env.XRPL_NETWORK = 'MAINNET';
+      expect(resolveServerNetwork()).toBe('mainnet');
+      process.env.XRPL_NETWORK = 'TestNet';
+      expect(resolveServerNetwork()).toBe('testnet');
+      process.env.XRPL_NETWORK = 'devnet';
+      expect(resolveServerNetwork()).toBe('devnet');
+    } finally {
+      process.env.XRPL_NETWORK = prior;
+    }
+  });
+});
