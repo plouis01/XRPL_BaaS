@@ -378,10 +378,16 @@ export function extractMptIssuanceIdFromMeta(
     if (created.LedgerEntryType !== 'MPTokenIssuance') continue;
 
     // The id may be on the node fields under a couple of names depending
-    // on rippled version: `mpt_issuance_id`, `MPTokenIssuanceID`, or
-    // exposed as the LedgerIndex of the created entry. Try all three.
+    // on rippled version: `mpt_issuance_id` or `MPTokenIssuanceID`. Try both.
+    //
+    // REVIEW.md LOW-06: previously also fell back to `LedgerIndex`, but
+    // that's the 256-bit ledger entry hash — NOT the 192-bit MPT issuance
+    // id. On older rippled versions that don't surface the real id here
+    // the fallback would silently poison tokens.mpt_issuance_id with the
+    // wrong value and every later lookup by id would miss. Fail closed
+    // instead so the operator notices.
     const fields = (created.NewFields ?? {}) as Record<string, unknown>;
-    const candidates = [fields.mpt_issuance_id, fields.MPTokenIssuanceID, created.LedgerIndex];
+    const candidates = [fields.mpt_issuance_id, fields.MPTokenIssuanceID];
     for (const c of candidates) {
       if (typeof c === 'string' && c.length > 0) {
         return c;
