@@ -186,7 +186,7 @@ export async function grantPermission(
           txType: 'SignerListSet',
           sourceAddress: input.delegatorAddress,
           status: 'queued',
-          idempotencyKey: input.idempotencyKey,
+          idempotencyKey: input.idempotencyKey ?? crypto.randomUUID(),
           requestBody: {
             op: 'grantPermission',
             delegator: input.delegatorAddress,
@@ -346,7 +346,7 @@ export async function revokePermission(input: RevokePermissionInput): Promise<{ 
           txType: 'SignerListSet',
           sourceAddress: input.delegatorAddress,
           status: 'queued',
-          idempotencyKey: input.idempotencyKey,
+          idempotencyKey: input.idempotencyKey ?? crypto.randomUUID(),
           requestBody: {
             op: 'revokePermission',
             delegationId: delegation.id,

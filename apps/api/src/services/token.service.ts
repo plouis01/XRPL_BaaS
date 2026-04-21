@@ -61,6 +61,8 @@ export interface CreateTokenInput {
    * but the service double-checks since validators can drift.
    */
   trustlineLimit?: string;
+  /** REVIEW.md HIGH-04: thread into transactions.idempotency_key. */
+  idempotencyKey?: string;
 }
 
 export interface TokenView {
@@ -183,6 +185,7 @@ export async function createToken(input: CreateTokenInput): Promise<TokenView> {
     .insert(schema.transactions)
     .values({
       clientId: input.clientId,
+      idempotencyKey: input.idempotencyKey ?? crypto.randomUUID(),
       txType,
       sourceAddress: issuer.address,
       status: 'queued',
@@ -309,6 +312,7 @@ export interface TransferTokenInput {
   destination: string;
   amount: string;
   destinationTag?: number;
+  idempotencyKey?: string;
 }
 
 /**
@@ -370,6 +374,7 @@ export async function transferToken(input: TransferTokenInput): Promise<{ txId: 
     .insert(schema.transactions)
     .values({
       clientId: input.clientId,
+      idempotencyKey: input.idempotencyKey ?? crypto.randomUUID(),
       txType: 'Payment',
       sourceAddress: token.issuerAddress,
       status: 'queued',
@@ -396,6 +401,7 @@ export interface FreezeTokenInput {
   holder?: string;
   /** True to unfreeze (tfMPTUnlock), false (default) to freeze (tfMPTLock). */
   unfreeze?: boolean;
+  idempotencyKey?: string;
 }
 
 /**
@@ -439,6 +445,7 @@ export async function freezeToken(input: FreezeTokenInput): Promise<{ txId: stri
     .insert(schema.transactions)
     .values({
       clientId: input.clientId,
+      idempotencyKey: input.idempotencyKey ?? crypto.randomUUID(),
       txType: 'MPTokenIssuanceSet',
       sourceAddress: token.issuerAddress,
       status: 'queued',
@@ -463,6 +470,7 @@ export interface ClawbackTokenInput {
   tokenId: string;
   holder: string;
   amount: string;
+  idempotencyKey?: string;
 }
 
 /**
@@ -510,6 +518,7 @@ export async function clawbackToken(input: ClawbackTokenInput): Promise<{ txId: 
     .insert(schema.transactions)
     .values({
       clientId: input.clientId,
+      idempotencyKey: input.idempotencyKey ?? crypto.randomUUID(),
       txType: 'Clawback',
       sourceAddress: token.issuerAddress,
       status: 'queued',

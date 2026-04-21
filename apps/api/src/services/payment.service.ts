@@ -97,6 +97,8 @@ export interface SendPaymentInput {
   value?: string;
   currency?: string;
   issuer?: string;
+  /** REVIEW.md HIGH-04: thread into transactions.idempotency_key. */
+  idempotencyKey?: string;
 }
 
 export async function sendPayment(input: SendPaymentInput): Promise<{ txId: string }> {
@@ -161,6 +163,7 @@ export async function sendPayment(input: SendPaymentInput): Promise<{ txId: stri
     .insert(schema.transactions)
     .values({
       clientId: input.clientId,
+      idempotencyKey: input.idempotencyKey ?? crypto.randomUUID(),
       txType,
       sourceAddress: source.address,
       status: 'queued',
@@ -219,6 +222,12 @@ export interface SendBatchPaymentsInput {
   clientId: string;
   mode: 'UNTIL_FAILURE' | 'INDEPENDENT';
   payments: BatchPaymentItem[];
+  /**
+   * REVIEW.md HIGH-04: each item is derived to `${batchKey}:${index}` so
+   * items stay uniquely keyed under UNIQUE(client_id, idempotency_key) but
+   * a client retrying the whole batch hits the same derived rows.
+   */
+  idempotencyKey?: string;
 }
 
 export interface BatchResultItem {
@@ -253,7 +262,11 @@ export async function sendBatchPayments(
     }
 
     try {
-      const { txId } = await sendPayment({ clientId: input.clientId, ...item });
+      const { txId } = await sendPayment({
+        clientId: input.clientId,
+        ...item,
+        idempotencyKey: input.idempotencyKey ? `${input.idempotencyKey}:${i}` : undefined,
+      });
       results.push({ index: i, txId, status: 'queued' });
     } catch (err) {
       if (err instanceof PaymentServiceError) {
@@ -340,6 +353,7 @@ export interface CreateEscrowInput {
   cancelAfter?: number;
   condition?: string;
   destinationTag?: number;
+  idempotencyKey?: string;
 }
 
 export async function createEscrow(input: CreateEscrowInput): Promise<{ txId: string }> {
@@ -375,6 +389,7 @@ export async function createEscrow(input: CreateEscrowInput): Promise<{ txId: st
     .insert(schema.transactions)
     .values({
       clientId: input.clientId,
+      idempotencyKey: input.idempotencyKey ?? crypto.randomUUID(),
       txType: 'EscrowCreate',
       sourceAddress: source.address,
       status: 'queued',
@@ -406,6 +421,7 @@ export interface FinishEscrowInput {
   offerSequence: number;
   condition?: string;
   fulfillment?: string;
+  idempotencyKey?: string;
 }
 
 export async function finishEscrow(input: FinishEscrowInput): Promise<{ txId: string }> {
@@ -429,6 +445,7 @@ export async function finishEscrow(input: FinishEscrowInput): Promise<{ txId: st
     .insert(schema.transactions)
     .values({
       clientId: input.clientId,
+      idempotencyKey: input.idempotencyKey ?? crypto.randomUUID(),
       txType: 'EscrowFinish',
       sourceAddress: source.address,
       status: 'queued',
@@ -454,6 +471,7 @@ export interface CancelEscrowInput {
   source: string;
   owner: string;
   offerSequence: number;
+  idempotencyKey?: string;
 }
 
 export async function cancelEscrow(input: CancelEscrowInput): Promise<{ txId: string }> {
@@ -475,6 +493,7 @@ export async function cancelEscrow(input: CancelEscrowInput): Promise<{ txId: st
     .insert(schema.transactions)
     .values({
       clientId: input.clientId,
+      idempotencyKey: input.idempotencyKey ?? crypto.randomUUID(),
       txType: 'EscrowCancel',
       sourceAddress: source.address,
       status: 'queued',

@@ -52,6 +52,13 @@ export interface CreateAccountInput {
   clientId: string;
   label?: string;
   custodyMode?: 'semi' | 'non_custodial';
+  /**
+   * REVIEW.md HIGH-04: thread the request's Idempotency-Key into the
+   * `transactions` row so the DB-layer `UNIQUE(client_id, idempotency_key)`
+   * catches duplicate inserts even if the Redis idempotency cache is
+   * flushed between client retries.
+   */
+  idempotencyKey?: string;
 }
 
 export interface AccountView {
@@ -157,6 +164,7 @@ export async function createAccount(input: CreateAccountInput): Promise<AccountV
         fundingAmountDrops: FUNDING_AMOUNT_DROPS,
         label: input.label,
         custodyMode: input.custodyMode ?? 'semi',
+        idempotencyKey: input.idempotencyKey ?? crypto.randomUUID(),
       });
     } catch (err) {
       log.error({ err }, 'enqueueAccountSetup failed after DB commit');
@@ -207,6 +215,7 @@ export async function createAccount(input: CreateAccountInput): Promise<AccountV
         .insert(schema.transactions)
         .values({
           clientId: input.clientId,
+          idempotencyKey: input.idempotencyKey ?? crypto.randomUUID(),
           txType: 'Payment',
           sourceAddress: treasuryAddress,
           status: 'queued',
@@ -375,6 +384,7 @@ export interface ConfigureSignersInput {
   /** Quorum is the sum of weights required to authorize a tx. 0 = delete the list. */
   quorum: number;
   signers: Array<{ address: string; weight: number }>;
+  idempotencyKey?: string;
 }
 
 /**
@@ -423,6 +433,7 @@ export async function configureSigners(input: ConfigureSignersInput): Promise<{ 
     .insert(schema.transactions)
     .values({
       clientId: input.clientId,
+      idempotencyKey: input.idempotencyKey ?? crypto.randomUUID(),
       txType: 'SignerListSet',
       sourceAddress: account.address,
       status: 'queued',
@@ -451,6 +462,7 @@ export interface RotateRegularKeyInput {
   address: string;
   /** New regular key address, or null to clear the existing one. */
   regularKey: string | null;
+  idempotencyKey?: string;
 }
 
 /**
@@ -489,6 +501,7 @@ export async function rotateRegularKey(input: RotateRegularKeyInput): Promise<{ 
     .insert(schema.transactions)
     .values({
       clientId: input.clientId,
+      idempotencyKey: input.idempotencyKey ?? crypto.randomUUID(),
       txType: 'SetRegularKey',
       sourceAddress: account.address,
       status: 'queued',
@@ -519,6 +532,7 @@ export interface DeleteAccountInput {
   /** Where to send the reclaimed XRP reserve. Must be a funded account. */
   destination: string;
   destinationTag?: number;
+  idempotencyKey?: string;
 }
 
 /**
@@ -561,6 +575,7 @@ export async function deleteAccount(input: DeleteAccountInput): Promise<{ txId: 
     .insert(schema.transactions)
     .values({
       clientId: input.clientId,
+      idempotencyKey: input.idempotencyKey ?? crypto.randomUUID(),
       txType: 'AccountDelete',
       sourceAddress: account.address,
       status: 'queued',

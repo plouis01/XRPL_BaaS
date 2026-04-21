@@ -49,6 +49,7 @@ accounts.post('/', zValidator('json', createAccountSchema), async (c) => {
       clientId,
       label: body.label,
       custodyMode: body.custody_mode,
+      idempotencyKey: c.req.header('idempotency-key'),
     });
     // Response shape matches PLAN.md §4.5 — snake_case for wire format.
     return c.json(
@@ -264,6 +265,7 @@ accounts.put('/:address/signers', zValidator('json', configureSignersSchema), as
       address,
       quorum: body.quorum,
       signers: body.signers,
+      idempotencyKey: c.req.header('idempotency-key'),
     });
     return c.json({ tx_id: result.txId, status: 'queued' }, 202);
   } catch (err) {
@@ -285,6 +287,7 @@ accounts.post('/:address/rotate-key', zValidator('json', rotateRegularKeySchema)
       address,
       // body.regular_key may be undefined (omitted) — treat as null (clear).
       regularKey: body.regular_key ?? null,
+      idempotencyKey: c.req.header('idempotency-key'),
     });
     return c.json({ tx_id: result.txId, status: 'queued' }, 202);
   } catch (err) {
@@ -306,6 +309,7 @@ accounts.delete('/:address', zValidator('json', deleteAccountSchema), async (c) 
       address,
       destination: body.destination,
       destinationTag: body.destination_tag,
+      idempotencyKey: c.req.header('idempotency-key'),
     });
     return c.json({ tx_id: result.txId, status: 'queued' }, 202);
   } catch (err) {

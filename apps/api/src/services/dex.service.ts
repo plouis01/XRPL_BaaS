@@ -135,7 +135,7 @@ export async function createOffer(
       sourceAddress: input.account,
       status: 'queued',
       amountDrops: xrpDropsOut ?? null,
-      idempotencyKey: input.idempotencyKey,
+      idempotencyKey: input.idempotencyKey ?? crypto.randomUUID(),
       requestBody: { op: 'createOffer', account: input.account },
     })
     .returning({ id: schema.transactions.id });
@@ -186,7 +186,7 @@ export async function cancelOffer(
       txType: 'OfferCancel',
       sourceAddress: input.account,
       status: 'queued',
-      idempotencyKey: input.idempotencyKey,
+      idempotencyKey: input.idempotencyKey ?? crypto.randomUUID(),
       requestBody: {
         op: 'cancelOffer',
         account: input.account,
@@ -253,7 +253,7 @@ export async function ammDeposit(
       txType: 'AMMDeposit',
       sourceAddress: input.account,
       status: 'queued',
-      idempotencyKey: input.idempotencyKey,
+      idempotencyKey: input.idempotencyKey ?? crypto.randomUUID(),
       requestBody: { op: 'ammDeposit', account: input.account },
     })
     .returning({ id: schema.transactions.id });
@@ -316,7 +316,7 @@ export async function ammWithdraw(
       txType: 'AMMWithdraw',
       sourceAddress: input.account,
       status: 'queued',
-      idempotencyKey: input.idempotencyKey,
+      idempotencyKey: input.idempotencyKey ?? crypto.randomUUID(),
       requestBody: { op: 'ammWithdraw', account: input.account },
     })
     .returning({ id: schema.transactions.id });

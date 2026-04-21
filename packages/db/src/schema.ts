@@ -234,7 +234,14 @@ export const transactions = pgTable(
     clientId: uuid('client_id')
       .notNull()
       .references(() => clients.id),
-    idempotencyKey: text('idempotency_key'),
+    // REVIEW.md HIGH-04: NOT NULL is load-bearing. Postgres treats every NULL
+    // as distinct under UNIQUE(client_id, idempotency_key), so a NULL here
+    // silently bypasses the DB-layer idempotency guard. Every service that
+    // inserts into this table MUST thread `c.req.header('idempotency-key')`
+    // through — middleware enforces the header is present on all
+    // POST/PUT/DELETE. Migration 0012 backfilled legacy NULLs with
+    // `legacy-<row-id>` before setting NOT NULL.
+    idempotencyKey: text('idempotency_key').notNull(),
     txType: text('tx_type').notNull(),
     sourceAddress: text('source_address').notNull(),
     // REVIEW.md L-2: this column MUST stay NULL. The txSubmitter

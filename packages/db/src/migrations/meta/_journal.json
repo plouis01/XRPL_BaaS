@@ -85,6 +85,13 @@
       "when": 1776432298925,
       "tag": "0011_colorful_demogoblin",
       "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1776780927765,
+      "tag": "0012_clammy_namorita",
+      "breakpoints": true
     }
   ]
 }

@@ -180,7 +180,7 @@ export async function createDomain(
           txType: 'PermissionedDomainSet',
           sourceAddress: input.ownerAddress,
           status: 'queued',
-          idempotencyKey: input.idempotencyKey,
+          idempotencyKey: input.idempotencyKey ?? crypto.randomUUID(),
           requestBody: {
             op: 'createDomain',
             owner: input.ownerAddress,
@@ -301,7 +301,7 @@ export async function updateDomain(
       txType: 'PermissionedDomainSet',
       sourceAddress: domain.ownerAddress,
       status: 'queued',
-      idempotencyKey: input.idempotencyKey,
+      idempotencyKey: input.idempotencyKey ?? crypto.randomUUID(),
       requestBody: {
         op: 'updateDomain',
         domainDbId: input.domainDbId,
@@ -390,7 +390,7 @@ export async function deleteDomain(input: DeleteDomainInput): Promise<{ tx_id: s
       txType: 'PermissionedDomainDelete',
       sourceAddress: domain.ownerAddress,
       status: 'queued',
-      idempotencyKey: input.idempotencyKey,
+      idempotencyKey: input.idempotencyKey ?? crypto.randomUUID(),
       requestBody: {
         op: 'deleteDomain',
         domainDbId: input.domainDbId,

@@ -144,7 +144,7 @@ export async function issueCredential(
           txType: 'CredentialCreate',
           sourceAddress: input.issuerAddress,
           status: 'queued',
-          idempotencyKey: input.idempotencyKey,
+          idempotencyKey: input.idempotencyKey ?? crypto.randomUUID(),
           requestBody: {
             op: 'issueCredential',
             issuer: input.issuerAddress,
@@ -290,7 +290,7 @@ export async function acceptCredential(input: AcceptCredentialInput): Promise<{ 
           txType: 'CredentialAccept',
           sourceAddress: cred.subjectAddress,
           status: 'queued',
-          idempotencyKey: input.idempotencyKey,
+          idempotencyKey: input.idempotencyKey ?? crypto.randomUUID(),
           requestBody: {
             op: 'acceptCredential',
             credentialId: input.credentialId,
@@ -444,7 +444,7 @@ export async function revokeCredential(input: RevokeCredentialInput): Promise<{ 
           txType: 'CredentialDelete',
           sourceAddress: source,
           status: 'queued',
-          idempotencyKey: input.idempotencyKey,
+          idempotencyKey: input.idempotencyKey ?? crypto.randomUUID(),
           requestBody: {
             op: 'revokeCredential',
             credentialId: input.credentialId,

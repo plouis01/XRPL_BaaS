@@ -25,7 +25,15 @@ import { logger } from '../logger.ts';
 import { ACCOUNT_SETUP_QUEUE, getSigner } from '../queues.ts';
 
 export async function processAccountSetupJob(job: Job<AccountSetupJobData>): Promise<void> {
-  const { accountId, clientId, treasuryAddress, fundingAmountDrops, custodyMode, label } = job.data;
+  const {
+    accountId,
+    clientId,
+    treasuryAddress,
+    fundingAmountDrops,
+    custodyMode,
+    label,
+    idempotencyKey,
+  } = job.data;
   const log = logger.child({ job: 'account-setup', accountId, clientId });
 
   const signer = getSigner();
@@ -63,10 +71,17 @@ export async function processAccountSetupJob(job: Job<AccountSetupJobData>): Pro
   });
 
   // 4. Insert a queued transactions row + link to the account.
+  //
+  // REVIEW.md HIGH-04: the DB column is NOT NULL. If the job was enqueued
+  // before the API was updated to thread the header, fall back to an
+  // accountId-derived key so the row still commits. Stable across retries
+  // of the same job — the UNIQUE catches a repeated setup attempt.
+  const txIdemKey = idempotencyKey ?? `hsm-fund-${accountId}`;
   const txInserted = await db
     .insert(schema.transactions)
     .values({
       clientId,
+      idempotencyKey: txIdemKey,
       txType: 'Payment',
       sourceAddress: treasuryAddress,
       status: 'queued',

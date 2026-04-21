@@ -65,6 +65,7 @@ tokens.post('/', zValidator('json', createTokenSchema), async (c) => {
       maxSupply: body.max_supply,
       metadata: body.metadata,
       trustlineLimit: body.trustline_limit,
+      idempotencyKey: c.req.header('idempotency-key'),
     });
 
     return c.json(
@@ -104,6 +105,7 @@ tokens.post('/:id/transfer', zValidator('json', transferTokenSchema), async (c) 
       destination: body.destination,
       amount: body.amount,
       destinationTag: body.destination_tag,
+      idempotencyKey: c.req.header('idempotency-key'),
     });
     return c.json({ tx_id: result.txId, status: 'queued' }, 202);
   } catch (err) {
@@ -125,6 +127,7 @@ tokens.put('/:id/freeze', zValidator('json', freezeTokenSchema), async (c) => {
       tokenId,
       holder: body.holder,
       unfreeze: body.unfreeze,
+      idempotencyKey: c.req.header('idempotency-key'),
     });
     return c.json({ tx_id: result.txId, status: 'queued' }, 202);
   } catch (err) {
@@ -146,6 +149,7 @@ tokens.put('/:id/clawback', zValidator('json', clawbackTokenSchema), async (c) =
       tokenId,
       holder: body.holder,
       amount: body.amount,
+      idempotencyKey: c.req.header('idempotency-key'),
     });
     return c.json({ tx_id: result.txId, status: 'queued' }, 202);
   } catch (err) {

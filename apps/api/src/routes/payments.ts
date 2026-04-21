@@ -61,6 +61,7 @@ payments.post('/', zValidator('json', sendPaymentSchema), async (c) => {
       value: body.value,
       currency: body.currency,
       issuer: body.issuer,
+      idempotencyKey: c.req.header('idempotency-key'),
     });
     return c.json({ tx_id: result.txId, status: 'queued' }, 202);
   } catch (err) {
@@ -107,6 +108,7 @@ payments.post('/escrows', zValidator('json', createEscrowSchema), async (c) => {
       cancelAfter: body.cancel_after,
       condition: body.condition,
       destinationTag: body.destination_tag,
+      idempotencyKey: c.req.header('idempotency-key'),
     });
     return c.json({ tx_id: result.txId, status: 'queued' }, 202);
   } catch (err) {
@@ -129,6 +131,7 @@ payments.post('/escrows/:id/finish', zValidator('json', finishEscrowSchema), asy
       offerSequence: body.offer_sequence,
       condition: body.condition,
       fulfillment: body.fulfillment,
+      idempotencyKey: c.req.header('idempotency-key'),
     });
     return c.json({ tx_id: result.txId, status: 'queued' }, 202);
   } catch (err) {
@@ -149,6 +152,7 @@ payments.post('/escrows/:id/cancel', zValidator('json', cancelEscrowSchema), asy
       source: body.source,
       owner: body.owner,
       offerSequence: body.offer_sequence,
+      idempotencyKey: c.req.header('idempotency-key'),
     });
     return c.json({ tx_id: result.txId, status: 'queued' }, 202);
   } catch (err) {
@@ -171,6 +175,7 @@ payments.post('/batch', zValidator('json', batchPaymentsSchema), async (c) => {
   const result = await sendBatchPayments({
     clientId,
     mode: body.mode,
+    idempotencyKey: c.req.header('idempotency-key'),
     payments: body.payments.map((p) => ({
       source: p.source,
       destination: p.destination,

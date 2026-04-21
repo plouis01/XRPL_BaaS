@@ -92,6 +92,12 @@ export interface AccountSetupJobData {
   label?: string;
   /** Custody mode. */
   custodyMode: string;
+  /**
+   * REVIEW.md HIGH-04: the request's Idempotency-Key. The worker persists
+   * it on the funding `transactions` row so DB-layer UNIQUE catches
+   * duplicate HSM account setups if this job is retried.
+   */
+  idempotencyKey?: string;
 }
 
 // ── Redis connection singleton ─────────────────────────────────────────────
