@@ -129,6 +129,15 @@ export interface GrantPermissionInput {
   delegateAddress: string;
   permissions: string[];
   weight: number;
+  /**
+   * Optional signer-list quorum. REVIEW.md MED-05: previously hardcoded to 1
+   * (any single delegate can authorize). That's the right default for a
+   * single-delegate setup, but a tenant granting two delegates expecting
+   * 2-of-2 coordination was silently getting either-one-solo-signs. The
+   * caller now picks — clamped to [1, totalWeight] so "can't ever sign"
+   * (quorum > sum) and "zero quorum" are both rejected at the service layer.
+   */
+  quorum?: number;
   idempotencyKey?: string;
 }
 
@@ -167,11 +176,27 @@ export async function grantPermission(
   }));
   signerEntries.push({ address: input.delegateAddress, weight: input.weight });
 
-  // Quorum = 1 (any single signer can authorize). This is the pre-V1.1
-  // fallback — coarser than granular permission delegation.
+  // REVIEW.md MED-05: quorum is caller-selected with a safe default of 1
+  // (preserves the pre-fix behavior for single-delegate setups). Reject
+  // quorum > sum(weights) — the signer list would be unusable (no subset
+  // of signers could ever authorize a tx). Reject quorum < 1 — XRPL itself
+  // refuses a zero-quorum SignerListSet, but catching here gives a clearer
+  // 400 than a tefEXCEPTION on submit.
+  const totalWeight = signerEntries.reduce((sum, s) => sum + s.weight, 0);
+  const signerQuorum = input.quorum ?? 1;
+  if (signerQuorum < 1) {
+    throw new PermissionServiceError('invalid_input', 'quorum must be at least 1');
+  }
+  if (signerQuorum > totalWeight) {
+    throw new PermissionServiceError(
+      'invalid_input',
+      `quorum (${signerQuorum}) exceeds total signer weight (${totalWeight})`,
+    );
+  }
+
   const txJson = buildSignerListSet({
     account: input.delegatorAddress,
-    signerQuorum: 1,
+    signerQuorum,
     signerEntries,
   });
 

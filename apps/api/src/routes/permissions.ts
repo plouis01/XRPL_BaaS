@@ -54,6 +54,7 @@ permissions.post('/', zValidator('json', grantPermissionSchema), async (c) => {
       delegateAddress: body.delegate_address,
       permissions: [...body.permissions],
       weight: body.weight,
+      quorum: body.quorum,
       idempotencyKey: c.req.header('idempotency-key'),
     });
     return c.json(result, 201);

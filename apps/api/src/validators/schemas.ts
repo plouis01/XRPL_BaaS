@@ -320,6 +320,13 @@ export const grantPermissionSchema = z.object({
   permissions: z.array(z.enum(PERMISSION_VALUES)).min(1).max(10),
   /** Signer weight for the delegate on the signer list. Default 1. */
   weight: z.number().int().min(1).max(65535).default(1),
+  /**
+   * Signer-list quorum. REVIEW.md MED-05: optional; defaults to 1 at the
+   * service layer (preserves the pre-fix "any single delegate signs" default
+   * for single-delegate setups). A tenant building 2-of-N coordination must
+   * set this explicitly. Upper bound is XRPL's signer-list max weight sum.
+   */
+  quorum: z.number().int().min(1).max(65535).optional(),
 });
 
 export const revokePermissionSchema = z.object({
