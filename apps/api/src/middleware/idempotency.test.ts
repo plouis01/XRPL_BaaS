@@ -305,7 +305,11 @@ describe('idempotency middleware', () => {
     expect(r2.headers.get('x-idempotent-replay')).toBeNull();
   });
 
-  it('4xx responses ARE cached (validation failures are deterministic)', async () => {
+  it('4xx responses are NOT cached (REVIEW.md MED-12)', async () => {
+    // MED-12: previously we cached 4xx for 24h, which let an attacker
+    // deliberately trigger a 401 once and poison the victim's replay
+    // attempt, and pinned clients at stale 4xx after a misconfig fix.
+    // Only 2xx is cached now; the handler must re-run on the retry.
     const calls = vi.fn();
     const app = new Hono<AppEnv>();
     app.use('*', async (c, next) => {
@@ -329,9 +333,11 @@ describe('idempotency middleware', () => {
       method: 'POST',
       headers: { 'idempotency-key': 'k1' },
     });
-    // Handler ran ONCE; the second call was replayed from cache.
-    expect(calls).toHaveBeenCalledTimes(1);
-    expect(r2.headers.get('x-idempotent-replay')).toBe('true');
+    // Handler ran TWICE — second call was NOT replayed because 4xx
+    // responses are no longer cached.
+    expect(calls).toHaveBeenCalledTimes(2);
+    expect(r2.headers.get('x-idempotent-replay')).toBeNull();
+    expect(r2.status).toBe(400);
   });
 
   // Sprint 7 #17: TOCTOU fix. Before this fix, two concurrent requests

@@ -74,6 +74,20 @@ interface CachedResponse {
   body: unknown;
 }
 
+/**
+ * Collapse URL-shape variance so the idempotency cache key is stable across
+ * requests that Hono treats as the same route. Lowercases (URLs are
+ * case-insensitive in practice at the path level for our routes), collapses
+ * runs of `/`, and strips a trailing slash unless the path IS `/`.
+ */
+function normalizePath(pathname: string): string {
+  const collapsed = pathname.replace(/\/+/g, '/').toLowerCase();
+  if (collapsed.length > 1 && collapsed.endsWith('/')) {
+    return collapsed.slice(0, -1);
+  }
+  return collapsed;
+}
+
 export const idempotency: MiddlewareHandler<AppEnv> = async (c, next) => {
   const method = c.req.method;
 
@@ -99,7 +113,16 @@ export const idempotency: MiddlewareHandler<AppEnv> = async (c, next) => {
     return c.json({ error: 'Idempotency context missing client id' }, 500);
   }
 
-  const path = new URL(c.req.url).pathname;
+  // REVIEW.md MED-11: normalize the URL pathname before hashing into the
+  // cache key. The raw pathname treated `/accounts/foo`, `/accounts/foo/`,
+  // `/accounts/FOO`, and `/accounts//foo` as four distinct idempotency
+  // buckets — all of which Hono routes to the same handler, so a caller
+  // that varied those characters on retry silently defeated dedup. We
+  // can't use `c.req.routePath` here because this middleware runs before
+  // route dispatch (routePath returns the middleware's `*` pattern at this
+  // point, not the final route). Normalize manually: lowercase, collapse
+  // runs of `/`, strip the trailing slash unless the path is exactly `/`.
+  const path = normalizePath(new URL(c.req.url).pathname);
   const cacheKey = `railforge:idemp:${clientId}:${method}:${path}:${key}`;
   // The lock key sits in a sibling namespace so it never collides with the
   // cached response at the same key. It's short-lived (IDEMP_LOCK_TTL_SECONDS)
@@ -195,16 +218,17 @@ export const idempotency: MiddlewareHandler<AppEnv> = async (c, next) => {
     throw err;
   }
 
-  // 4. Cache the response for the next retry. We only cache successful
-  // and client-error responses (2xx, 4xx). 5xx responses are NOT cached
-  // so that transient server errors don't stick around — the client
-  // retrying after a 500 should get a real retry, not a replayed failure.
+  // 4. Cache the response for the next retry. We only cache 2xx responses.
   //
-  // A note on the 4xx caching: returning 4xx on the same key twice is
-  // idempotent (validation errors are deterministic), and caching them
-  // prevents re-running expensive validation on retry spam.
+  // REVIEW.md MED-12: previous implementation cached 4xx (incl. 401/403)
+  // for 24h. That pinned the client at a failure status even after the
+  // underlying condition was fixed, and — worse — let an attacker poison a
+  // victim's replay attempt by deliberately triggering a 401 once. 4xx
+  // bodies are also frequently auth / envGuard responses that have nothing
+  // to do with the handler's logic, so caching them served no correctness
+  // purpose. 5xx were already excluded (transient server errors).
   const status = c.res.status;
-  const shouldCache = status >= 200 && status < 500 && status !== 429;
+  const shouldCache = status >= 200 && status < 300;
   if (shouldCache) {
     try {
       // Clone the response so we can read its body without consuming it
