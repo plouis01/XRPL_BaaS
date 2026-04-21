@@ -37,6 +37,18 @@ app.get('/health', (c) => c.json({ status: 'ok' }));
 // the request is pre-auth by definition. IP rate limit still applies so
 // brute-force attempts bottleneck on the same pre-auth bucket.
 const sessionRoot = new Hono<AppEnv>();
+// REVIEW.md MED-15: sessionRoot is a sibling of /v1, not a child, so it
+// does NOT inherit the 1 MB bodyLimit applied below. Without a tighter cap
+// a caller can POST a multi-GB JSON payload to /v1/dashboard/session and
+// force Hono to buffer it before Zod rejects. 64 KB is ~256× the realistic
+// login body { "api_key": "rf_test_..." } and bounds attacker memory use.
+sessionRoot.use(
+  '*',
+  bodyLimit({
+    maxSize: 64 * 1024,
+    onError: (c) => c.json({ error: 'Request body too large' }, 413),
+  }),
+);
 sessionRoot.use('*', ipRateLimit);
 sessionRoot.route('/', dashboardSessionRoute);
 app.route('/v1/dashboard/session', sessionRoot);
