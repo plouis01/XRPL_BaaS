@@ -65,10 +65,21 @@ const subscriber = new LedgerSubscriber(wsUrl, {
 
 await subscriber.start();
 
+// REVIEW.md LOW-09: log only the Redis host, never the full URL. A prod
+// `redis://:<password>@host:port` landed here verbatim would leak the
+// password into every startup log line. `new URL(...).host` keeps the
+// identifying bit (which Redis, which port) without the credentials.
+let redisHost: string;
+try {
+  redisHost = new URL(redisUrl).host;
+} catch {
+  redisHost = '<unparseable>';
+}
+
 logger.info(
   {
     wsUrl,
-    redis: redisUrl,
+    redisHost,
     network: process.env.XRPL_NETWORK ?? 'testnet',
   },
   'railforge-indexer started',
