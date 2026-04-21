@@ -30,6 +30,22 @@ export const TX_CONFIRM_QUEUE = 'railforge-tx-confirm';
 export const WEBHOOK_DELIVERY_QUEUE = 'railforge-webhook-delivery';
 export const ACCOUNT_SETUP_QUEUE = 'railforge-account-setup';
 
+/**
+ * Webhook event types fired by the txConfirmer (apps/worker) on a tx row's
+ * terminal transition. REVIEW.md MED-14: this MUST stay the single source
+ * of truth — both the producer (txConfirmer.fanOutWebhooks) and the
+ * indexer's skip gate (webhookFanout.ts TX_CONFIRMER_HANDLED) import it.
+ * Before extracting this const, the two lived as an independently-typed
+ * union + a literal Set duplicate. Adding a new terminal event type meant
+ * editing both — a missed edit silently double-fired or silently dropped.
+ *
+ * Rule: whenever the txConfirmer gains a new `transaction.*` terminal
+ * event, add it here. TypeScript + the indexer's Set lookup pick it up
+ * automatically and the drift is impossible to reintroduce.
+ */
+export const TX_CONFIRMER_EVENT_TYPES = ['transaction.validated', 'transaction.failed'] as const;
+export type TxConfirmerEventType = (typeof TX_CONFIRMER_EVENT_TYPES)[number];
+
 // ── Job payload shapes ──────────────────────────────────────────────────────
 
 export interface TxSubmitJobData {

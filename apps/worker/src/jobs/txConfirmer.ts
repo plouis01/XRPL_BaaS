@@ -27,6 +27,7 @@ import { logger } from '../logger.ts';
 import {
   TX_CONFIRM_QUEUE,
   type TxConfirmJobData,
+  type TxConfirmerEventType,
   enqueueWebhookDelivery,
   getSequencer,
   getXrplPool,
@@ -404,7 +405,10 @@ async function backfillMptIssuanceId(
  */
 async function fanOutWebhooks(
   txId: string,
-  eventType: 'transaction.validated' | 'transaction.failed',
+  // REVIEW.md MED-14: typed against the shared @railforge/jobs union so
+  // extending that const automatically propagates here. Drift-proof by
+  // construction — a new event type flows in without a manual edit.
+  eventType: TxConfirmerEventType,
   // biome-ignore lint/suspicious/noExplicitAny: webhook payload is a free-form JSON shape
   payload: Record<string, any>,
 ): Promise<void> {

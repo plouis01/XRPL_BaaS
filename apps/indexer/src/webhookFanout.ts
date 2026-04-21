@@ -40,7 +40,7 @@
 // accounts already get `transaction.validated` via txConfirmer.
 
 import { db as dbDefault, eq, inArray, schema } from '@railforge/db';
-import { enqueueWebhookDelivery } from '@railforge/jobs';
+import { TX_CONFIRMER_EVENT_TYPES, enqueueWebhookDelivery } from '@railforge/jobs';
 import { logger } from './logger.ts';
 import type { TxEvent } from './parser.ts';
 
@@ -138,7 +138,12 @@ function mapEvent(event: TxEvent): {
 // the indexer must skip internal txs to avoid double-firing. All other
 // event types (credential.*, domain.*) are indexer-only and fire for
 // both internal and external observations.
-const TX_CONFIRMER_HANDLED = new Set(['transaction.validated', 'transaction.failed']);
+//
+// REVIEW.md MED-14: the literal set here used to be hardcoded; it's now
+// derived from the shared TX_CONFIRMER_EVENT_TYPES const in @railforge/jobs,
+// so extending txConfirmer's event union automatically extends the skip
+// gate too. See the const's docblock for the rationale.
+const TX_CONFIRMER_HANDLED = new Set<string>(TX_CONFIRMER_EVENT_TYPES);
 
 export async function fanOutExternalTxEvent(event: TxEvent): Promise<number> {
   const mapped = mapEvent(event);

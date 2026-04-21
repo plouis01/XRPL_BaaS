@@ -100,6 +100,10 @@ vi.mock('@railforge/jobs', () => ({
     enqueueCalls.push(data);
     return Promise.resolve();
   },
+  // REVIEW.md MED-14: webhookFanout imports this const to build the
+  // indexer-side skip gate. Mirror the real shape here so the test mock
+  // doesn't crash on module load.
+  TX_CONFIRMER_EVENT_TYPES: ['transaction.validated', 'transaction.failed'] as const,
 }));
 
 const { fanOutExternalTxEvent } = await import('./webhookFanout.ts');
