@@ -28,7 +28,7 @@ import {
   buildXrpPayment,
 } from '@railforge/xrpl-core';
 import { logger } from '../logger.ts';
-import { enforceSpendPolicy } from './spendPolicy.service.ts';
+import { enforceSpendPolicy, enforceTokenOpCount } from './spendPolicy.service.ts';
 
 export class PaymentServiceError extends Error {
   constructor(
@@ -157,6 +157,12 @@ export async function sendPayment(input: SendPaymentInput): Promise<{ txId: stri
 
   if (input.amountDrops) {
     await enforceSpendPolicy(input.clientId, input.amountDrops);
+  } else {
+    // REVIEW.md MED-03: MPT + issued-currency payments are asset-denominated
+    // and invisible to enforceSpendPolicy. Apply a nominal per-day op-count
+    // ceiling as defense-in-depth until a price-oracle integration lets us
+    // enforce asset-denominated limits properly.
+    await enforceTokenOpCount(input.clientId);
   }
 
   const txInserted = await db

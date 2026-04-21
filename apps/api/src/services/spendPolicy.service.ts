@@ -306,6 +306,71 @@ export function clearPolicyCache(): void {
   policyCache.clear();
 }
 
+// ── REVIEW.md MED-03 — per-day count limit for non-XRP ops ────────────────
+//
+// enforceSpendPolicy (above) only covers XRP-denominated txs because the
+// amount it checks against is `amountDrops`. That leaves MPT / issued-
+// currency / token-transfer / DEX-offer / AMM-deposit paths uncapped —
+// a stolen key could drain those balances unchecked until manually
+// revoked. Until we wire an oracle / price feed to do asset-denominated
+// limits properly, we apply a nominal per-day COUNT ceiling as defense-
+// in-depth.
+//
+// The limit is aggressive enough to catch abuse (bulk-draining scripts
+// typically burst thousands of ops / minute) but lenient enough to not
+// bite normal workloads. Configurable via TOKEN_OPS_DAILY_LIMIT env var.
+//
+// Redis-first with DB-free state: we just INCR a counter and let it
+// expire at 24h. No seeding needed — a missing key means "fresh day,
+// start at 0". Fails OPEN on Redis unavailability (same rationale as
+// the XRP atomic path's DB fallback) so a Redis outage doesn't hard-
+// block the API; the underlying revocation + key-age mitigations
+// already bound the blast radius.
+
+const TOKEN_OPS_DAILY_LIMIT_DEFAULT = 5000;
+
+function getTokenOpsLimit(): number {
+  const raw = process.env.TOKEN_OPS_DAILY_LIMIT;
+  if (!raw) return TOKEN_OPS_DAILY_LIMIT_DEFAULT;
+  const n = Number.parseInt(raw, 10);
+  if (!Number.isFinite(n) || n < 1) return TOKEN_OPS_DAILY_LIMIT_DEFAULT;
+  return n;
+}
+
+function tokenOpsKey(clientId: string): string {
+  return `railforge:spendpolicy:tokenops:${clientId}`;
+}
+
+/**
+ * Enforce a per-client daily count ceiling on non-XRP state-changing ops
+ * (token transfer, MPT payment, issued-currency payment, DEX offer,
+ * AMM deposit/withdraw). Throws SpendPolicyError('daily_limit_exceeded')
+ * when the ceiling is crossed. Best-effort: silently no-ops on Redis
+ * failure so a cache outage doesn't hard-block the API surface.
+ */
+export async function enforceTokenOpCount(clientId: string): Promise<void> {
+  const limit = getTokenOpsLimit();
+  let count: number;
+  try {
+    const redis = getRedis();
+    const key = tokenOpsKey(clientId);
+    count = Number(await redis.incr(key));
+    if (count === 1) {
+      await redis.expire(key, DAILY_WINDOW_SECONDS);
+    }
+  } catch (err) {
+    logger.warn(
+      { err: err instanceof Error ? err.message : String(err), clientId },
+      'spend policy: token-op counter unavailable, failing open',
+    );
+    return;
+  }
+  if (count > limit) {
+    logger.warn({ clientId, count, limit }, 'spend policy: daily token-op count exceeded');
+    throw new SpendPolicyError('daily_limit_exceeded', `Daily token-op limit of ${limit} exceeded`);
+  }
+}
+
 /**
  * Decrement the client's daily spend counter by `amountDrops`. Called by
  * the txConfirmer when a tx that enforceSpendPolicy accepted transitions

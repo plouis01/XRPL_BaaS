@@ -44,6 +44,7 @@ import {
   buildTrustSet,
 } from '@railforge/xrpl-core';
 import { logger } from '../logger.ts';
+import { enforceTokenOpCount } from './spendPolicy.service.ts';
 
 export interface CreateTokenInput {
   clientId: string;
@@ -339,6 +340,11 @@ export async function transferToken(input: TransferTokenInput): Promise<{ txId: 
     throw new TokenServiceError('token_not_found', 'Token not found');
   }
 
+  // REVIEW.md MED-03: token transfers move asset value the drops-based
+  // enforceSpendPolicy doesn't cover. Apply the nominal per-day op-count
+  // ceiling as defense-in-depth.
+  await enforceTokenOpCount(input.clientId);
+
   let txJson: ReturnType<typeof buildMptPayment> | ReturnType<typeof buildIssuedCurrencyPayment>;
   if (token.tokenType === 'mpt') {
     if (!token.mptIssuanceId) {
@@ -434,6 +440,10 @@ export async function freezeToken(input: FreezeTokenInput): Promise<{ txId: stri
     );
   }
 
+  // REVIEW.md MED-03: freeze/unfreeze is a privileged admin op; defense-
+  // in-depth ceiling against a stolen-key op-spam attack.
+  await enforceTokenOpCount(input.clientId);
+
   const txJson = buildMptIssuanceSet({
     account: token.issuerAddress,
     mptIssuanceId: token.mptIssuanceId,
@@ -490,6 +500,10 @@ export async function clawbackToken(input: ClawbackTokenInput): Promise<{ txId: 
   if (!token) {
     throw new TokenServiceError('token_not_found', 'Token not found');
   }
+
+  // REVIEW.md MED-03: clawback is a privileged admin op that moves asset
+  // value; enforceSpendPolicy wouldn't cover it. Apply the op-count ceiling.
+  await enforceTokenOpCount(input.clientId);
 
   let txJson: ReturnType<typeof buildMptClawback> | ReturnType<typeof buildIssuedCurrencyClawback>;
   if (token.tokenType === 'mpt') {

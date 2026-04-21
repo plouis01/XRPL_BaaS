@@ -18,7 +18,7 @@ import {
   buildOfferCreate,
 } from '@railforge/xrpl-core';
 import { logger } from '../logger.ts';
-import { enforceSpendPolicy } from './spendPolicy.service.ts';
+import { enforceSpendPolicy, enforceTokenOpCount } from './spendPolicy.service.ts';
 
 export class DexServiceError extends Error {
   constructor(
@@ -125,6 +125,10 @@ export async function createOffer(
   const xrpDropsOut = 'drops' in input.takerGets ? input.takerGets.drops : null;
   if (xrpDropsOut) {
     await enforceSpendPolicy(input.clientId, xrpDropsOut);
+  } else {
+    // REVIEW.md MED-03: non-XRP OfferCreate falls outside the drops-based
+    // limit. Apply the token-op count ceiling.
+    await enforceTokenOpCount(input.clientId);
   }
 
   const txInserted = await db
@@ -246,6 +250,10 @@ export async function ammDeposit(
     flags: input.flags,
   });
 
+  // REVIEW.md MED-03: AMM deposits move asset value that the drops-based
+  // enforceSpendPolicy doesn't cover. Apply the token-op count ceiling.
+  await enforceTokenOpCount(input.clientId);
+
   const txInserted = await db
     .insert(schema.transactions)
     .values({
@@ -308,6 +316,10 @@ export async function ammWithdraw(
     lpTokenIn: input.lpTokenIn,
     flags: input.flags,
   });
+
+  // REVIEW.md MED-03: AMM withdraws move LP tokens / assets the drops-
+  // based enforceSpendPolicy doesn't cover. Apply the token-op ceiling.
+  await enforceTokenOpCount(input.clientId);
 
   const txInserted = await db
     .insert(schema.transactions)

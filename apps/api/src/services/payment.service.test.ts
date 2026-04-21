@@ -76,6 +76,7 @@ vi.mock('@railforge/jobs', () => ({
 
 vi.mock('./spendPolicy.service.ts', () => ({
   enforceSpendPolicy: vi.fn(async () => {}),
+  enforceTokenOpCount: vi.fn(async () => {}),
 }));
 
 // Import after mocks.
