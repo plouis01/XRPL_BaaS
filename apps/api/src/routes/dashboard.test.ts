@@ -28,13 +28,21 @@ interface Select {
 let nextRows: unknown[] = [];
 let nextKeyCheckRows: unknown[] = [];
 
+// Per-request counter for api_keys `.limit(1)` queries. The first call
+// in every request comes from revocationCheck middleware (REVIEW.md LOW-07);
+// it must see an active key so the handler runs. Subsequent calls come from
+// clientHasKeyInEnvironment — those get `nextKeyCheckRows`, the knob the
+// test-case uses to flip between "client has an env key" and "no env key".
+let apiKeysCallCount = 0;
+
 // Builds a thenable query builder that:
 //   - resolves to `nextRows` when awaited after `orderBy` (the /keys path)
 //   - resolves to `nextRows` after `orderBy().limit(n)` (the data-list path)
-//   - resolves to `nextKeyCheckRows` for the first `.where().limit(1)` call
-//     against api_keys (the gate in the other three handlers)
+//   - resolves to a synthetic "active key" row on the FIRST api_keys .limit(1)
+//     call each request (the revocationCheck probe)
+//   - resolves to `nextKeyCheckRows` for every SUBSEQUENT api_keys .limit(1)
+//     call (the env gate in the read handlers)
 function makeSelect(): Select {
-  let selectCall = 0;
   return {
     from: (table: { __tableName: string }) => ({
       where: () => {
@@ -47,10 +55,11 @@ function makeSelect(): Select {
         return {
           orderBy: thenableOrderBy,
           limit: (_n: number) => {
-            selectCall += 1;
-            // First .where(...).limit(1) in each handler is the gate that
-            // checks whether the client has an api_key in the selected env.
-            if (table.__tableName === 'api_keys' && selectCall === 1) {
+            if (table.__tableName === 'api_keys') {
+              apiKeysCallCount += 1;
+              if (apiKeysCallCount === 1) {
+                return Promise.resolve([{ id: 'key-1' }]);
+              }
               return Promise.resolve(nextKeyCheckRows);
             }
             return Promise.resolve(nextRows);
@@ -88,6 +97,10 @@ vi.mock('@railforge/db', () => ({
   },
   eq: vi.fn(() => ({ __predicate: 'eq' })),
   and: vi.fn(() => ({ __predicate: 'and' })),
+  // isNull is imported by revocationCheck (mounted on the dashboard router
+  // per REVIEW.md LOW-07). Without this the module crashes at request time
+  // and every test returns 503 instead of the expected status.
+  isNull: vi.fn(() => ({ __predicate: 'isNull' })),
   desc: vi.fn((_col: unknown) => ({ __order: 'desc' })),
   schema: {
     apiKeys: {
@@ -159,6 +172,7 @@ beforeEach(() => {
   nextInsertReturning = [];
   nextUpdateReturning = [];
   insertCalls.length = 0;
+  apiKeysCallCount = 0;
   // The hashApiKey helper reads API_KEY_SALT at call time; set a fake so
   // the create-key test doesn't hit the production-guard throw.
   process.env.API_KEY_SALT = 'test-salt';
