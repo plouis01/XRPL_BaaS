@@ -26,7 +26,15 @@ import { randomUUID } from 'node:crypto';
 import type { Redis } from 'ioredis';
 import type { XrplClientPool } from './client.ts';
 
-const LOCK_TTL_SECONDS = 5;
+// REVIEW.md LOW-12: bumped from 5s → 10s. The 5s margin over the 3s
+// rippled fetch timeout left only 2s of headroom for the rest of the
+// sequence flow (Redis cache write, post-fetch tx construction). Under
+// event-loop / GC pressure that budget evaporates, the lock auto-expires
+// mid-flight, and a concurrent request on the same account takes over —
+// producing an unnecessary fence trip + retry. 10s gives comfortable
+// headroom without increasing the worst-case blast radius of a crashed
+// worker (the lock still expires on its own).
+const LOCK_TTL_SECONDS = 10;
 const CACHE_TTL_SECONDS = 30;
 const LOCK_RETRY_BASE_MS = 50;
 const LOCK_RETRY_MAX_MS = 500;
