@@ -23,7 +23,12 @@ let testClientId: string;
 let webhookEndpointId: string;
 let deliveryId: string;
 const WEBHOOK_SECRET = 'whsec_integration_test_secret_42';
-let capturedRequest: { body: string; signature: string | undefined } | null = null;
+let capturedRequest: {
+  body: string;
+  signature: string | undefined;
+  timestamp: string | undefined;
+  version: string | undefined;
+} | null = null;
 let server: http.Server;
 let serverPort: number;
 
@@ -40,6 +45,8 @@ describeOrSkip('webhook delivery HMAC verification (real DB + local HTTP)', () =
           capturedRequest = {
             body,
             signature: req.headers['x-railforge-signature'] as string | undefined,
+            timestamp: req.headers['x-railforge-timestamp'] as string | undefined,
+            version: req.headers['x-railforge-webhook-version'] as string | undefined,
           };
           res.writeHead(200);
           res.end('ok');
@@ -122,13 +129,19 @@ describeOrSkip('webhook delivery HMAC verification (real DB + local HTTP)', () =
       // biome-ignore lint/suspicious/noExplicitAny: minimal Job stub
     } as any);
 
-    // The local server should have received the POST.
+    // The local server should have received the POST with all three v1
+    // webhook headers (REVIEW.md MED-02 + LOW-18).
     expect(capturedRequest).not.toBeNull();
     expect(capturedRequest!.signature).toBeDefined();
+    expect(capturedRequest!.timestamp).toBeDefined();
+    expect(capturedRequest!.version).toBe('1');
 
-    // Recompute HMAC-SHA256 and verify.
+    // Recompute HMAC-SHA256 over `timestamp + "." + body` (the v1 scheme)
+    // and verify the signature matches. Body-only would be the legacy
+    // pre-MED-02 scheme and is no longer accepted.
+    const signingInput = `${capturedRequest!.timestamp}.${capturedRequest!.body}`;
     const expectedSignature = createHmac('sha256', WEBHOOK_SECRET)
-      .update(capturedRequest!.body)
+      .update(signingInput)
       .digest('hex');
     expect(capturedRequest!.signature).toBe(expectedSignature);
 

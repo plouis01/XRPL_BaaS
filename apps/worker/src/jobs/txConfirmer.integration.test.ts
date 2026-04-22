@@ -92,11 +92,14 @@ describeOrSkip('txConfirmer end-to-end (testnet + real DB)', () => {
       .returning({ id: schema.accounts.id });
     testAccountId = acctInserted[0]!.id;
 
+    // Fund the destination with enough to meet the XRPL base reserve (10 XRP)
+    // so the Payment doesn't fail with tecNO_DST_INSUF_XRP. A brand-new
+    // destination with a 1-drop payment is guaranteed to trip the reserve.
     const destWallet = Wallet.generate();
     const txJson = buildXrpPayment({
       account: fundedWallet.classicAddress,
       destination: destWallet.classicAddress,
-      amountDrops: '1',
+      amountDrops: '10000001',
     });
 
     const txInserted = await db
