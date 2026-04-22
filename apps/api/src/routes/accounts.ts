@@ -16,7 +16,6 @@
 
 import { zValidator } from '@hono/zod-validator';
 import { Hono } from 'hono';
-import { revocationCheck } from '../middleware/revocationCheck.ts';
 import {
   AccountServiceError,
   configureSigners,
@@ -37,8 +36,8 @@ import { getReadClient } from '../xrpl/readClient.ts';
 
 const accounts = new Hono<AppEnv>();
 
-// Re-verify API key not revoked before enqueuing real transactions.
-accounts.use('*', revocationCheck);
+// REVIEW.md LOW-03: revocationCheck is mounted globally on /v1 — no
+// per-router duplicate.
 
 accounts.post('/', zValidator('json', createAccountSchema), async (c) => {
   const clientId = c.get('clientId');

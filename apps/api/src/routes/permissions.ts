@@ -8,7 +8,6 @@
 
 import { zValidator } from '@hono/zod-validator';
 import { Hono } from 'hono';
-import { revocationCheck } from '../middleware/revocationCheck.ts';
 import {
   PermissionServiceError,
   getDelegationAudit,
@@ -21,7 +20,8 @@ import { grantPermissionSchema, revokePermissionSchema } from '../validators/sch
 
 const permissions = new Hono<AppEnv>();
 
-permissions.use('*', revocationCheck);
+// REVIEW.md LOW-03: revocationCheck is now mounted globally on /v1 in
+// apps/api/src/index.ts — no per-router duplicate.
 
 function permErrorResponse(err: PermissionServiceError) {
   switch (err.code) {

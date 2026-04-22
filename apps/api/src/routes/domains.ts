@@ -10,7 +10,6 @@
 
 import { zValidator } from '@hono/zod-validator';
 import { Hono } from 'hono';
-import { revocationCheck } from '../middleware/revocationCheck.ts';
 import {
   DomainServiceError,
   checkMembership,
@@ -29,7 +28,8 @@ import {
 
 const domains = new Hono<AppEnv>();
 
-domains.use('*', revocationCheck);
+// REVIEW.md LOW-03: revocationCheck is mounted globally on /v1 — no
+// per-router duplicate.
 
 function domainErrorResponse(err: DomainServiceError) {
   switch (err.code) {

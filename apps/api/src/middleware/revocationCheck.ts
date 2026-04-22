@@ -6,14 +6,30 @@
 // the window where a key is revoked after auth but before the handler
 // enqueues a real transaction.
 //
-// Apply this middleware to routes where the blast radius of a revoked-key
-// request getting through is high.
+// REVIEW.md LOW-03: previously every state-changing router mounted this
+// middleware individually via `router.use('*', revocationCheck)`, which was
+// an opt-in the next router author had to remember. The middleware is now
+// mounted GLOBALLY on the /v1 chain in apps/api/src/index.ts. To avoid a
+// DB round-trip on every read request (the original opt-in mounts were
+// mostly on money-moving routes that also happened to expose GETs), this
+// middleware now short-circuits on safe methods (GET/HEAD/OPTIONS). A
+// key revoked mid-flight on a read surface only risks a moment of stale-
+// cache reads — not a signed tx — so skipping is acceptable.
 
 import { and, db, eq, isNull, schema } from '@railforge/db';
 import type { MiddlewareHandler } from 'hono';
 import type { AppEnv } from '../types.ts';
 
+const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
+
 export const revocationCheck: MiddlewareHandler<AppEnv> = async (c, next) => {
+  // REVIEW.md LOW-03: skip safe methods — only re-check on state-changing
+  // requests where a revoked key would otherwise submit a real tx.
+  if (SAFE_METHODS.has(c.req.method)) {
+    await next();
+    return;
+  }
+
   const apiKeyId = c.get('apiKeyId');
 
   let rows: { id: string }[];

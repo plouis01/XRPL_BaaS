@@ -11,7 +11,6 @@
 import { zValidator } from '@hono/zod-validator';
 import { Hono } from 'hono';
 import { dexReadRateLimit } from '../middleware/dexReadRateLimit.ts';
-import { revocationCheck } from '../middleware/revocationCheck.ts';
 import { AssetParseError, parseAssetParam, rippledAssetSpec } from '../services/assetQuery.ts';
 import {
   DexServiceError,
@@ -34,7 +33,8 @@ import { getReadClient } from '../xrpl/readClient.ts';
 
 const dex = new Hono<AppEnv>();
 
-dex.use('*', revocationCheck);
+// REVIEW.md LOW-03: revocationCheck is mounted globally on /v1 — no
+// per-router duplicate.
 
 function dexErrorResponse(err: DexServiceError) {
   switch (err.code) {

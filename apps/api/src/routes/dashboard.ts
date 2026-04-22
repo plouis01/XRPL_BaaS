@@ -30,18 +30,15 @@ import { and, db, desc, eq, schema } from '@railforge/db';
 import { Hono } from 'hono';
 import { z } from 'zod';
 import { hashApiKey } from '../middleware/auth.ts';
-import { revocationCheck } from '../middleware/revocationCheck.ts';
 import type { AppEnv } from '../types.ts';
 
 const dashboard = new Hono<AppEnv>();
 
-// REVIEW.md LOW-07: every other state-changing router (accounts, tokens,
-// payments, credentials, domains, permissions, dex, webhooks) already
-// mounts revocationCheck. HIGH-02 just tightened /keys so the dashboard
-// router is now a money-adjacent surface (mints new API keys). Without
-// this, a stolen-then-revoked key stays valid for the auth-cache window,
-// long enough for an attacker to mint a replacement and survive revoke.
-dashboard.use('*', revocationCheck);
+// REVIEW.md LOW-03: revocationCheck is mounted globally on /v1 in
+// apps/api/src/index.ts — no per-router duplicate. Previously mounted
+// here for REVIEW.md LOW-07 (dashboard mints API keys, so stolen-then-
+// revoked keys must not survive the auth-cache window); the global
+// mount covers that same surface.
 
 const networkSchema = z.enum(['testnet', 'mainnet']);
 

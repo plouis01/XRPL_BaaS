@@ -22,10 +22,15 @@ vi.mock('@railforge/db', () => ({
 
 const { revocationCheck } = await import('./revocationCheck.ts');
 
-function makeContext() {
+// REVIEW.md LOW-03: revocationCheck now short-circuits safe methods,
+// so the test context needs a `req.method` field. `method` defaults to
+// 'POST' (state-changing) because almost every test wants to exercise
+// the DB branch; the GET-skip path has its own dedicated case below.
+function makeContext(method = 'POST') {
   const json = vi.fn((_body: unknown, _status: number) => new Response());
   return {
     c: {
+      req: { method },
       get: vi.fn((key: string) => {
         if (key === 'apiKeyId') return 'key-123';
         return undefined;
@@ -63,5 +68,16 @@ describe('revocationCheck', () => {
     await revocationCheck(c, next);
     expect(next).not.toHaveBeenCalled();
     expect(json).toHaveBeenCalledWith({ error: 'Service unavailable' }, 503);
+  });
+
+  // REVIEW.md LOW-03: safe-method short-circuit.
+  it('skips the DB re-check for GET/HEAD/OPTIONS (safe methods)', async () => {
+    for (const method of ['GET', 'HEAD', 'OPTIONS']) {
+      limitMock.mockReset();
+      const { c, next } = makeContext(method);
+      await revocationCheck(c, next);
+      expect(next).toHaveBeenCalledOnce();
+      expect(limitMock).not.toHaveBeenCalled();
+    }
   });
 });

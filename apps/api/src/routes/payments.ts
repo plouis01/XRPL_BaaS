@@ -11,7 +11,6 @@
 
 import { zValidator } from '@hono/zod-validator';
 import { Hono } from 'hono';
-import { revocationCheck } from '../middleware/revocationCheck.ts';
 import {
   PaymentServiceError,
   cancelEscrow,
@@ -32,8 +31,8 @@ import {
 
 const payments = new Hono<AppEnv>();
 
-// Re-verify API key not revoked before enqueuing real transactions.
-payments.use('*', revocationCheck);
+// REVIEW.md LOW-03: revocationCheck is mounted globally on /v1 — no
+// per-router duplicate.
 
 function paymentErrorResponse(err: PaymentServiceError) {
   switch (err.code) {

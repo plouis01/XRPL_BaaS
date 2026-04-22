@@ -7,7 +7,6 @@
 
 import { zValidator } from '@hono/zod-validator';
 import { Hono } from 'hono';
-import { revocationCheck } from '../middleware/revocationCheck.ts';
 import {
   TokenServiceError,
   clawbackToken,
@@ -25,9 +24,8 @@ import {
 
 const tokens = new Hono<AppEnv>();
 
-// Token operations (create, transfer, freeze, clawback) are high-value —
-// re-verify the API key hasn't been revoked since auth ran.
-tokens.use('*', revocationCheck);
+// REVIEW.md LOW-03: revocationCheck is mounted globally on /v1 — no
+// per-router duplicate.
 
 // Map a TokenServiceError to its HTTP response. Centralized so the four
 // handlers below stay readable and we don't drift on which code returns

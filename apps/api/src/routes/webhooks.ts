@@ -13,7 +13,6 @@
 
 import { zValidator } from '@hono/zod-validator';
 import { Hono } from 'hono';
-import { revocationCheck } from '../middleware/revocationCheck.ts';
 import {
   WebhookServiceError,
   createEndpoint,
@@ -26,9 +25,8 @@ import { createWebhookEndpointSchema } from '../validators/schemas.ts';
 
 const webhooks = new Hono<AppEnv>();
 
-// Webhook create/delete are state-changing — re-verify the API key hasn't
-// been revoked since auth ran.
-webhooks.use('*', revocationCheck);
+// REVIEW.md LOW-03: revocationCheck is mounted globally on /v1 — no
+// per-router duplicate.
 
 webhooks.post('/endpoints', zValidator('json', createWebhookEndpointSchema), async (c) => {
   const clientId = c.get('clientId');

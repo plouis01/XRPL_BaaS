@@ -9,6 +9,7 @@ import { errorHandler } from './middleware/errorHandler.ts';
 import { idempotency } from './middleware/idempotency.ts';
 import { ipRateLimit } from './middleware/ipRateLimit.ts';
 import { rateLimit } from './middleware/rateLimit.ts';
+import { revocationCheck } from './middleware/revocationCheck.ts';
 import accountsRoute from './routes/accounts.ts';
 import credentialsRoute from './routes/credentials.ts';
 import dashboardRoute from './routes/dashboard.ts';
@@ -77,6 +78,12 @@ v1.use(
 v1.use('*', ipRateLimit);
 v1.use('*', auth);
 v1.use('*', envGuard);
+// REVIEW.md LOW-03: per-request key-revocation re-check. Hoisted out of
+// the individual routers so that future contributors can't forget to
+// mount it on a new state-changing surface. The middleware itself
+// short-circuits on safe methods (GET/HEAD/OPTIONS) so GETs don't pay
+// an extra DB round-trip — only POST/PUT/PATCH/DELETE re-query.
+v1.use('*', revocationCheck);
 v1.use('*', rateLimit);
 v1.use('*', idempotency);
 v1.use('*', auditLog);
