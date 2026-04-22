@@ -483,21 +483,36 @@ export class HsmSigner implements Signer {
  * Exported so the test can feed a known wrapped point and check the output.
  */
 export function compressSecp256k1Pubkey(ecPoint: Buffer): Buffer {
-  // Peel the outer ASN.1 OCTET STRING if present. Format: 04 <len> <data>.
-  // Supports both short-form (len < 128) and long-form (81 <len>).
-  let raw: Buffer;
+  // REVIEW.md LOW-05: REQUIRE the ASN.1 OCTET STRING wrapper. Previously we
+  // accepted the raw `04 X Y` form (65 bytes) as a "maybe some provider does
+  // this" fallback — but PKCS#11 §A.1.9 is unambiguous: CKA_EC_POINT is a
+  // DER-encoded OCTET STRING. Accepting a bare raw point silently hides a
+  // spec-violating HSM (and the hiding is the whole problem — if a provider
+  // is non-conforming HERE, it's probably non-conforming elsewhere too in
+  // ways that matter for signatures). Fail closed so we notice at load time
+  // rather than produce bogus signatures later. Both short-form (LEN < 128)
+  // and long-form (0x81 LEN) encodings are accepted — both are valid DER.
   const octetTag = ecPoint.length > 0 ? ecPoint[0] : undefined;
   const lenByte = ecPoint.length > 1 ? ecPoint[1] : undefined;
-  if (octetTag === 0x04 && lenByte !== undefined) {
-    if (lenByte < 0x80) {
-      raw = ecPoint.subarray(2);
-    } else if (lenByte === 0x81 && ecPoint.length >= 3) {
-      raw = ecPoint.subarray(3);
-    } else {
-      raw = ecPoint;
+  if (octetTag !== 0x04 || lenByte === undefined) {
+    throw new SignerError('no_key', 'EC point missing ASN.1 OCTET STRING wrapper');
+  }
+  let raw: Buffer;
+  if (lenByte < 0x80) {
+    if (ecPoint.length !== 2 + lenByte) {
+      throw new SignerError('no_key', 'EC point OCTET STRING length mismatch');
     }
+    raw = ecPoint.subarray(2);
+  } else if (lenByte === 0x81) {
+    const longLen = ecPoint[2];
+    if (longLen === undefined || ecPoint.length !== 3 + longLen) {
+      throw new SignerError('no_key', 'EC point OCTET STRING long-form length mismatch');
+    }
+    raw = ecPoint.subarray(3);
   } else {
-    raw = ecPoint;
+    // Any other length form (0x82+) is valid DER but not produced for a
+    // 65-byte EC point. Refuse — unknown length forms are fail-closed.
+    throw new SignerError('no_key', 'EC point OCTET STRING uses unsupported length form');
   }
 
   // Raw should be 0x04 || X(32) || Y(32) for an uncompressed point.
