@@ -342,6 +342,30 @@ function tokenOpsKey(clientId: string): string {
 }
 
 /**
+ * Atomic INCR + EXPIRE for the token-op counter. REVIEW.md MED-16: the
+ * prior implementation ran `INCR` and `EXPIRE` as two separate round-trips
+ * gated by a JS `if (count === 1)` check. If the process crashed, the
+ * connection dropped, or the EXPIRE call threw between them, the counter
+ * persisted without a TTL forever — the client's daily quota never
+ * reset, and the first time they burst past the limit they were locked
+ * out until an operator manually `DEL`'d the key.
+ *
+ * Fix: a single Lua script does INCR followed by an EXPIRE guarded on
+ * `TTL < 0` (i.e. unset). Redis guarantees Lua scripts run atomically on
+ * the single event-loop thread, so no partial state is observable and no
+ * crash between the two operations is possible. The `TTL < 0` branch also
+ * rescues a pre-fix key that got stuck without a TTL — the next request
+ * from that client re-arms the expiry.
+ */
+const TOKEN_OP_INCR_SCRIPT = `
+  local cnt = redis.call("INCR", KEYS[1])
+  if cnt == 1 or redis.call("TTL", KEYS[1]) < 0 then
+    redis.call("EXPIRE", KEYS[1], ARGV[1])
+  end
+  return cnt
+`;
+
+/**
  * Enforce a per-client daily count ceiling on non-XRP state-changing ops
  * (token transfer, MPT payment, issued-currency payment, DEX offer,
  * AMM deposit/withdraw). Throws SpendPolicyError('daily_limit_exceeded')
@@ -354,10 +378,7 @@ export async function enforceTokenOpCount(clientId: string): Promise<void> {
   try {
     const redis = getRedis();
     const key = tokenOpsKey(clientId);
-    count = Number(await redis.incr(key));
-    if (count === 1) {
-      await redis.expire(key, DAILY_WINDOW_SECONDS);
-    }
+    count = Number(await redis.eval(TOKEN_OP_INCR_SCRIPT, 1, key, DAILY_WINDOW_SECONDS.toString()));
   } catch (err) {
     logger.warn(
       { err: err instanceof Error ? err.message : String(err), clientId },
