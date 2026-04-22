@@ -15,7 +15,8 @@
       "**/migrations/*.sql",
       "**/vitest.config.ts.timestamp-*.mjs",
       "**/.tsbuildinfo",
-      "scripts/**"
+      "scripts/**",
+      "**/.astro/**"
     ]
   },
   "formatter": {
