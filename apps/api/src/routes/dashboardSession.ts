@@ -84,6 +84,21 @@ session.post('/', async (c) => {
   }
 
   const isProd = process.env.NODE_ENV === 'production';
+  // REVIEW.md LOW-14: `sameSite: 'Strict'` is LOAD-BEARING for CSRF.
+  //
+  // The CORS middleware reflects the configured dashboard origin and sets
+  // `credentials: true`, which — by itself — would let any origin that
+  // survives the ACAO check drive cookie-bearing requests. SameSite=Strict
+  // is what closes that door: browsers refuse to attach this cookie on ANY
+  // cross-origin request (including top-level navigations), so a malicious
+  // site cannot trigger state-changing API calls even if the user is logged
+  // in on another tab.
+  //
+  // If you ever need a cross-site flow (OAuth callback, IdP-initiated
+  // redirect, embedded iframe in a partner domain, etc.) and you downgrade
+  // to `Lax` or `None`, you MUST pair it with a CSRF double-submit token or
+  // synchronizer-token pattern on every state-changing /v1/dashboard/* call.
+  // Do NOT silently relax this without adding the companion defense.
   setCookie(c, SESSION_COOKIE_NAME, body.api_key, {
     httpOnly: true,
     sameSite: 'Strict',

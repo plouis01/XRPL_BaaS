@@ -118,7 +118,7 @@ beforeEach(() => {
 });
 
 describe('fanOutExternalTxEvent', () => {
-  it('skips internal txs for transaction.validated (txConfirmer handles it)', async () => {
+  it('skips internal txs for any txConfirmer-handled event type (transaction.validated, transaction.failed)', async () => {
     state.ownTxRows = [{ id: 't1' }];
     state.accountRows = [{ clientId: 'c1', address: 'rDest' }];
     state.endpointRows = [{ id: 'e1', clientId: 'c1', events: ['transaction.validated'] }];
