@@ -59,6 +59,14 @@ export const REDACT_PATHS = [
   // HTTP headers
   'req.headers.authorization',
   'req.headers["x-api-key"]',
+  // REVIEW.md MED-17: after HIGH-03 the dashboard session cookie carries
+  // the raw API key (`railforge_session=rf_test_...`), so the Cookie
+  // header is just as credential-bearing as the two above. Both spellings
+  // because pino's path matcher is case-sensitive and request-logger
+  // middlewares differ on the casing they emit.
+  'req.headers.cookie',
+  'req.headers["cookie"]',
+  'req.headers.Cookie',
 ];
 
 export interface LoggerOptions {
