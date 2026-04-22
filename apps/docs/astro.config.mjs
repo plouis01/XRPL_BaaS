@@ -24,7 +24,12 @@ export default defineConfig({
             { label: 'Accounts', slug: 'api/accounts' },
             { label: 'Tokens', slug: 'api/tokens' },
             { label: 'Payments', slug: 'api/payments' },
+            { label: 'Credentials', slug: 'api/credentials' },
+            { label: 'Permissioned Domains', slug: 'api/domains' },
+            { label: 'Permissions', slug: 'api/permissions' },
+            { label: 'DEX', slug: 'api/dex' },
             { label: 'Webhooks', slug: 'api/webhooks' },
+            { label: 'Dashboard', slug: 'api/dashboard' },
           ],
         },
         {
