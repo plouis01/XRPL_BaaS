@@ -76,13 +76,28 @@ export function isPrivateIp(address: string): boolean {
   if (ip === '::1' || ip === '::') return true;
   // IPv4-mapped IPv6: ::ffff:a.b.c.d — recurse on the tail so the IPv4
   // patterns above apply.
+  //
+  // REVIEW.md LOW-02: the hex form (::ffff:7f00:1 == 127.0.0.1) used to
+  // silently pass through because we only handled dotted-decimal. An
+  // attacker could request `http://[::ffff:7f00:1]/` and escape the SSRF
+  // guard even though the target IS loopback. Fix: decode the 2-group
+  // hex form into IPv4 and recurse. Reject any `::ffff:` prefix we can't
+  // decode into either form — unknown shapes are fail-closed.
   if (ip.startsWith('::ffff:')) {
     const tail = ip.slice('::ffff:'.length);
-    // The tail may be dotted-decimal (::ffff:127.0.0.1) OR hex
-    // (::ffff:7f00:1). We only handle dotted-decimal here — the hex
-    // form is uncommon and `dns.lookup` always returns dotted-decimal
-    // for IPv4-mapped results.
+    // Dotted-decimal form: ::ffff:127.0.0.1 → recurse as IPv4.
     if (/^\d+\.\d+\.\d+\.\d+$/.test(tail)) return isPrivateIp(tail);
+    // Hex form: ::ffff:HHHH:HHHH (two 16-bit groups). The last one can
+    // be abbreviated (::ffff:7f00:1 instead of ::ffff:7f00:0001).
+    const hexMatch = tail.match(/^([0-9a-f]{1,4}):([0-9a-f]{1,4})$/);
+    if (hexMatch) {
+      const hi = Number.parseInt(hexMatch[1] as string, 16);
+      const lo = Number.parseInt(hexMatch[2] as string, 16);
+      const dotted = `${(hi >> 8) & 0xff}.${hi & 0xff}.${(lo >> 8) & 0xff}.${lo & 0xff}`;
+      return isPrivateIp(dotted);
+    }
+    // Any other ::ffff:* shape is unexpected — fail closed.
+    return true;
   }
   if (/^f[cd]/.test(ip)) return true; // fc00::/7 unique local
   if (/^fe[89ab]/.test(ip)) return true; // fe80::/10 link-local
