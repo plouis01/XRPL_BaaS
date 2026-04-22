@@ -76,12 +76,20 @@ interface CachedResponse {
 
 /**
  * Collapse URL-shape variance so the idempotency cache key is stable across
- * requests that Hono treats as the same route. Lowercases (URLs are
- * case-insensitive in practice at the path level for our routes), collapses
- * runs of `/`, and strips a trailing slash unless the path IS `/`.
+ * requests that Hono treats as the same route. Collapses runs of `/` and
+ * strips a trailing slash unless the path IS `/`.
+ *
+ * REVIEW.md LOW-17: previously also lowercased the pathname. That was
+ * wrong for XRPL classic addresses in path params — base58 is CASE
+ * SENSITIVE, so `rHb9CJAWyB4` and `rhb9cjawyb4` are different accounts.
+ * A single client reusing one idempotency key across two requests whose
+ * only difference was case in an address param would silently replay the
+ * first response for the second — subtle footgun, even though the
+ * clientId in the cache key still bounds cross-tenant leakage. Keep
+ * the slash-shape normalizations (harmless) and drop the case fold.
  */
 function normalizePath(pathname: string): string {
-  const collapsed = pathname.replace(/\/+/g, '/').toLowerCase();
+  const collapsed = pathname.replace(/\/+/g, '/');
   if (collapsed.length > 1 && collapsed.endsWith('/')) {
     return collapsed.slice(0, -1);
   }
