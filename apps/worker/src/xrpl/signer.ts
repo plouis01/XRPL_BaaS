@@ -93,6 +93,19 @@ export class DevSigner implements Signer {
           'See ARCHITECTURE.md §5.1 (Key vault).',
       );
     }
+    // REVIEW.md LOW-11: defense-in-depth — refuse to construct when the
+    // XRPL network is mainnet even if NODE_ENV happens to be unset or
+    // 'development'. The queues.ts factory already guards this path, but
+    // a direct `new DevSigner()` in a test harness or a future caller that
+    // bypasses the factory would otherwise sign real-money txs with a
+    // software-held key. Catching it here closes the loophole at the
+    // signer boundary itself.
+    if ((process.env.XRPL_NETWORK ?? '').toLowerCase() === 'mainnet') {
+      throw new Error(
+        'DevSigner refuses to start with XRPL_NETWORK=mainnet. Use HsmSigner. ' +
+          'See ARCHITECTURE.md §5.1 (Key vault).',
+      );
+    }
   }
 
   /**
