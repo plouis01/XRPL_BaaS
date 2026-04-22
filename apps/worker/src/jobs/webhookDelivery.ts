@@ -35,6 +35,16 @@ const DELIVERY_TIMEOUT_MS = 10_000;
 
 const SIGNATURE_HEADER = 'X-RailForge-Signature';
 const TIMESTAMP_HEADER = 'X-RailForge-Timestamp';
+/**
+ * REVIEW.md LOW-18: emit a scheme version alongside the signature so
+ * future changes to the HMAC construction are forward-compatible.
+ * Receivers MUST read this header first and dispatch to the matching
+ * verification routine — v1 means `HMAC-SHA256(secret, timestamp + "." + body)`.
+ * When a v2 ships, this worker emits `2` and the old v1 listeners fail
+ * loudly instead of silently mis-verifying the new scheme.
+ */
+const VERSION_HEADER = 'X-RailForge-Webhook-Version';
+export const WEBHOOK_SCHEME_VERSION = '1';
 
 /**
  * Replay-window documented for receivers implementing verification. Any
@@ -224,6 +234,7 @@ export async function processWebhookDeliveryJob(job: Job<WebhookDeliveryJobData>
         'Content-Type': 'application/json',
         [SIGNATURE_HEADER]: signature,
         [TIMESTAMP_HEADER]: String(timestamp),
+        [VERSION_HEADER]: WEBHOOK_SCHEME_VERSION,
         'User-Agent': 'RailForge-Webhooks/1.0',
       },
       body,
