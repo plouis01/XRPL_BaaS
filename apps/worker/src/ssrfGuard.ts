@@ -136,8 +136,23 @@ export async function resolveAndValidateHostname(
   if (!Array.isArray(results) || results.length === 0) {
     throw new Error(`dns lookup returned no records for ${hostname}`);
   }
+  // Integration-test-only loopback allowance. Enabled ONLY when both
+  // RAILFORGE_WEBHOOK_ALLOW_LOOPBACK=1 AND RAILFORGE_TEST_NETWORK=testnet
+  // are set — the second gate ensures this can never activate in prod
+  // where XRPL_NETWORK=mainnet is the only legitimate setting. Without
+  // this override the webhook HMAC integration test (which binds a local
+  // HTTP server to 127.0.0.1) cannot exercise the real delivery path.
+  const allowLoopback =
+    process.env.RAILFORGE_WEBHOOK_ALLOW_LOOPBACK === '1' &&
+    process.env.RAILFORGE_TEST_NETWORK === 'testnet';
   for (const r of results) {
     if (isPrivateIp(r.address)) {
+      const isLoopback =
+        r.address === '127.0.0.1' ||
+        r.address === '::1' ||
+        r.address.startsWith('127.') ||
+        r.address === '::ffff:127.0.0.1';
+      if (allowLoopback && isLoopback) continue;
       throw new SsrfBlockedError(
         `Webhook target ${hostname} resolved to private/reserved IP ${r.address}`,
         hostname,
