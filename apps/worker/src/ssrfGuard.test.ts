@@ -7,7 +7,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 // wired in when the module-level lookup binding is resolved.
 const dnsLookupMock = vi.fn();
 vi.mock('node:dns/promises', () => ({
-  lookup: (hostname: string) => dnsLookupMock(hostname),
+  // REVIEW.md LOW-01: forward the options arg too so `dns.lookup(host, { all: true })`
+  // reaches the mock — otherwise assertions on the options object fail.
+  lookup: (hostname: string, options?: unknown) => dnsLookupMock(hostname, options),
 }));
 
 import type { SsrfBlockedError as SsrfBlockedErrorType } from './ssrfGuard.ts';
@@ -97,31 +99,42 @@ describe('resolveAndValidateHostname', () => {
     vi.clearAllMocks();
   });
 
+  // REVIEW.md LOW-01: dns.lookup is called with `{ all: true }` so the mock
+  // must return an array of records, not a single object. Each test wraps
+  // its fixture record in a one-element array unless it's explicitly
+  // testing multi-record behavior.
+
   it('resolves and returns the address on a public IP', async () => {
-    dnsLookupMock.mockResolvedValueOnce({
-      address: '93.184.216.34',
-      family: 4,
-    });
+    dnsLookupMock.mockResolvedValueOnce([
+      {
+        address: '93.184.216.34',
+        family: 4,
+      },
+    ]);
 
     const result = await resolveAndValidateHostname('example.com');
     expect(result).toEqual({ address: '93.184.216.34', family: 4 });
-    expect(dnsLookupMock).toHaveBeenCalledWith('example.com');
+    expect(dnsLookupMock).toHaveBeenCalledWith('example.com', { all: true });
   });
 
   it('throws SsrfBlockedError when the hostname resolves to AWS metadata', async () => {
-    dnsLookupMock.mockResolvedValueOnce({
-      address: '169.254.169.254',
-      family: 4,
-    });
+    dnsLookupMock.mockResolvedValueOnce([
+      {
+        address: '169.254.169.254',
+        family: 4,
+      },
+    ]);
 
     await expect(resolveAndValidateHostname('evil.com')).rejects.toThrow(SsrfBlockedError);
   });
 
   it('throws SsrfBlockedError with hostname + resolved IP on the error', async () => {
-    dnsLookupMock.mockResolvedValueOnce({
-      address: '10.0.0.1',
-      family: 4,
-    });
+    dnsLookupMock.mockResolvedValueOnce([
+      {
+        address: '10.0.0.1',
+        family: 4,
+      },
+    ]);
 
     try {
       await resolveAndValidateHostname('attacker.io');
@@ -149,7 +162,34 @@ describe('resolveAndValidateHostname', () => {
   });
 
   it('rejects IPv6 loopback (::1)', async () => {
-    dnsLookupMock.mockResolvedValueOnce({ address: '::1', family: 6 });
+    dnsLookupMock.mockResolvedValueOnce([{ address: '::1', family: 6 }]);
     await expect(resolveAndValidateHostname('v6evil.com')).rejects.toThrow(SsrfBlockedError);
+  });
+
+  // REVIEW.md LOW-01: new regression tests for the multi-record path.
+  it('REVIEW.md LOW-01: rejects when the FIRST record is public but a later record is private', async () => {
+    // A DNS rebinder serves multiple A records, one public + one private.
+    // The pre-fix guard only checked the first and let this through.
+    dnsLookupMock.mockResolvedValueOnce([
+      { address: '1.2.3.4', family: 4 },
+      { address: '127.0.0.1', family: 4 },
+    ]);
+    await expect(resolveAndValidateHostname('rebind.example')).rejects.toThrow(SsrfBlockedError);
+  });
+
+  it('REVIEW.md LOW-01: rejects when a resolved AAAA is loopback even if A is public', async () => {
+    dnsLookupMock.mockResolvedValueOnce([
+      { address: '1.2.3.4', family: 4 },
+      { address: '::1', family: 6 },
+    ]);
+    await expect(resolveAndValidateHostname('mixed.example')).rejects.toThrow(SsrfBlockedError);
+  });
+
+  it('REVIEW.md LOW-01: throws a plain Error (not SsrfBlockedError) on empty result set', async () => {
+    dnsLookupMock.mockResolvedValueOnce([]);
+    await expect(resolveAndValidateHostname('noresults.example')).rejects.toThrow(/no records/);
+    await expect(resolveAndValidateHostname('noresults.example')).rejects.not.toThrow(
+      SsrfBlockedError,
+    );
   });
 });

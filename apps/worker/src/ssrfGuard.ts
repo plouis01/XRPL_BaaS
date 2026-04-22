@@ -13,14 +13,20 @@
 // layers of defense together — the registration-time regex catches
 // literal private IPs in the URL, this catches them after resolution.
 //
-// Residual race: between `dns.lookup` below and undici's own lookup
-// inside `fetch`, the attacker could theoretically flip DNS again if
-// the OS resolver doesn't cache the result. In practice modern macOS
+// REVIEW.md LOW-01 fix: resolve with `{ all: true }` and validate EVERY
+// returned record, not just the first. A rebinder serves a multi-A-record
+// response like `[1.2.3.4, 127.0.0.1]` — picking only one could let the
+// private address through. We reject if ANY resolved record lives in a
+// private/reserved range, which also covers the "mixed A/AAAA with a
+// loopback IPv6" case.
+//
+// Residual race: between our DNS lookup and Bun's `fetch` internal lookup,
+// an attacker could theoretically flip DNS again. In practice modern macOS
 // (mDNSResponder) and Linux (systemd-resolved / nscd) cache for long
-// enough that both calls see the same answer, and undici's keep-alive
-// connection pool further reduces the window. Fully closing the race
-// would require an undici Agent with a pinned `connect.lookup` — a
-// future hardening if this turns out to be exploitable in practice.
+// enough that both calls see the same answer. Fully closing the race
+// would require a runtime-level pinned resolver (undici Agent with a
+// fixed `connect.lookup` on Node, or an equivalent option on Bun), which
+// the current Bun runtime doesn't expose cleanly.
 
 import { lookup as dnsLookup } from 'node:dns/promises';
 
@@ -107,23 +113,41 @@ export function isPrivateIp(address: string): boolean {
 }
 
 /**
- * Resolve a hostname to an IP and reject if that IP is private or
- * reserved. Returns the resolved address + family on success.
+ * Resolve a hostname to an IP and reject if ANY returned record is private
+ * or reserved. Returns the first (public) resolved address + family on
+ * success.
+ *
+ * REVIEW.md LOW-01: `{ all: true }` forces the resolver to return every
+ * matching A + AAAA record. We iterate and bail on the first private hit
+ * rather than only checking `result[0]` — which would have let a rebinder
+ * serve `[1.2.3.4, 127.0.0.1]` bypass the guard as long as the first
+ * record was public.
  *
  * DNS lookup failures (NXDOMAIN, resolver unreachable, etc.) propagate
  * to the caller — the caller should treat them as transient network
- * errors, not SSRF rejections.
+ * errors, not SSRF rejections. An empty-result array (resolver returns
+ * zero records) is also treated as a DNS failure, not an SSRF event,
+ * because we have no address to classify.
  */
 export async function resolveAndValidateHostname(
   hostname: string,
 ): Promise<{ address: string; family: 4 | 6 }> {
-  const result = await dnsLookup(hostname);
-  if (isPrivateIp(result.address)) {
-    throw new SsrfBlockedError(
-      `Webhook target ${hostname} resolved to private/reserved IP ${result.address}`,
-      hostname,
-      result.address,
-    );
+  const results = await dnsLookup(hostname, { all: true });
+  if (!Array.isArray(results) || results.length === 0) {
+    throw new Error(`dns lookup returned no records for ${hostname}`);
   }
-  return { address: result.address, family: result.family as 4 | 6 };
+  for (const r of results) {
+    if (isPrivateIp(r.address)) {
+      throw new SsrfBlockedError(
+        `Webhook target ${hostname} resolved to private/reserved IP ${r.address}`,
+        hostname,
+        r.address,
+      );
+    }
+  }
+  const first = results[0];
+  if (!first) {
+    throw new Error(`dns lookup returned no records for ${hostname}`);
+  }
+  return { address: first.address, family: first.family as 4 | 6 };
 }

@@ -100,16 +100,27 @@ vi.mock('../queues.ts', () => ({
 // fetch. Without a mock, tests using made-up hostnames like
 // `hook.example` would hit real DNS and fail. We mock a default "safe
 // public IP" response and let individual tests override it per-case.
-// Typed loosely so tests can mockResolvedValueOnce with either family=4
-// or family=6 without fighting a `4 as const` literal type.
-const dnsLookupMock = vi.fn<(hostname: string) => Promise<{ address: string; family: 4 | 6 }>>(
-  async (_hostname: string) => ({
-    address: '93.184.216.34', // a known public IP (example.com)
-    family: 4,
-  }),
-);
+//
+// REVIEW.md LOW-01: the guard now calls `dns.lookup(hostname, { all: true })`
+// which returns an array of records. Individual per-case mocks that still
+// use the legacy single-object shape are transparently wrapped below so
+// they don't all need to change at once — `toRecords()` normalizes either
+// form into a one-element array.
+type LookupRecord = { address: string; family: 4 | 6 };
+function toRecords(value: LookupRecord | LookupRecord[]): LookupRecord[] {
+  return Array.isArray(value) ? value : [value];
+}
+const dnsLookupMock = vi.fn<
+  (hostname: string, options?: unknown) => Promise<LookupRecord | LookupRecord[]>
+>(async (_hostname: string) => ({
+  address: '93.184.216.34', // a known public IP (example.com)
+  family: 4,
+}));
 vi.mock('node:dns/promises', () => ({
-  lookup: (hostname: string) => dnsLookupMock(hostname),
+  lookup: async (hostname: string, options?: { all?: boolean }) => {
+    const raw = await dnsLookupMock(hostname, options);
+    return options?.all ? toRecords(raw) : raw;
+  },
 }));
 
 // ── fetch mock ──────────────────────────────────────────────────────────────
@@ -501,7 +512,7 @@ describe('processWebhookDeliveryJob', () => {
 
       await processWebhookDeliveryJob(makeJob(BASE_JOB_DATA));
 
-      expect(dnsLookupMock).toHaveBeenCalledWith('hook.example');
+      expect(dnsLookupMock).toHaveBeenCalledWith('hook.example', { all: true });
       expect(fetchMock).toHaveBeenCalledTimes(1);
       expect(
         dbUpdateCalls.find((c) => (c.set as Record<string, unknown>).status === 'delivered'),
