@@ -19,7 +19,7 @@
 // per subscriber, and enqueue them on the webhook-delivery queue. The
 // delivery worker handles retries independently from this job.
 
-import { and, db, eq, isNull, schema, sql } from '@railforge/db';
+import { and, db, desc, eq, isNull, schema, sql } from '@railforge/db';
 import { getJobsRedis } from '@railforge/jobs';
 import type { Logger } from '@railforge/logger';
 import { type Job, Worker } from 'bullmq';
@@ -472,9 +472,12 @@ async function backfillMptIssuanceId(
   if (!acctId) return;
 
   // Find the most-recent MPT-typed token row for this issuer that has
-  // a NULL mpt_issuance_id. There SHOULD be exactly one in flight per
-  // issuer at a time given the sequencer serialization, but we order
-  // by created_at desc + limit 1 just in case.
+  // a NULL mpt_issuance_id. The ORDER BY is load-bearing: without it an
+  // older orphaned NULL row (e.g. an earlier attempt that failed before
+  // backfill or never got its confirmation event) could win the match
+  // and silently steal the id slot from the tx actually being confirmed.
+  // The sequencer serializes per-issuer so the newest NULL row always
+  // corresponds to the currently-confirming tx.
   const tokenRows = await db
     .select({ id: schema.tokens.id })
     .from(schema.tokens)
@@ -485,6 +488,7 @@ async function backfillMptIssuanceId(
         isNull(schema.tokens.mptIssuanceId),
       ),
     )
+    .orderBy(desc(schema.tokens.createdAt))
     .limit(1);
   const tokenId = tokenRows[0]?.id;
   if (!tokenId) return;
