@@ -170,12 +170,25 @@ export async function createToken(input: CreateTokenInput): Promise<TokenView> {
     });
     txType = 'TrustSet';
   } else {
+    // MPTokenIssuanceCreate flag values (xrpl.js v4.6 MPTokenIssuanceCreateFlags):
+    //   tfMPTCanLock      = 0x00000002  — enables freeze via MPTokenIssuanceSet
+    //   tfMPTRequireAuth  = 0x00000004
+    //   tfMPTCanEscrow    = 0x00000008
+    //   tfMPTCanTrade     = 0x00000010
+    //   tfMPTCanTransfer  = 0x00000020  — required for holder-to-holder transfers
+    //   tfMPTCanClawback  = 0x00000040  — enables issuer clawback
+    //
+    // Prior bug: this mask used 0x01 for "CanLock" (wrong: 0x01 is tfMPTLock
+    // on MPTokenIssuanceSet, not a valid Create flag). rippled rejected with
+    // temINVALID_FLAG. The fix threads the `clawback` / `freeze_enabled`
+    // service inputs to the correct flags instead of hard-coding a mask.
+    let flagMask = 0x00000020; // tfMPTCanTransfer — always on
+    if (input.freezeEnabled) flagMask |= 0x00000002; // tfMPTCanLock
+    if (input.clawback) flagMask |= 0x00000040; // tfMPTCanClawback
     txJson = buildMptIssuanceCreate({
       account: issuer.address,
       transferFee: input.transferFee,
-      // Flags — tfMPTCanTransfer so holders can move it; tfMPTCanLock so
-      // freeze (MPTokenIssuanceSet with tfMPTLock) is later possible.
-      flags: 0x00000020 | 0x00000001, // tfMPTCanTransfer + tfMPTCanLock
+      flags: flagMask,
       ...(input.maxSupply !== undefined ? { maximumAmount: input.maxSupply } : {}),
     });
     txType = 'MPTokenIssuanceCreate';
