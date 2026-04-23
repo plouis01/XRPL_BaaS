@@ -120,8 +120,17 @@ export interface OfferCancelEvent extends TxEventBase {
 export interface DomainSetEvent extends TxEventBase {
   kind: 'domain_set';
   account: string;
+  /**
+   * The on-ledger domain id. For updates this comes from the tx's DomainID
+   * field; for creates it's extracted from meta.CreatedNode.LedgerIndex
+   * (the PermissionedDomain ledger entry IS the hash). Either way the
+   * store can match it against the API-side `domains.domain_id` column
+   * to resolve the `pending-<uuid>` placeholder written on creation.
+   */
   domainId?: string;
   acceptedCredentials?: Array<{ issuer: string; credentialType: string }>;
+  /** True iff this tx CREATED a new PermissionedDomain ledger entry. */
+  isCreate?: boolean;
 }
 
 export interface DomainDeleteEvent extends TxEventBase {
@@ -321,8 +330,31 @@ export function parseTransaction(raw: unknown): TxEvent | null {
     case 'PermissionedDomainSet': {
       const account = String(fields.Account ?? '');
       if (!account) return { kind: 'other', txType, ...base };
-      const domainId =
+      // UPDATE form carries DomainID directly in tx fields. CREATE form
+      // doesn't — the new entry's id is the LedgerIndex of the first
+      // PermissionedDomain CreatedNode in meta.AffectedNodes.
+      let domainId: string | undefined =
         typeof fields.DomainID === 'string' ? (fields.DomainID as string) : undefined;
+      let isCreate = false;
+      if (!domainId) {
+        const meta = (r.meta ?? r.metaData) as { AffectedNodes?: unknown[] } | undefined;
+        const nodes = Array.isArray(meta?.AffectedNodes) ? meta.AffectedNodes : [];
+        for (const node of nodes) {
+          const created = (
+            node as {
+              CreatedNode?: { LedgerEntryType?: string; LedgerIndex?: string };
+            }
+          ).CreatedNode;
+          if (
+            created?.LedgerEntryType === 'PermissionedDomain' &&
+            typeof created.LedgerIndex === 'string'
+          ) {
+            domainId = created.LedgerIndex;
+            isCreate = true;
+            break;
+          }
+        }
+      }
       const rawAccepted = fields.AcceptedCredentials;
       const acceptedCredentials = Array.isArray(rawAccepted)
         ? rawAccepted
@@ -344,6 +376,7 @@ export function parseTransaction(raw: unknown): TxEvent | null {
         account,
         domainId,
         acceptedCredentials,
+        isCreate,
         ...base,
       };
     }
