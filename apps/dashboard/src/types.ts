@@ -33,6 +33,15 @@ export interface Credential {
   ledger_index: string | null;
 }
 
+export interface Account {
+  id: string;
+  address: string;
+  label: string | null;
+  custody_mode: string;
+  is_funded: boolean;
+  created_at: string | null;
+}
+
 export interface Token {
   id: string;
   issuer_address: string;

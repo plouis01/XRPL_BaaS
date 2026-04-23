@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { ApiError, api } from '../api.ts';
-import type { AccountBalances, Network, Token } from '../types.ts';
+import type { Account, AccountBalances, Network, Token } from '../types.ts';
 
 function errorMessage(err: unknown): string {
   if (err instanceof ApiError) return `API error ${err.status}: ${err.body.slice(0, 160)}`;
@@ -21,6 +21,7 @@ export function Tokens({ network }: { network: Network }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<string | null>(null);
+  const [showCreate, setShowCreate] = useState(false);
 
   const fetchTokens = useCallback(async () => {
     setLoading(true);
@@ -42,7 +43,41 @@ export function Tokens({ network }: { network: Network }) {
 
   return (
     <div>
-      <h1 style={{ margin: '0 0 24px', fontSize: 24 }}>Tokens</h1>
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'baseline',
+          justifyContent: 'space-between',
+          margin: '0 0 24px',
+        }}
+      >
+        <h1 style={{ margin: 0, fontSize: 24 }}>Tokens</h1>
+        <button
+          type="button"
+          onClick={() => setShowCreate((v) => !v)}
+          style={{
+            padding: '6px 12px',
+            background: showCreate ? '#e2e8f0' : '#2563eb',
+            color: showCreate ? '#1e293b' : '#fff',
+            border: 'none',
+            borderRadius: 4,
+            cursor: 'pointer',
+            fontSize: 13,
+          }}
+        >
+          {showCreate ? 'Cancel' : '+ New token'}
+        </button>
+      </div>
+
+      {showCreate && (
+        <NewTokenForm
+          network={network}
+          onCreated={() => {
+            setShowCreate(false);
+            void fetchTokens();
+          }}
+        />
+      )}
 
       <div style={{ fontSize: 13, color: '#64748b', marginBottom: 12 }}>
         Showing <strong>{network}</strong> issuances (MPT default, trustline opt-in)
@@ -405,6 +440,287 @@ function TokenDetail({ token }: { token: Token }) {
           )}
         </div>
       )}
+    </div>
+  );
+}
+
+// Inline "+ New token" form. Wraps POST /v1/tokens. The issuer dropdown is
+// populated from /v1/dashboard/accounts — a client must have at least one
+// managed account before they can issue, since the token's issuer is an
+// XRPL account held by RailForge. MPT is the default (see CLAUDE.md);
+// trustline remains an opt-in for DEX-liquidity use cases, exposed here
+// via the type radio.
+function NewTokenForm({
+  network,
+  onCreated,
+}: {
+  network: Network;
+  onCreated: () => void;
+}) {
+  const [accounts, setAccounts] = useState<Account[]>([]);
+  const [loadingAccounts, setLoadingAccounts] = useState(true);
+  const [accountsError, setAccountsError] = useState<string | null>(null);
+
+  const [issuer, setIssuer] = useState('');
+  const [tokenType, setTokenType] = useState<'mpt' | 'trustline'>('mpt');
+  const [currencyCode, setCurrencyCode] = useState('');
+  const [transferFee, setTransferFee] = useState('0');
+  const [clawback, setClawback] = useState(true);
+  const [freezeEnabled, setFreezeEnabled] = useState(true);
+  const [maxSupply, setMaxSupply] = useState('');
+  const [trustlineLimit, setTrustlineLimit] = useState('');
+
+  const [submitting, setSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoadingAccounts(true);
+    setAccountsError(null);
+    (async () => {
+      try {
+        const data = await api<{ data: Account[] }>(
+          `/v1/dashboard/accounts?environment=${network}`,
+        );
+        if (cancelled) return;
+        setAccounts(data.data);
+        // Auto-select the first funded account — the most common case. If
+        // nothing is funded we leave it blank and let the user pick; the
+        // submit button will surface the backend's unfunded-issuer error.
+        const firstFunded = data.data.find((a) => a.is_funded);
+        if (firstFunded) setIssuer(firstFunded.address);
+      } catch (err) {
+        if (!cancelled) setAccountsError(errorMessage(err));
+      } finally {
+        if (!cancelled) setLoadingAccounts(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [network]);
+
+  const submit = async () => {
+    if (!issuer || !currencyCode) return;
+    setSubmitting(true);
+    setSubmitError(null);
+    try {
+      // transferFee is free-form input; coerce at the boundary. The backend
+      // Zod schema will still reject out-of-range values, but parsing here
+      // keeps the request body typed correctly.
+      const feeBps = Number.parseInt(transferFee, 10);
+      const body: Record<string, unknown> = {
+        issuer,
+        type: tokenType,
+        currency_code: currencyCode,
+        transfer_fee: Number.isFinite(feeBps) ? feeBps : 0,
+        clawback,
+        freeze_enabled: freezeEnabled,
+      };
+      if (maxSupply.trim()) body.max_supply = maxSupply.trim();
+      if (tokenType === 'trustline' && trustlineLimit.trim()) {
+        body.trustline_limit = trustlineLimit.trim();
+      }
+      await api<{ id: string; tx_id: string }>('/v1/tokens', {
+        method: 'POST',
+        body,
+      });
+      onCreated();
+    } catch (err) {
+      setSubmitError(errorMessage(err));
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const labelStyle: React.CSSProperties = {
+    display: 'block',
+    fontSize: 12,
+    color: '#64748b',
+    marginBottom: 4,
+  };
+  const inputStyle: React.CSSProperties = {
+    width: '100%',
+    padding: '6px 8px',
+    borderRadius: 4,
+    border: '1px solid #cbd5e1',
+    fontSize: 13,
+    boxSizing: 'border-box',
+  };
+
+  return (
+    <div
+      style={{
+        border: '1px solid #cbd5e1',
+        borderRadius: 6,
+        padding: 16,
+        background: '#f8fafc',
+        marginBottom: 16,
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 12,
+      }}
+    >
+      <div>
+        <label style={labelStyle} htmlFor="ntf-issuer">
+          Issuer account
+        </label>
+        {loadingAccounts ? (
+          <span style={{ fontSize: 13, color: '#64748b' }}>Loading accounts…</span>
+        ) : accountsError ? (
+          <span style={{ fontSize: 13, color: '#991b1b' }}>{accountsError}</span>
+        ) : accounts.length === 0 ? (
+          <span style={{ fontSize: 13, color: '#64748b' }}>
+            No managed accounts yet. Create one via <code>POST /v1/accounts</code> before issuing.
+          </span>
+        ) : (
+          <select
+            id="ntf-issuer"
+            value={issuer}
+            onChange={(e) => setIssuer(e.target.value)}
+            style={{ ...inputStyle, fontFamily: 'monospace' }}
+          >
+            <option value="">— pick an account —</option>
+            {accounts.map((a) => (
+              <option key={a.id} value={a.address} disabled={!a.is_funded}>
+                {a.address}
+                {a.label ? ` (${a.label})` : ''}
+                {a.is_funded ? '' : ' [unfunded]'}
+              </option>
+            ))}
+          </select>
+        )}
+      </div>
+
+      <div style={{ display: 'flex', gap: 16 }}>
+        <div style={{ flex: 1 }}>
+          <span style={labelStyle}>Type</span>
+          <div style={{ display: 'flex', gap: 12, fontSize: 13 }}>
+            <label>
+              <input
+                type="radio"
+                name="ntf-type"
+                value="mpt"
+                checked={tokenType === 'mpt'}
+                onChange={() => setTokenType('mpt')}
+              />{' '}
+              MPT (default)
+            </label>
+            <label>
+              <input
+                type="radio"
+                name="ntf-type"
+                value="trustline"
+                checked={tokenType === 'trustline'}
+                onChange={() => setTokenType('trustline')}
+              />{' '}
+              Trustline
+            </label>
+          </div>
+        </div>
+        <div style={{ flex: 1 }}>
+          <label style={labelStyle} htmlFor="ntf-currency">
+            Currency code
+          </label>
+          <input
+            id="ntf-currency"
+            type="text"
+            value={currencyCode}
+            onChange={(e) => setCurrencyCode(e.target.value)}
+            placeholder={tokenType === 'trustline' ? 'USD' : 'USDC'}
+            maxLength={40}
+            style={inputStyle}
+          />
+        </div>
+      </div>
+
+      <div style={{ display: 'flex', gap: 16 }}>
+        <div style={{ flex: 1 }}>
+          <label style={labelStyle} htmlFor="ntf-fee">
+            Transfer fee (bps, 0–50000)
+          </label>
+          <input
+            id="ntf-fee"
+            type="number"
+            min={0}
+            max={50000}
+            value={transferFee}
+            onChange={(e) => setTransferFee(e.target.value)}
+            style={inputStyle}
+          />
+        </div>
+        <div style={{ flex: 1 }}>
+          <label style={labelStyle} htmlFor="ntf-supply">
+            Max supply (optional)
+          </label>
+          <input
+            id="ntf-supply"
+            type="text"
+            value={maxSupply}
+            onChange={(e) => setMaxSupply(e.target.value)}
+            placeholder="unbounded if blank"
+            style={inputStyle}
+          />
+        </div>
+      </div>
+
+      {tokenType === 'trustline' && (
+        <div>
+          <label style={labelStyle} htmlFor="ntf-tl-limit">
+            Trustline limit
+          </label>
+          <input
+            id="ntf-tl-limit"
+            type="text"
+            value={trustlineLimit}
+            onChange={(e) => setTrustlineLimit(e.target.value)}
+            placeholder="1000000"
+            style={inputStyle}
+          />
+        </div>
+      )}
+
+      <div style={{ display: 'flex', gap: 20, fontSize: 13, color: '#475569' }}>
+        <label>
+          <input
+            type="checkbox"
+            checked={clawback}
+            onChange={(e) => setClawback(e.target.checked)}
+            style={{ marginRight: 4 }}
+          />
+          Clawback
+        </label>
+        <label>
+          <input
+            type="checkbox"
+            checked={freezeEnabled}
+            onChange={(e) => setFreezeEnabled(e.target.checked)}
+            style={{ marginRight: 4 }}
+          />
+          Freeze
+        </label>
+      </div>
+
+      {submitError && <div style={{ fontSize: 12, color: '#991b1b' }}>{submitError}</div>}
+
+      <div>
+        <button
+          type="button"
+          onClick={() => void submit()}
+          disabled={submitting || !issuer || !currencyCode}
+          style={{
+            padding: '8px 16px',
+            background: submitting || !issuer || !currencyCode ? '#cbd5e1' : '#2563eb',
+            color: '#fff',
+            border: 'none',
+            borderRadius: 4,
+            cursor: submitting || !issuer || !currencyCode ? 'not-allowed' : 'pointer',
+            fontSize: 13,
+          }}
+        >
+          {submitting ? 'Queueing…' : 'Issue token'}
+        </button>
+      </div>
     </div>
   );
 }
