@@ -108,9 +108,15 @@ vi.mock('@railforge/jobs', () => ({
 }));
 
 // Import after mocks.
-const { clawbackToken, createToken, freezeToken, TokenServiceError, transferToken } = await import(
-  './token.service.ts'
-);
+const {
+  authorizeToken,
+  clawbackToken,
+  createToken,
+  freezeToken,
+  getToken,
+  TokenServiceError,
+  transferToken,
+} = await import('./token.service.ts');
 
 // ── Test helpers ────────────────────────────────────────────────────────────
 
@@ -534,5 +540,327 @@ describe('clawbackToken', () => {
     expect(err).toBeInstanceOf(TokenServiceError);
     expect((err as InstanceType<typeof TokenServiceError>).code).toBe('token_not_found');
     expect(enqueueCalls).toHaveLength(0);
+  });
+});
+
+// ── getToken (public read route) ───────────────────────────────────────────
+
+// Exercises the tokens ↔ accounts JOIN exposed via the public getToken()
+// helper. Backs the `GET /v1/tokens/:id` route. Uses the same
+// dbState2.resolvedToken mock seam the token-op tests use above, but the
+// row shape differs: getToken reads unaliased `id` / `clientId` / `issuerAccountId`
+// directly while resolveToken uses aliased `tokenId` / `issuerAccountId`.
+
+const RESOLVED_GET_MPT = {
+  id: 'token-uuid-1',
+  clientId: 'client-1',
+  issuerAccountId: 'acct-uuid-1',
+  issuerAddress: 'rIssuer0000000000000000000000000',
+  tokenType: 'mpt',
+  currencyCode: 'USD',
+  mptIssuanceId: '0100029B1759FFA931B36B53EB53C7E748A79AD62AE8E103',
+  transferFee: 250,
+  clawback: true,
+  freezeEnabled: true,
+  maxSupply: null,
+  createdAt: new Date('2026-04-23T12:00:00Z'),
+};
+
+describe('getToken', () => {
+  beforeEach(() => {
+    dbState2.resolvedToken = null;
+  });
+  afterEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('returns null when the token does not exist / belongs to another tenant', async () => {
+    // No enumeration oracle: the two cases share a return value so callers
+    // can't differentiate "wrong tenant" from "wrong id".
+    const out = await getToken('client-1', 'token-uuid-1');
+    expect(out).toBeNull();
+  });
+
+  it('happy path: returns TokenView-shaped row with status=validated for MPT with id', async () => {
+    dbState2.resolvedToken = RESOLVED_GET_MPT;
+
+    const out = await getToken('client-1', 'token-uuid-1');
+    expect(out).not.toBeNull();
+    expect(out).toMatchObject({
+      id: 'token-uuid-1',
+      issuerAddress: RESOLVED_GET_MPT.issuerAddress,
+      tokenType: 'mpt',
+      currencyCode: 'USD',
+      mptIssuanceId: RESOLVED_GET_MPT.mptIssuanceId,
+      transferFee: 250,
+      clawback: true,
+      freezeEnabled: true,
+      status: 'validated',
+    });
+    // Ensure the synthesized `status` is exposed, not the raw DB shape.
+    expect(out).toHaveProperty('status');
+  });
+
+  it('MPT with null mpt_issuance_id → status=queued (not yet backfilled on-ledger)', async () => {
+    dbState2.resolvedToken = { ...RESOLVED_GET_MPT, mptIssuanceId: null };
+
+    const out = await getToken('client-1', 'token-uuid-1');
+    expect(out?.status).toBe('queued');
+    expect(out?.mptIssuanceId).toBeNull();
+  });
+
+  it('trustline token always reports status=validated regardless of mpt_issuance_id', async () => {
+    // Trust lines don't have an mpt_issuance_id column by design — they
+    // settle immediately on TrustSet so "validated" is the right read.
+    dbState2.resolvedToken = {
+      ...RESOLVED_GET_MPT,
+      tokenType: 'trustline',
+      mptIssuanceId: null,
+    };
+
+    const out = await getToken('client-1', 'token-uuid-1');
+    expect(out?.tokenType).toBe('trustline');
+    expect(out?.status).toBe('validated');
+  });
+
+  it('coalesces null transferFee/clawback/freezeEnabled to safe defaults', async () => {
+    // Schema columns have NOT NULL DEFAULT but Drizzle's select types them
+    // as nullable. Service must coalesce so the TokenView contract holds.
+    dbState2.resolvedToken = {
+      ...RESOLVED_GET_MPT,
+      transferFee: null,
+      clawback: null,
+      freezeEnabled: null,
+    };
+
+    const out = await getToken('client-1', 'token-uuid-1');
+    expect(out?.transferFee).toBe(0);
+    expect(out?.clawback).toBe(false);
+    expect(out?.freezeEnabled).toBe(false);
+  });
+});
+
+// ── authorizeToken (holder MPT opt-in) ─────────────────────────────────────
+
+// Two-stage DB lookup: resolveToken (JOIN) finds the token + issuer, then
+// a plain select finds the holder account scoped to the same client. The
+// holder-not-managed branch is the security-relevant one — a caller must
+// NOT be able to sign an MPTokenAuthorize from an address they don't own.
+
+describe('authorizeToken', () => {
+  const HOLDER = {
+    address: 'rHolder000000000000000000000000000',
+    isFunded: true,
+  };
+
+  beforeEach(() => {
+    dbState.issuerRow = null;
+    dbState2.resolvedToken = null;
+    dbState.txInsertCalls.length = 0;
+    dbState.txInsertResult = [{ id: 'tx-uuid-auth' }];
+    enqueueCalls.length = 0;
+  });
+
+  afterEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('happy path: signs MPTokenAuthorize from the holder with no Holder field', async () => {
+    dbState2.resolvedToken = RESOLVED_MPT_TOKEN;
+    dbState.issuerRow = HOLDER;
+
+    const result = await authorizeToken({
+      clientId: 'client-1',
+      tokenId: 'token-1',
+      holder: HOLDER.address,
+    });
+    expect(result.txId).toBe('tx-uuid-auth');
+
+    // Source address MUST be the holder (holder-side opt-in signs with
+    // the holder's key, NOT the issuer's).
+    const txValues = dbState.txInsertCalls[0]!.values as Record<string, unknown>;
+    expect(txValues.txType).toBe('MPTokenAuthorize');
+    expect(txValues.sourceAddress).toBe(HOLDER.address);
+
+    // Enqueue payload: Account=holder, MPTokenIssuanceID=token id, no
+    // Holder field (that's only used for issuer-side gating with
+    // tfMPTRequireAuth issuances).
+    expect(enqueueCalls).toHaveLength(1);
+    const enq = enqueueCalls[0]!.data as {
+      sourceAddress: string;
+      txJson: {
+        TransactionType: string;
+        Account: string;
+        MPTokenIssuanceID: string;
+        Holder?: string;
+        Flags?: number;
+      };
+    };
+    expect(enq.sourceAddress).toBe(HOLDER.address);
+    expect(enq.txJson.TransactionType).toBe('MPTokenAuthorize');
+    expect(enq.txJson.Account).toBe(HOLDER.address);
+    expect(enq.txJson.MPTokenIssuanceID).toBe(MPT_ID);
+    expect(enq.txJson.Holder).toBeUndefined();
+    expect(enq.txJson.Flags).toBeUndefined();
+  });
+
+  it('unauthorize=true → emits tfMPTUnauthorize flag (0x1)', async () => {
+    dbState2.resolvedToken = RESOLVED_MPT_TOKEN;
+    dbState.issuerRow = HOLDER;
+
+    await authorizeToken({
+      clientId: 'client-1',
+      tokenId: 'token-1',
+      holder: HOLDER.address,
+      unauthorize: true,
+    });
+
+    const enq = enqueueCalls[0]!.data as { txJson: { Flags?: number } };
+    expect(enq.txJson.Flags).toBe(0x00000001);
+  });
+
+  it('SECURITY: holder not owned by this client → invalid_input, no enqueue', async () => {
+    // Load-bearing test: without this scope check the API would let a
+    // caller sign an MPTokenAuthorize from an address they don't own,
+    // provided the worker's signer happened to have the key loaded.
+    dbState2.resolvedToken = RESOLVED_MPT_TOKEN;
+    dbState.issuerRow = null; // holder lookup scoped to clientId returns nothing
+
+    const err = await authorizeToken({
+      clientId: 'client-1',
+      tokenId: 'token-1',
+      holder: 'rOtherTenantHolder00000000000000000',
+    }).catch((e) => e);
+    expect(err).toBeInstanceOf(TokenServiceError);
+    expect((err as InstanceType<typeof TokenServiceError>).code).toBe('invalid_input');
+
+    // Critically: nothing written, nothing enqueued. No side effects at all
+    // when the holder isn't ours.
+    expect(dbState.txInsertCalls).toHaveLength(0);
+    expect(enqueueCalls).toHaveLength(0);
+  });
+
+  it("holder unfunded → invalid_input (can't submit any tx from a 0-XRP account)", async () => {
+    dbState2.resolvedToken = RESOLVED_MPT_TOKEN;
+    dbState.issuerRow = { ...HOLDER, isFunded: false };
+
+    const err = await authorizeToken({
+      clientId: 'client-1',
+      tokenId: 'token-1',
+      holder: HOLDER.address,
+    }).catch((e) => e);
+    expect(err).toBeInstanceOf(TokenServiceError);
+    expect((err as InstanceType<typeof TokenServiceError>).code).toBe('invalid_input');
+    expect(enqueueCalls).toHaveLength(0);
+  });
+
+  it('token_not_found when the JOIN returns nothing', async () => {
+    dbState2.resolvedToken = null;
+    dbState.issuerRow = HOLDER;
+
+    const err = await authorizeToken({
+      clientId: 'client-1',
+      tokenId: 'nonexistent',
+      holder: HOLDER.address,
+    }).catch((e) => e);
+    expect(err).toBeInstanceOf(TokenServiceError);
+    expect((err as InstanceType<typeof TokenServiceError>).code).toBe('token_not_found');
+    expect(enqueueCalls).toHaveLength(0);
+  });
+
+  it('rejects trustline tokens with invalid_input (wrong primitive — use TrustSet)', async () => {
+    dbState2.resolvedToken = RESOLVED_TRUSTLINE_TOKEN;
+    dbState.issuerRow = HOLDER;
+
+    const err = await authorizeToken({
+      clientId: 'client-1',
+      tokenId: 'token-2',
+      holder: HOLDER.address,
+    }).catch((e) => e);
+    expect(err).toBeInstanceOf(TokenServiceError);
+    expect((err as InstanceType<typeof TokenServiceError>).code).toBe('invalid_input');
+    expect(enqueueCalls).toHaveLength(0);
+  });
+
+  it("token_not_ready when mpt_issuance_id is null (issuance hasn't validated)", async () => {
+    dbState2.resolvedToken = { ...RESOLVED_MPT_TOKEN, mptIssuanceId: null };
+    dbState.issuerRow = HOLDER;
+
+    const err = await authorizeToken({
+      clientId: 'client-1',
+      tokenId: 'token-1',
+      holder: HOLDER.address,
+    }).catch((e) => e);
+    expect(err).toBeInstanceOf(TokenServiceError);
+    expect((err as InstanceType<typeof TokenServiceError>).code).toBe('token_not_ready');
+    expect(enqueueCalls).toHaveLength(0);
+  });
+});
+
+// ── MPT flag mapping (createToken → buildMptIssuanceCreate) ────────────────
+
+// Regression guard for the `0x01 claimed to be tfMPTCanLock` bug that
+// rippled rejected with temINVALID_FLAG. Correct values per xrpl.js v4.6:
+//   tfMPTCanTransfer  = 0x20 (always set)
+//   tfMPTCanLock      = 0x02 (set iff freeze_enabled)
+//   tfMPTCanClawback  = 0x40 (set iff clawback)
+
+describe('createToken MPT flag mapping', () => {
+  beforeEach(() => {
+    dbState.issuerRow = FUNDED_ISSUER;
+    dbState.txInsertResult = [{ id: 'tx-uuid-1' }];
+    dbState.tokenInsertResult = [{ id: 'token-uuid-1' }];
+    dbState.txInsertCalls.length = 0;
+    dbState.tokenInsertCalls.length = 0;
+    enqueueCalls.length = 0;
+  });
+
+  afterEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('clawback=true + freeze=true → 0x20 | 0x02 | 0x40 = 0x62 (98)', async () => {
+    await createToken(baseInput({ clawback: true, freezeEnabled: true }));
+    const enq = enqueueCalls[0]!.data as { txJson: { Flags?: number } };
+    expect(enq.txJson.Flags).toBe(0x62);
+  });
+
+  it('clawback=false + freeze=false → 0x20 (tfMPTCanTransfer only)', async () => {
+    await createToken(baseInput({ clawback: false, freezeEnabled: false }));
+    const enq = enqueueCalls[0]!.data as { txJson: { Flags?: number } };
+    expect(enq.txJson.Flags).toBe(0x20);
+  });
+
+  it('clawback=true + freeze=false → 0x20 | 0x40 = 0x60 (no CanLock bit)', async () => {
+    await createToken(baseInput({ clawback: true, freezeEnabled: false }));
+    const enq = enqueueCalls[0]!.data as { txJson: { Flags?: number } };
+    expect(enq.txJson.Flags).toBe(0x60);
+  });
+
+  it('clawback=false + freeze=true → 0x20 | 0x02 = 0x22 (no Clawback bit)', async () => {
+    await createToken(baseInput({ clawback: false, freezeEnabled: true }));
+    const enq = enqueueCalls[0]!.data as { txJson: { Flags?: number } };
+    expect(enq.txJson.Flags).toBe(0x22);
+  });
+
+  it('REGRESSION: flag mask never contains 0x01 (invalid on MPTokenIssuanceCreate)', async () => {
+    // rippled rejects temINVALID_FLAG if any bit outside the Create flag
+    // set is on. 0x01 is tfMPTLock on MPTokenIssuanceSet (the FREEZE op),
+    // not a Create flag. Earlier code incorrectly OR'd 0x01 in and every
+    // MPT issuance failed. This test is the guard against that regression.
+    for (const combo of [
+      { clawback: false, freezeEnabled: false },
+      { clawback: true, freezeEnabled: false },
+      { clawback: false, freezeEnabled: true },
+      { clawback: true, freezeEnabled: true },
+    ]) {
+      enqueueCalls.length = 0;
+      dbState.txInsertCalls.length = 0;
+      dbState.tokenInsertCalls.length = 0;
+      await createToken(baseInput(combo));
+      const enq = enqueueCalls[0]!.data as { txJson: { Flags?: number } };
+      expect(enq.txJson.Flags ?? 0).not.toBe(0);
+      expect(((enq.txJson.Flags ?? 0) & 0x01) === 0).toBe(true);
+    }
   });
 });
