@@ -1,6 +1,7 @@
 // Token service routes.
 //
 // POST   /v1/tokens              → create (MPT default, trustline opt-in)
+// GET    /v1/tokens/:id          → read token metadata (incl. mpt_issuance_id once backfilled)
 // POST   /v1/tokens/:id/transfer → transfer issuer-held token to a holder
 // PUT    /v1/tokens/:id/freeze   → lock/unlock the issuance (MPT only for now)
 // PUT    /v1/tokens/:id/clawback → reclaim tokens from a holder
@@ -12,6 +13,7 @@ import {
   clawbackToken,
   createToken,
   freezeToken,
+  getToken,
   transferToken,
 } from '../services/token.service.ts';
 import type { AppEnv } from '../types.ts';
@@ -90,6 +92,26 @@ tokens.post('/', zValidator('json', createTokenSchema), async (c) => {
     }
     throw err;
   }
+});
+
+tokens.get('/:id', async (c) => {
+  const clientId = c.get('clientId');
+  const tokenId = c.req.param('id');
+  const token = await getToken(clientId, tokenId);
+  if (!token) return c.json({ error: 'Token not found' }, 404);
+  return c.json({
+    id: token.id,
+    issuer_address: token.issuerAddress,
+    token_type: token.tokenType,
+    currency_code: token.currencyCode,
+    mpt_issuance_id: token.mptIssuanceId,
+    transfer_fee: token.transferFee,
+    clawback: token.clawback,
+    freeze_enabled: token.freezeEnabled,
+    max_supply: token.maxSupply,
+    status: token.status,
+    created_at: token.createdAt,
+  });
 });
 
 tokens.post('/:id/transfer', zValidator('json', transferTokenSchema), async (c) => {

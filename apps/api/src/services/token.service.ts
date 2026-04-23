@@ -303,6 +303,61 @@ interface ResolvedToken {
  * Single JOIN over (tokens, accounts) — Postgres uses the tokens.id PK
  * and the FK index on issuer_account, so this is two index lookups.
  */
+/**
+ * Public read of a token, scoped to the client. Returns `null` for either
+ * "doesn't exist" or "belongs to another tenant" — indistinguishable to
+ * the caller. `status` is synthesized from `mpt_issuance_id` presence:
+ * NULL means the on-ledger MPTokenIssuance entry hasn't validated yet,
+ * non-null means the txConfirmer backfilled it on `tesSUCCESS`. Trust
+ * lines validate immediately so they're always reported `validated`.
+ */
+export async function getToken(
+  clientId: string,
+  tokenId: string,
+): Promise<Omit<TokenView, 'txId'> | null> {
+  const rows = await db
+    .select({
+      id: schema.tokens.id,
+      clientId: schema.tokens.clientId,
+      issuerAccountId: schema.tokens.issuerAccount,
+      tokenType: schema.tokens.tokenType,
+      currencyCode: schema.tokens.currencyCode,
+      mptIssuanceId: schema.tokens.mptIssuanceId,
+      transferFee: schema.tokens.transferFee,
+      clawback: schema.tokens.clawback,
+      freezeEnabled: schema.tokens.freezeEnabled,
+      maxSupply: schema.tokens.maxSupply,
+      createdAt: schema.tokens.createdAt,
+      issuerAddress: schema.accounts.address,
+    })
+    .from(schema.tokens)
+    .innerJoin(schema.accounts, eq(schema.tokens.issuerAccount, schema.accounts.id))
+    .where(and(eq(schema.tokens.id, tokenId), eq(schema.tokens.clientId, clientId)))
+    .limit(1);
+  const row = rows[0];
+  if (!row) return null;
+  const status: TokenView['status'] =
+    row.tokenType === 'mpt' && row.mptIssuanceId === null ? 'queued' : 'validated';
+  return {
+    id: row.id,
+    clientId: row.clientId,
+    issuerAccountId: row.issuerAccountId,
+    issuerAddress: row.issuerAddress,
+    tokenType: row.tokenType,
+    currencyCode: row.currencyCode,
+    mptIssuanceId: row.mptIssuanceId,
+    // Coalesce against DB defaults — columns have NOT NULL DEFAULT but the
+    // Drizzle select still types them as nullable. `transfer_fee` default=0,
+    // `clawback`/`freeze_enabled` default=false per packages/db/src/schema.ts.
+    transferFee: row.transferFee ?? 0,
+    clawback: row.clawback ?? false,
+    freezeEnabled: row.freezeEnabled ?? false,
+    maxSupply: row.maxSupply,
+    status,
+    createdAt: row.createdAt,
+  };
+}
+
 async function resolveToken(clientId: string, tokenId: string): Promise<ResolvedToken | null> {
   const rows = await db
     .select({
