@@ -13,7 +13,7 @@ export interface Transaction {
   id: string;
   tx_type: string;
   source_address: string;
-  status: 'queued' | 'submitted' | 'validated' | 'failed';
+  status: 'queued' | 'submitting' | 'submitted' | 'validated' | 'failed';
   tx_hash: string | null;
   result_code: string | null;
   ledger_index: number | null;

@@ -4,10 +4,13 @@ import type { Network, Transaction } from '../types.ts';
 
 const STATUS_COLORS: Record<Transaction['status'], { bg: string; color: string }> = {
   queued: { bg: '#e0e7ff', color: '#3730a3' },
+  submitting: { bg: '#fef3c7', color: '#92400e' },
   submitted: { bg: '#fef3c7', color: '#92400e' },
   validated: { bg: '#dcfce7', color: '#166534' },
   failed: { bg: '#fee2e2', color: '#991b1b' },
 };
+// Fallback for any status the API adds later that's not yet in the map.
+const FALLBACK_BADGE = { bg: '#f1f5f9', color: '#475569' };
 
 export function Transactions({ network }: { network: Network }) {
   const [txs, setTxs] = useState<Transaction[]>([]);
@@ -80,7 +83,7 @@ export function Transactions({ network }: { network: Network }) {
           </thead>
           <tbody>
             {txs.map((tx) => {
-              const badge = STATUS_COLORS[tx.status];
+              const badge = STATUS_COLORS[tx.status] ?? FALLBACK_BADGE;
               return (
                 <tr key={tx.id} style={{ borderBottom: '1px solid #e2e8f0' }}>
                   <td style={{ padding: '8px 12px' }}>
