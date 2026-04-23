@@ -2,19 +2,27 @@ import { useCallback, useEffect, useState } from 'react';
 import { ApiError, api } from '../api.ts';
 import type { ApiKey, Network } from '../types.ts';
 
+function errorMessage(err: unknown): string {
+  if (err instanceof ApiError) return `API error ${err.status}: ${err.body.slice(0, 160)}`;
+  if (err instanceof Error) return err.message;
+  return 'Unknown error';
+}
+
 export function ApiKeys({ network }: { network: Network }) {
   const [keys, setKeys] = useState<ApiKey[]>([]);
   const [loading, setLoading] = useState(true);
   const [newKeySecret, setNewKeySecret] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
   const fetchKeys = useCallback(async () => {
     setLoading(true);
+    setError(null);
     try {
       const data = await api<{ data: ApiKey[] }>(`/v1/dashboard/keys?environment=${network}`);
       setKeys(data.data);
     } catch (err) {
-      if (!(err instanceof ApiError)) throw err;
       setKeys([]);
+      setError(errorMessage(err));
     } finally {
       setLoading(false);
     }
@@ -25,6 +33,7 @@ export function ApiKeys({ network }: { network: Network }) {
   }, [fetchKeys]);
 
   const createKey = async () => {
+    setError(null);
     try {
       const data = await api<{ key: string; prefix: string }>('/v1/dashboard/keys', {
         method: 'POST',
@@ -33,17 +42,18 @@ export function ApiKeys({ network }: { network: Network }) {
       setNewKeySecret(data.key);
       void fetchKeys();
     } catch (err) {
-      if (!(err instanceof ApiError)) throw err;
+      setError(errorMessage(err));
     }
   };
 
   const revokeKey = async (keyId: string) => {
+    setError(null);
     try {
       await api<{ revoked: boolean }>(`/v1/dashboard/keys/${keyId}/revoke`, {
         method: 'POST',
       });
     } catch (err) {
-      if (!(err instanceof ApiError)) throw err;
+      setError(errorMessage(err));
     }
     void fetchKeys();
   };
@@ -75,6 +85,22 @@ export function ApiKeys({ network }: { network: Network }) {
           Create Key
         </button>
       </div>
+
+      {error && (
+        <div
+          style={{
+            padding: 12,
+            background: '#fee2e2',
+            border: '1px solid #fca5a5',
+            color: '#991b1b',
+            borderRadius: 6,
+            marginBottom: 16,
+            fontSize: 13,
+          }}
+        >
+          {error}
+        </div>
+      )}
 
       {newKeySecret && (
         <div
