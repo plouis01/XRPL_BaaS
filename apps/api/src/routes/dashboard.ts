@@ -289,6 +289,47 @@ dashboard.get('/tokens', async (c) => {
   });
 });
 
+// GET /accounts?environment=X — list the client's managed XRPL accounts.
+// Powers the "New token" form's issuer dropdown. Same coarse env gate as
+// tokens/credentials: `accounts` has no environment column (an account is
+// the same address regardless of which API-key-scoped env you view it
+// through), so we only confirm the caller has a key in the selected env
+// before exposing the full account list.
+dashboard.get('/accounts', async (c) => {
+  const clientId = c.get('clientId');
+  const parsed = parseNetworkParam(c.req.query('environment'), 'environment');
+  if (!parsed.ok) return c.json({ error: parsed.error }, 400);
+
+  if (!(await clientHasKeyInEnvironment(clientId, parsed.value))) {
+    return c.json({ data: [] });
+  }
+
+  const rows = await db
+    .select({
+      id: schema.accounts.id,
+      address: schema.accounts.address,
+      label: schema.accounts.label,
+      custodyMode: schema.accounts.custodyMode,
+      isFunded: schema.accounts.isFunded,
+      createdAt: schema.accounts.createdAt,
+    })
+    .from(schema.accounts)
+    .where(eq(schema.accounts.clientId, clientId))
+    .orderBy(desc(schema.accounts.createdAt))
+    .limit(200);
+
+  return c.json({
+    data: rows.map((r) => ({
+      id: r.id,
+      address: r.address,
+      label: r.label,
+      custody_mode: r.custodyMode,
+      is_funded: r.isFunded ?? false,
+      created_at: r.createdAt,
+    })),
+  });
+});
+
 // GET /keys?environment=X — list the client's API keys for the selected
 // environment. Key secrets are never returned (they were only shown at
 // creation time). This is the one endpoint where the filter is *inherent*

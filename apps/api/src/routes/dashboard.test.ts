@@ -168,7 +168,12 @@ vi.mock('@railforge/db', () => ({
     accounts: {
       __tableName: 'accounts',
       id: {},
+      clientId: {},
       address: {},
+      label: {},
+      custodyMode: {},
+      isFunded: {},
+      createdAt: {},
     },
     domains: {
       __tableName: 'domains',
@@ -387,6 +392,56 @@ describe('GET /dashboard/tokens', () => {
         issuer_address: 'rIssuerClassic',
         token_type: 'mpt',
         mpt_issuance_id: 'DEADBEEF',
+      }),
+    );
+  });
+});
+
+describe('GET /dashboard/accounts', () => {
+  it('400 when environment param missing', async () => {
+    const app = makeApp();
+    const res = await app.request('/dashboard/accounts');
+    expect(res.status).toBe(400);
+  });
+
+  it('empty data when client has no key in selected env', async () => {
+    nextKeyCheckRows = [];
+    const app = makeApp();
+    const res = await app.request('/dashboard/accounts?environment=mainnet');
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as { data: unknown[] }).data).toEqual([]);
+  });
+
+  it('returns mapped account rows when client has a matching key', async () => {
+    nextKeyCheckRows = [{ id: 'k1' }];
+    nextRows = [
+      {
+        id: 'acct-1',
+        address: 'rIssuerAddress',
+        label: 'primary issuer',
+        custodyMode: 'semi',
+        isFunded: true,
+        createdAt: new Date('2026-01-01'),
+      },
+    ];
+    const app = makeApp();
+    const res = await app.request('/dashboard/accounts?environment=testnet');
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      data: Array<{
+        id: string;
+        address: string;
+        is_funded: boolean;
+        custody_mode: string;
+      }>;
+    };
+    expect(body.data).toHaveLength(1);
+    expect(body.data[0]).toEqual(
+      expect.objectContaining({
+        id: 'acct-1',
+        address: 'rIssuerAddress',
+        is_funded: true,
+        custody_mode: 'semi',
       }),
     );
   });
