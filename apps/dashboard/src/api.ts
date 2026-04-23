@@ -71,14 +71,24 @@ export interface ApiRequestOptions {
  * error handling. A 401 means the session cookie is missing/expired — the
  * caller should redirect to the login form.
  */
+// Methods that require an Idempotency-Key header per the API contract
+// (enforced by the idempotency middleware on every /v1/* state-changing
+// route). Safe methods never need one.
+const METHODS_REQUIRING_IDEMPOTENCY = new Set(['POST', 'PUT', 'DELETE', 'PATCH']);
+
 export async function api<T>(path: string, opts: ApiRequestOptions = {}): Promise<T> {
+  const method = (opts.method ?? 'GET').toUpperCase();
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
     ...(opts.headers ?? {}),
   };
 
+  if (METHODS_REQUIRING_IDEMPOTENCY.has(method) && !('Idempotency-Key' in headers)) {
+    headers['Idempotency-Key'] = crypto.randomUUID();
+  }
+
   const res = await fetch(`${API_BASE}${path}`, {
-    method: opts.method ?? 'GET',
+    method,
     headers,
     credentials: 'include',
     body: opts.body === undefined ? undefined : JSON.stringify(opts.body),
