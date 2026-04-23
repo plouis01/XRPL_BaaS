@@ -2,6 +2,9 @@ import starlight from '@astrojs/starlight';
 import { defineConfig } from 'astro/config';
 
 export default defineConfig({
+  redirects: {
+    '/': '/getting-started/introduction/',
+  },
   integrations: [
     starlight({
       title: 'RailForge Docs',
