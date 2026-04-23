@@ -119,6 +119,51 @@ dashboard.get('/transactions', async (c) => {
   });
 });
 
+// GET /transactions/:id — single-tx lookup scoped to the authenticated
+// client. Used by the dashboard Tokens page to poll for the on-ledger
+// outcome of an action it just queued (202 gives you a tx_id; this lets
+// the UI show validated/failed + result_code without reloading the
+// whole list).
+dashboard.get('/transactions/:id', async (c) => {
+  const clientId = c.get('clientId');
+  const id = c.req.param('id');
+  // UUID v4 shape check — prevents malformed ids from reaching Drizzle
+  // (Postgres would otherwise throw on an invalid uuid cast).
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) {
+    return c.json({ error: 'invalid transaction id' }, 400);
+  }
+
+  const rows = await db
+    .select({
+      id: schema.transactions.id,
+      txType: schema.transactions.txType,
+      sourceAddress: schema.transactions.sourceAddress,
+      status: schema.transactions.status,
+      txHash: schema.transactions.txHash,
+      resultCode: schema.transactions.resultCode,
+      ledgerIndex: schema.transactions.ledgerIndex,
+      createdAt: schema.transactions.createdAt,
+      confirmedAt: schema.transactions.confirmedAt,
+    })
+    .from(schema.transactions)
+    .where(and(eq(schema.transactions.id, id), eq(schema.transactions.clientId, clientId)))
+    .limit(1);
+
+  const r = rows[0];
+  if (!r) return c.json({ error: 'Transaction not found' }, 404);
+  return c.json({
+    id: r.id,
+    tx_type: r.txType,
+    source_address: r.sourceAddress,
+    status: r.status,
+    tx_hash: r.txHash,
+    result_code: r.resultCode,
+    ledger_index: r.ledgerIndex,
+    created_at: r.createdAt,
+    confirmed_at: r.confirmedAt,
+  });
+});
+
 // GET /credentials?environment=X
 dashboard.get('/credentials', async (c) => {
   const clientId = c.get('clientId');

@@ -265,6 +265,54 @@ describe('GET /dashboard/transactions', () => {
   });
 });
 
+describe('GET /dashboard/transactions/:id', () => {
+  const VALID_ID = '9af78f43-7f57-43fb-8d50-6c04300405e1';
+
+  it('400 on malformed id', async () => {
+    const app = makeApp();
+    const res = await app.request('/dashboard/transactions/not-a-uuid');
+    expect(res.status).toBe(400);
+  });
+
+  it('404 when the tx does not belong to this client', async () => {
+    nextRows = []; // limit(1) returns no rows
+    const app = makeApp();
+    const res = await app.request(`/dashboard/transactions/${VALID_ID}`);
+    expect(res.status).toBe(404);
+  });
+
+  it('200 with mapped row including result_code for a matching tx', async () => {
+    nextRows = [
+      {
+        id: VALID_ID,
+        txType: 'MPTokenAuthorize',
+        sourceAddress: 'rHolder',
+        status: 'failed',
+        txHash: 'DEADBEEF',
+        resultCode: 'tecDUPLICATE',
+        ledgerIndex: 42,
+        createdAt: new Date('2026-04-23'),
+        confirmedAt: null,
+      },
+    ];
+    const app = makeApp();
+    const res = await app.request(`/dashboard/transactions/${VALID_ID}`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      id: string;
+      status: string;
+      result_code: string | null;
+    };
+    expect(body).toEqual(
+      expect.objectContaining({
+        id: VALID_ID,
+        status: 'failed',
+        result_code: 'tecDUPLICATE',
+      }),
+    );
+  });
+});
+
 describe('GET /dashboard/credentials', () => {
   it('400 when environment param missing', async () => {
     const app = makeApp();
