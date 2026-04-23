@@ -164,6 +164,7 @@ vi.mock('../queues.ts', () => ({
 const {
   applyCredentialAcceptOutcome,
   applyDomainMutationOutcome,
+  extractFundingAmount,
   extractMptIssuanceIdFromMeta,
   processTxConfirmJob,
   TxNotYetValidated,
@@ -532,12 +533,16 @@ describe('extractMptIssuanceIdFromMeta', () => {
     expect(extractMptIssuanceIdFromMeta(result)).toBe('FFFFEEEE');
   });
 
-  it('REVIEW.md LOW-06: returns null when only LedgerIndex is present (no MPT id field)', () => {
+  it('REVIEW.md LOW-06: returns null when LedgerIndex is the ONLY signal (no Sequence/Issuer either)', () => {
     // Pre-LOW-06 this fell through to LedgerIndex as a last-ditch fallback.
     // That was wrong: LedgerIndex is the 256-bit ledger entry hash, NOT
     // the 192-bit MPT issuance id. A write under that value would poison
     // tokens.mpt_issuance_id and every later lookup by id would miss.
     // Fail closed so the operator sees the rippled version mismatch.
+    //
+    // (Subsequent update: the helper now ALSO derives the id from
+    // Sequence+Issuer when those are present — see the derivation test
+    // below. This test keeps the LOW-06 guard by withholding them.)
     const result = {
       meta: {
         AffectedNodes: [
@@ -546,6 +551,80 @@ describe('extractMptIssuanceIdFromMeta', () => {
               LedgerEntryType: 'MPTokenIssuance',
               LedgerIndex: '1234ABCD',
               NewFields: {},
+            },
+          },
+        ],
+      },
+    };
+    expect(extractMptIssuanceIdFromMeta(result)).toBeNull();
+  });
+
+  it('derives the id from Sequence + Issuer when neither mpt_issuance_id nor MPTokenIssuanceID is present', () => {
+    // Current rippled (+ xrpl.js v4.6 api v2) doesn't include the id in
+    // CreatedNode.NewFields. The helper falls back to deriving it from
+    // the spec: 4 bytes Sequence (big-endian) + 20 bytes decoded Issuer
+    // AccountID. Cross-checked against live testnet account_objects.
+    const result = {
+      meta: {
+        AffectedNodes: [
+          {
+            CreatedNode: {
+              LedgerEntryType: 'MPTokenIssuance',
+              LedgerIndex: 'DD8FAFA379A40CCAD7B05C09EBDD784F69A5A59654F6999FAF11060537E594AD',
+              NewFields: {
+                Flags: 98,
+                Issuer: 'rs37MdXJEcn8k4BtzeT2sevgm6LaRAua8S',
+                Sequence: 16777881,
+              },
+            },
+          },
+        ],
+      },
+    };
+    // Sequence 16777881 = 0x01000299; decoded Issuer AccountID hex
+    // confirmed against rippled's account_objects response for this addr.
+    expect(extractMptIssuanceIdFromMeta(result)).toBe(
+      '010002991759FFA931B36B53EB53C7E748A79AD62AE8E103',
+    );
+  });
+
+  it('prefers a meta-provided mpt_issuance_id over the Sequence+Issuer derivation', () => {
+    // If a future rippled version DOES populate mpt_issuance_id, trust
+    // that directly — don't derive. The derivation is a fallback, not a
+    // shadow verification path.
+    const result = {
+      meta: {
+        AffectedNodes: [
+          {
+            CreatedNode: {
+              LedgerEntryType: 'MPTokenIssuance',
+              NewFields: {
+                mpt_issuance_id: 'DEADBEEF',
+                Issuer: 'rs37MdXJEcn8k4BtzeT2sevgm6LaRAua8S',
+                Sequence: 16777881,
+              },
+            },
+          },
+        ],
+      },
+    };
+    expect(extractMptIssuanceIdFromMeta(result)).toBe('DEADBEEF');
+  });
+
+  it('fails closed on an invalid Issuer address (no partial poison)', () => {
+    // decodeAccountID throws on malformed r-addresses. The helper must
+    // swallow and return null so tokens.mpt_issuance_id never receives a
+    // garbage value.
+    const result = {
+      meta: {
+        AffectedNodes: [
+          {
+            CreatedNode: {
+              LedgerEntryType: 'MPTokenIssuance',
+              NewFields: {
+                Issuer: 'not-a-real-xrpl-address',
+                Sequence: 12345,
+              },
             },
           },
         ],
@@ -993,5 +1072,81 @@ describe('processTxConfirmJob: domain mutation integration', () => {
     const set = domainUpdate!.set as Record<string, unknown>;
     expect(set.pendingDeletion).toBe(false);
     expect('deletedAt' in set).toBe(false);
+  });
+});
+
+// ── extractFundingAmount (rippled API v1/v2 shape handling) ────────────────
+
+// Funds the is_funded flip in the confirmer. The actual bug this guards
+// against: xrpl.js v4.6 defaults to api_version=2, which hides the Payment
+// amount under tx_json.DeliverMax (the field was also renamed from Amount).
+// Before the fix, confirmer read result.Amount only and always got undefined
+// — every account stayed is_funded=false forever.
+
+describe('extractFundingAmount (API v1/v2 shape parser)', () => {
+  it("prefers meta.delivered_amount — it's the AUTHORITATIVE delivered amount (covers partial payments)", () => {
+    const result = {
+      meta: { delivered_amount: '20000000', TransactionResult: 'tesSUCCESS' },
+      tx_json: { DeliverMax: '25000000', Amount: '30000000' },
+      Amount: '35000000',
+    };
+    expect(extractFundingAmount(result)).toBe('20000000');
+  });
+
+  it('falls back to tx_json.DeliverMax for API v2 when delivered_amount is absent', () => {
+    // This is the canonical v2-default shape for `tx`. Pre-fix, the
+    // confirmer read result.Amount (undefined in v2) and skipped the flip.
+    const result = {
+      meta: { TransactionResult: 'tesSUCCESS' },
+      tx_json: { DeliverMax: '10000000' },
+    };
+    expect(extractFundingAmount(result)).toBe('10000000');
+  });
+
+  it('falls back to tx_json.Amount when DeliverMax is missing (some tx types still use Amount)', () => {
+    const result = {
+      meta: { TransactionResult: 'tesSUCCESS' },
+      tx_json: { Amount: '5000000' },
+    };
+    expect(extractFundingAmount(result)).toBe('5000000');
+  });
+
+  it('falls back to result.Amount for API v1 inline shape', () => {
+    // api_version=1 or api_version omitted on older rippled versions:
+    // tx fields live at the top of result, no tx_json wrapper.
+    const result = {
+      meta: { TransactionResult: 'tesSUCCESS' },
+      Amount: '1000000',
+    };
+    expect(extractFundingAmount(result)).toBe('1000000');
+  });
+
+  it("returns null when the delivered amount is an issued-currency object (can't fund)", () => {
+    // Funding payments are XRP only. If an MPT or IOU somehow lands here
+    // we must NOT write the object into the reserve_balance text column.
+    const result = {
+      meta: {
+        delivered_amount: {
+          currency: 'USD',
+          issuer: 'rIss0000000000000000000000000000',
+          value: '10',
+        },
+      },
+    };
+    expect(extractFundingAmount(result)).toBeNull();
+  });
+
+  it('returns null when the delivered amount is an MPT object', () => {
+    const result = {
+      meta: { delivered_amount: { mpt_issuance_id: 'DEADBEEF', value: '42' } },
+    };
+    expect(extractFundingAmount(result)).toBeNull();
+  });
+
+  it('returns null on empty / non-object input', () => {
+    expect(extractFundingAmount(null)).toBeNull();
+    expect(extractFundingAmount(undefined)).toBeNull();
+    expect(extractFundingAmount({})).toBeNull();
+    expect(extractFundingAmount({ meta: null })).toBeNull();
   });
 });

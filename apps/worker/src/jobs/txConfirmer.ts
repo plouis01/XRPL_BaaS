@@ -239,26 +239,7 @@ export async function processTxConfirmJob(job: Job<TxConfirmJobData>): Promise<v
   // funding payments we know it's XRP — but we still defensively
   // type-check before parsing.
   if (isSuccess) {
-    // Extracting the delivered XRP amount for a funding Payment across
-    // rippled API versions. Field precedence (most authoritative first):
-    //   1. meta.delivered_amount — present in both v1 + v2 for validated
-    //      Payments. This is the AUTHORITATIVE delivered amount.
-    //   2. tx_json.DeliverMax    — v2 renamed the submitted-amount field
-    //      to DeliverMax (xrpl.js v4.6 default).
-    //   3. result.Amount         — v1 inline shape.
-    // We type-narrow to string — issued-currency and MPT amount objects
-    // cannot fund a new account (we're looking at XRP funding only).
-    const rawMeta = txResponse.result as {
-      Amount?: unknown;
-      tx_json?: { DeliverMax?: unknown; Amount?: unknown };
-      meta?: { delivered_amount?: unknown };
-    };
-    const rawAmount =
-      rawMeta.meta?.delivered_amount ??
-      rawMeta.tx_json?.DeliverMax ??
-      rawMeta.tx_json?.Amount ??
-      rawMeta.Amount;
-    const amount = typeof rawAmount === 'string' ? rawAmount : null;
+    const amount = extractFundingAmount(txResponse.result);
     if (amount) {
       const updated = await db
         .update(schema.accounts)
@@ -376,6 +357,38 @@ export async function processTxConfirmJob(job: Job<TxConfirmJobData>): Promise<v
  * Exported as a pure helper so the txConfirmer test can exercise the
  * parsing logic without spinning up the full DB chain.
  */
+/**
+ * Extract the delivered XRP amount (in drops) from a rippled `tx` response,
+ * handling both API v1 and v2 shapes. Returns a string (drops) when the
+ * Payment delivered XRP, or null when the shape is unknown / the tx
+ * delivered an issued-currency or MPT amount (those can't fund accounts).
+ *
+ * Field precedence (most authoritative first):
+ *   1. meta.delivered_amount — populated in v1 + v2 for validated Payments.
+ *      This is the DEFINITIVE delivered amount (partial payments count here).
+ *   2. tx_json.DeliverMax    — v2 renamed the submitted-amount field from
+ *      Amount to DeliverMax (xrpl.js v4.6 default api_version).
+ *   3. tx_json.Amount        — v2 fallback (some tx types still carry Amount).
+ *   4. result.Amount         — v1 inline shape (api_version=1 or omitted).
+ *
+ * Exported as a pure helper so unit tests can cover every shape without
+ * spinning up the full confirmation job.
+ */
+export function extractFundingAmount(
+  // biome-ignore lint/suspicious/noExplicitAny: rippled `tx` result is loosely typed
+  result: any,
+): string | null {
+  if (!result || typeof result !== 'object') return null;
+  const raw = result as {
+    Amount?: unknown;
+    tx_json?: { DeliverMax?: unknown; Amount?: unknown };
+    meta?: { delivered_amount?: unknown };
+  };
+  const value =
+    raw.meta?.delivered_amount ?? raw.tx_json?.DeliverMax ?? raw.tx_json?.Amount ?? raw.Amount;
+  return typeof value === 'string' ? value : null;
+}
+
 export function extractMptIssuanceIdFromMeta(
   // biome-ignore lint/suspicious/noExplicitAny: rippled tx meta is loosely typed
   result: any,
