@@ -1,15 +1,17 @@
 // Token service routes.
 //
-// POST   /v1/tokens              → create (MPT default, trustline opt-in)
-// GET    /v1/tokens/:id          → read token metadata (incl. mpt_issuance_id once backfilled)
-// POST   /v1/tokens/:id/transfer → transfer issuer-held token to a holder
-// PUT    /v1/tokens/:id/freeze   → lock/unlock the issuance (MPT only for now)
-// PUT    /v1/tokens/:id/clawback → reclaim tokens from a holder
+// POST   /v1/tokens                → create (MPT default, trustline opt-in)
+// GET    /v1/tokens/:id            → read token metadata (incl. mpt_issuance_id once backfilled)
+// POST   /v1/tokens/:id/authorize  → holder opt-in (MPTokenAuthorize); required before transfer
+// POST   /v1/tokens/:id/transfer   → transfer issuer-held token to a holder
+// PUT    /v1/tokens/:id/freeze     → lock/unlock the issuance (MPT only for now)
+// PUT    /v1/tokens/:id/clawback   → reclaim tokens from a holder
 
 import { zValidator } from '@hono/zod-validator';
 import { Hono } from 'hono';
 import {
   TokenServiceError,
+  authorizeToken,
   clawbackToken,
   createToken,
   freezeToken,
@@ -18,6 +20,7 @@ import {
 } from '../services/token.service.ts';
 import type { AppEnv } from '../types.ts';
 import {
+  authorizeTokenSchema,
   clawbackTokenSchema,
   createTokenSchema,
   freezeTokenSchema,
@@ -112,6 +115,28 @@ tokens.get('/:id', async (c) => {
     status: token.status,
     created_at: token.createdAt,
   });
+});
+
+tokens.post('/:id/authorize', zValidator('json', authorizeTokenSchema), async (c) => {
+  const clientId = c.get('clientId');
+  const tokenId = c.req.param('id');
+  const body = c.req.valid('json');
+  try {
+    const result = await authorizeToken({
+      clientId,
+      tokenId,
+      holder: body.holder,
+      unauthorize: body.unauthorize,
+      idempotencyKey: c.req.header('idempotency-key'),
+    });
+    return c.json({ tx_id: result.txId, status: 'queued' }, 202);
+  } catch (err) {
+    if (err instanceof TokenServiceError) {
+      const r = tokenErrorResponse(err);
+      return c.json({ error: r.error }, r.status);
+    }
+    throw err;
+  }
 });
 
 tokens.post('/:id/transfer', zValidator('json', transferTokenSchema), async (c) => {

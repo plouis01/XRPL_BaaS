@@ -37,6 +37,7 @@ import { enqueueTxSubmit } from '@railforge/jobs';
 import {
   buildIssuedCurrencyClawback,
   buildIssuedCurrencyPayment,
+  buildMptAuthorize,
   buildMptClawback,
   buildMptIssuanceCreate,
   buildMptIssuanceSet,
@@ -540,6 +541,117 @@ export async function freezeToken(input: FreezeTokenInput): Promise<{ txId: stri
 
   await enqueueTxSubmit({ txId, sourceAddress: token.issuerAddress, txJson });
   log.info({ txId, action: input.unfreeze ? 'unlock' : 'lock' }, 'token freeze enqueued');
+  return { txId };
+}
+
+export interface AuthorizeTokenInput {
+  clientId: string;
+  tokenId: string;
+  /**
+   * The holder opting in. Must be a managed account owned by the caller —
+   * the signer loads the holder's key and signs the MPTokenAuthorize tx.
+   */
+  holder: string;
+  /** Pass true to revoke (tfMPTUnauthorize) — only works if balance is 0. */
+  unauthorize?: boolean;
+  idempotencyKey?: string;
+}
+
+/**
+ * Holder-side MPT opt-in. Creates the per-holder MPToken balance object
+ * on-ledger, without which incoming MPT Payments fail with tecNO_AUTH.
+ *
+ * Signer of the tx is the holder itself — not the issuer. The holder's
+ * account must be managed (owned by this client) so the worker can load
+ * the key and sign.
+ *
+ * @throws TokenServiceError token_not_found / token_not_ready / invalid_input
+ */
+export async function authorizeToken(input: AuthorizeTokenInput): Promise<{ txId: string }> {
+  const log = logger.child({
+    service: 'token',
+    op: 'authorize',
+    clientId: input.clientId,
+    tokenId: input.tokenId,
+    holder: input.holder,
+  });
+
+  const token = await resolveToken(input.clientId, input.tokenId);
+  if (!token) {
+    throw new TokenServiceError('token_not_found', 'Token not found');
+  }
+  if (token.tokenType !== 'mpt') {
+    throw new TokenServiceError(
+      'invalid_input',
+      'authorize is only supported for MPT tokens (trust-line holders set up via TrustSet)',
+    );
+  }
+  if (!token.mptIssuanceId) {
+    throw new TokenServiceError(
+      'token_not_ready',
+      'Token issuance has not yet validated on-ledger',
+    );
+  }
+
+  // The holder must be a managed account owned by this client — otherwise
+  // we have no key to sign with. Same cross-tenant guard as the issuer
+  // lookup in createToken.
+  const holderRows = await db
+    .select({
+      address: schema.accounts.address,
+      isFunded: schema.accounts.isFunded,
+    })
+    .from(schema.accounts)
+    .where(
+      and(
+        eq(schema.accounts.clientId, input.clientId),
+        eq(schema.accounts.address, input.holder),
+        isNull(schema.accounts.deletedAt),
+      ),
+    )
+    .limit(1);
+  const holder = holderRows[0];
+  if (!holder) {
+    throw new TokenServiceError(
+      'invalid_input',
+      'Holder account not found or not owned by this client',
+    );
+  }
+  if (!holder.isFunded) {
+    throw new TokenServiceError('invalid_input', 'Holder account is not yet funded');
+  }
+
+  // Count against the token-op ceiling — authorize is a state-changing
+  // non-XRP op and should share the budget.
+  await enforceTokenOpCount(input.clientId);
+
+  const txJson = buildMptAuthorize({
+    account: holder.address,
+    mptIssuanceId: token.mptIssuanceId,
+    unauthorize: input.unauthorize ?? false,
+  });
+
+  const txInserted = await db
+    .insert(schema.transactions)
+    .values({
+      clientId: input.clientId,
+      idempotencyKey: input.idempotencyKey ?? crypto.randomUUID(),
+      txType: 'MPTokenAuthorize',
+      sourceAddress: holder.address,
+      status: 'queued',
+      requestBody: {
+        op: 'authorizeToken',
+        tokenId: input.tokenId,
+        holder: holder.address,
+        unauthorize: input.unauthorize ?? false,
+      },
+    })
+    .returning({ id: schema.transactions.id });
+  const txId = txInserted[0]?.id;
+  if (!txId) throw new Error('transactions insert returned no row');
+
+  await enqueueTxSubmit({ txId, sourceAddress: holder.address, txJson });
+  log.info({ txId, unauthorize: input.unauthorize ?? false }, 'mpt authorize enqueued');
   return { txId };
 }
 

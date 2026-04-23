@@ -29,6 +29,7 @@ import type {
   EscrowCancel,
   EscrowCreate,
   EscrowFinish,
+  MPTokenAuthorize,
   MPTokenIssuanceCreate,
   MPTokenIssuanceSet,
   OfferCancel,
@@ -323,6 +324,46 @@ export function buildMptIssuanceSet(input: BuildMptIssuanceSetInput): MPTokenIss
   if (input.holder !== undefined) {
     tx.Holder = input.holder;
   }
+  return tx;
+}
+
+// ── MPT holder authorize / unauthorize (XLS-33) ─────────────────────────────
+//
+// A holder must submit MPTokenAuthorize BEFORE they can receive an MPT — it
+// creates the per-holder MPToken balance object. Without this step, incoming
+// Payments of that MPT fail with tecNO_AUTH.
+//
+// Two directions:
+//   - Holder-side opt-in: `account` = holder, no `Holder` field. Default use.
+//   - Issuer-side gate:   `account` = issuer, `Holder` = the specific holder.
+//     Only used when the issuance has tfMPTRequireAuth set; the issuer
+//     whitelists / revokes a specific holder.
+//
+// The unauthorize direction uses tfMPTUnauthorize (0x00000001).
+export const MPT_UNAUTHORIZE_FLAG = 0x00000001;
+
+export interface BuildMptAuthorizeInput {
+  /** Signer of the tx — the holder (self-opt-in) OR the issuer (gating). */
+  account: string;
+  /** The MPT issuance id (hex, 48 chars). */
+  mptIssuanceId: string;
+  /**
+   * Target holder when the issuer is gating a specific account. Omit for
+   * holder-side self opt-in (the common RailForge case).
+   */
+  holder?: string;
+  /** Pass true to REVOKE the authorization (tfMPTUnauthorize). */
+  unauthorize?: boolean;
+}
+
+export function buildMptAuthorize(input: BuildMptAuthorizeInput): MPTokenAuthorize {
+  const tx: MPTokenAuthorize = {
+    TransactionType: 'MPTokenAuthorize',
+    Account: input.account,
+    MPTokenIssuanceID: input.mptIssuanceId,
+  };
+  if (input.unauthorize) tx.Flags = MPT_UNAUTHORIZE_FLAG;
+  if (input.holder !== undefined) tx.Holder = input.holder;
   return tx;
 }
 

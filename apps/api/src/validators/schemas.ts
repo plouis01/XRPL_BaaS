@@ -122,6 +122,15 @@ export const freezeTokenSchema = z.object({
   unfreeze: z.boolean().default(false),
 });
 
+// POST /v1/tokens/:id/authorize — holder opt-in (creates the per-holder
+// MPToken balance object). Without this, incoming MPT Payments fail with
+// tecNO_AUTH. The `holder` must be a managed account owned by the caller;
+// the service will sign from that account's key.
+export const authorizeTokenSchema = z.object({
+  holder: xrplAddressSchema,
+  unauthorize: z.boolean().default(false),
+});
+
 // PUT /v1/tokens/:id/clawback — must specify which holder to claw from
 // and how much. Both MPT and issued-currency tokens use this same shape;
 // the service picks the right builder based on tokenType.
