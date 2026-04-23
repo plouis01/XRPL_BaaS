@@ -24,6 +24,7 @@ import { getJobsRedis } from '@railforge/jobs';
 import type { Logger } from '@railforge/logger';
 import { type Job, Worker } from 'bullmq';
 import type { Redis } from 'ioredis';
+import { decodeAccountID } from 'xrpl';
 import { logger } from '../logger.ts';
 import {
   TX_CONFIRM_QUEUE,
@@ -390,20 +391,37 @@ export function extractMptIssuanceIdFromMeta(
     if (!created) continue;
     if (created.LedgerEntryType !== 'MPTokenIssuance') continue;
 
-    // The id may be on the node fields under a couple of names depending
-    // on rippled version: `mpt_issuance_id` or `MPTokenIssuanceID`. Try both.
-    //
-    // REVIEW.md LOW-06: previously also fell back to `LedgerIndex`, but
-    // that's the 256-bit ledger entry hash — NOT the 192-bit MPT issuance
-    // id. On older rippled versions that don't surface the real id here
-    // the fallback would silently poison tokens.mpt_issuance_id with the
-    // wrong value and every later lookup by id would miss. Fail closed
-    // instead so the operator notices.
+    // Prefer an id the meta surfaces directly — future-proofs against any
+    // rippled version that starts populating this field.
     const fields = (created.NewFields ?? {}) as Record<string, unknown>;
     const candidates = [fields.mpt_issuance_id, fields.MPTokenIssuanceID];
     for (const c of candidates) {
-      if (typeof c === 'string' && c.length > 0) {
-        return c;
+      if (typeof c === 'string' && c.length > 0) return c;
+    }
+
+    // Current rippled (and xrpl.js v4.6 api v2) do NOT include
+    // mpt_issuance_id in the CreatedNode.NewFields. Derive it from the
+    // well-defined spec: the MPT issuance id is a 24-byte value composed
+    // of the creating tx's Sequence (4 bytes, big-endian) concatenated
+    // with the Issuer account id (20 bytes, raw decoded). This matches
+    // what rippled returns from `account_objects type=mpt_issuance` — we
+    // cross-checked against a live testnet MPT: Sequence 16777881 + issuer
+    // rs37MdXJ... → 010002991759FFA931B36B53EB53C7E748A79AD62AE8E103.
+    //
+    // REVIEW.md LOW-06 guard retained: we never fall back to LedgerIndex
+    // (256-bit entry hash — NOT the issuance id). If we can't derive, we
+    // return null so the operator notices rather than writing garbage.
+    const seq = typeof fields.Sequence === 'number' ? fields.Sequence : null;
+    const issuer = typeof fields.Issuer === 'string' ? fields.Issuer : null;
+    if (seq !== null && issuer !== null) {
+      try {
+        const accountIdHex = Buffer.from(decodeAccountID(issuer)).toString('hex').toUpperCase();
+        if (accountIdHex.length === 40) {
+          const seqHex = seq.toString(16).padStart(8, '0').toUpperCase();
+          return seqHex + accountIdHex;
+        }
+      } catch {
+        // fall through to null — never poison the column
       }
     }
   }
