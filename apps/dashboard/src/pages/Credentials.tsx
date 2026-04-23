@@ -111,6 +111,12 @@ export function Credentials({ network }: { network: Network }) {
                       cursor: 'pointer',
                     }}
                     onClick={() => setExpanded(isOpen ? null : cred.id)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault();
+                        setExpanded(isOpen ? null : cred.id);
+                      }
+                    }}
                   >
                     <td style={{ padding: '8px 12px', color: '#64748b' }}>{isOpen ? '▾' : '▸'}</td>
                     <td style={{ padding: '8px 12px' }}>

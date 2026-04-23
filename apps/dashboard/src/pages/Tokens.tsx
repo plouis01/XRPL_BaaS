@@ -117,7 +117,16 @@ function TokenRow({
 
   return (
     <>
-      <tr style={{ borderBottom: '1px solid #e2e8f0', cursor: 'pointer' }} onClick={onToggle}>
+      <tr
+        style={{ borderBottom: '1px solid #e2e8f0', cursor: 'pointer' }}
+        onClick={onToggle}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            onToggle();
+          }
+        }}
+      >
         <td style={{ padding: '8px 12px', color: '#64748b' }}>{expanded ? '▾' : '▸'}</td>
         <td style={{ padding: '8px 12px' }}>
           <code>{token.currency_code}</code>
