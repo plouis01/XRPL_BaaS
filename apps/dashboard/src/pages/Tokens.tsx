@@ -203,16 +203,77 @@ function TokenDetail({ token }: { token: Token }) {
     void fetchBalances();
   }, [fetchBalances]);
 
+  // Poll /v1/dashboard/transactions/:id until the worker writes a terminal
+  // status. `validated` + `failed` are terminal; `queued` / `submitting` /
+  // `submitted` are in-flight and trigger another poll. We cap at ~30s
+  // (15 polls * 2s) so a stuck worker doesn't leave the UI spinning forever.
+  const pollTransaction = async (
+    txId: string,
+  ): Promise<{
+    status: string;
+    result_code: string | null;
+    tx_hash: string | null;
+  }> => {
+    for (let i = 0; i < 15; i += 1) {
+      await new Promise((r) => setTimeout(r, 2000));
+      try {
+        const tx = await api<{
+          status: string;
+          result_code: string | null;
+          tx_hash: string | null;
+        }>(`/v1/dashboard/transactions/${txId}`);
+        if (tx.status === 'validated' || tx.status === 'failed') return tx;
+      } catch {
+        // Transient poll failure — try again until the cap expires.
+      }
+    }
+    return { status: 'timeout', result_code: null, tx_hash: null };
+  };
+
+  // Translate a terminal tx state into a user-facing message. The most
+  // load-bearing line here is the tecDUPLICATE mapping — that's the
+  // 'holder already opted in' case the user hit in testing, which looks
+  // like a failure but is effectively a no-op idempotent replay.
+  const describeOutcome = (
+    status: string,
+    resultCode: string | null,
+    unauthorizeFlag: boolean,
+  ): string => {
+    if (status === 'validated') {
+      return unauthorizeFlag ? 'Unauthorized ✓' : 'Authorized ✓';
+    }
+    if (status === 'timeout') {
+      return 'Still pending — check Transactions tab for the outcome.';
+    }
+    if (resultCode === 'tecDUPLICATE') {
+      return 'Already authorized (on-chain MPToken object exists for this holder).';
+    }
+    if (resultCode === 'tecNO_PERMISSION') {
+      return 'tecNO_PERMISSION — issuer cannot opt-in to its own MPT, or the issuance requires pre-authorization.';
+    }
+    return `Failed: ${resultCode ?? 'unknown'}`;
+  };
+
   const authorize = async () => {
     if (!holder) return;
+    // Pre-submit guard: the issuer cannot opt-in to its own MPT — rippled
+    // returns tecNO_PERMISSION. Catch this client-side so the user gets an
+    // explanation instead of a confusing failure.
+    if (holder.trim() === token.issuer_address) {
+      setAuthResult(
+        'The issuer has implicit access to its own MPT and cannot opt in as a holder. Use a different holder address.',
+      );
+      return;
+    }
     setAuthorizing(true);
-    setAuthResult(null);
+    setAuthResult('Queued, waiting for ledger validation…');
     try {
       const res = await api<{ tx_id: string; status: string }>(`/v1/tokens/${token.id}/authorize`, {
         method: 'POST',
         body: { holder, unauthorize },
       });
-      setAuthResult(`Queued: tx_id=${res.tx_id}`);
+      const outcome = await pollTransaction(res.tx_id);
+      setAuthResult(describeOutcome(outcome.status, outcome.result_code, unauthorize));
     } catch (err) {
       setAuthResult(errorMessage(err));
     } finally {
