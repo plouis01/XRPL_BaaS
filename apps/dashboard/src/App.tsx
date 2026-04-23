@@ -5,6 +5,7 @@ import { ApiKeys } from './pages/ApiKeys.tsx';
 import { Credentials } from './pages/Credentials.tsx';
 import { Domains } from './pages/Domains.tsx';
 import { LoginForm } from './pages/LoginForm.tsx';
+import { Tokens } from './pages/Tokens.tsx';
 import { Transactions } from './pages/Transactions.tsx';
 import type { Network } from './types.ts';
 
@@ -137,6 +138,18 @@ export function App() {
             </li>
             <li style={{ marginBottom: 8 }}>
               <NavLink
+                to="/tokens"
+                style={({ isActive }) => ({
+                  textDecoration: 'none',
+                  color: isActive ? '#2563eb' : '#334155',
+                  fontWeight: isActive ? 600 : 400,
+                })}
+              >
+                Tokens
+              </NavLink>
+            </li>
+            <li style={{ marginBottom: 8 }}>
+              <NavLink
                 to="/credentials"
                 style={({ isActive }) => ({
                   textDecoration: 'none',
@@ -183,6 +196,7 @@ export function App() {
           <Routes>
             <Route path="/keys" element={<ApiKeys network={network} />} />
             <Route path="/transactions" element={<Transactions network={network} />} />
+            <Route path="/tokens" element={<Tokens network={network} />} />
             <Route path="/credentials" element={<Credentials network={network} />} />
             <Route path="/domains" element={<Domains network={network} />} />
             <Route path="*" element={<Navigate to="/keys" replace />} />

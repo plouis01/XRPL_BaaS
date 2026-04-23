@@ -30,6 +30,27 @@ export interface Credential {
   expires_at: string | null;
   accepted_at: string | null;
   created_at: string | null;
+  ledger_index: string | null;
+}
+
+export interface Token {
+  id: string;
+  issuer_address: string;
+  token_type: 'mpt' | 'trustline';
+  currency_code: string;
+  mpt_issuance_id: string | null;
+  transfer_fee: number;
+  clawback: boolean;
+  freeze_enabled: boolean;
+  max_supply: string | null;
+  created_at: string | null;
+}
+
+export interface AccountBalances {
+  address: string;
+  xrp_drops: string;
+  trustlines: Array<{ currency: string; issuer: string; balance: string }>;
+  mpts: Array<{ mpt_issuance_id: string; balance: string }>;
 }
 
 export interface Domain {

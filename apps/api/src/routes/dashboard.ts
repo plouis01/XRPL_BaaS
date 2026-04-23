@@ -139,6 +139,7 @@ dashboard.get('/credentials', async (c) => {
       expiresAt: schema.credentials.expiresAt,
       acceptedAt: schema.credentials.acceptedAt,
       createdAt: schema.credentials.createdAt,
+      ledgerIndex: schema.credentials.ledgerIndex,
     })
     .from(schema.credentials)
     .where(eq(schema.credentials.clientId, clientId))
@@ -155,6 +156,7 @@ dashboard.get('/credentials', async (c) => {
       expires_at: r.expiresAt,
       accepted_at: r.acceptedAt,
       created_at: r.createdAt,
+      ledger_index: r.ledgerIndex,
     })),
   });
 });
