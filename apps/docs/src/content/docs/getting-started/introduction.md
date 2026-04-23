@@ -41,10 +41,6 @@ Most write operations return `202 Accepted` with a `tx_id`. The worker pipeline 
 
 RailForge wraps XLS-70 credentials, XLS-80 permissioned domains, and (when V1.1 lands) XLS-75 granular delegation. It does **not** act as a KYC credential issuer — that's a deliberate regulatory-liability decision. The platform runs a curated marketplace of third-party issuers (Sumsub, Veriff, Synaps, etc.); you pick a qualified issuer and RailForge provides the on-chain infrastructure.
 
-### XRPL native only
-
-No EVM sidechain support. Clients needing smart contracts should use our sister product **Multisubs** on Base. RailForge's differentiation is wrapping XRPL-native primitives that nobody else abstracts at the API level.
-
 ## Security posture
 
 - **HSM-backed signing.** Master keys never leave the HSM boundary. Only the DER-encoded signature comes out.
