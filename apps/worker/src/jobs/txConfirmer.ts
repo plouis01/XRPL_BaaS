@@ -238,13 +238,15 @@ export async function processTxConfirmJob(job: Job<TxConfirmJobData>): Promise<v
   // funding payments we know it's XRP — but we still defensively
   // type-check before parsing.
   if (isSuccess) {
+    // rippled API v1 flattens tx fields onto `result`; API v2 (the default
+    // for xrpl.js v4.6) nests them under `result.tx_json`. Read both so the
+    // confirmer works regardless of which shape the pool returns.
     const txMeta = txResponse.result as {
       Amount?: string | { value: string };
-      meta?: { TransactionResult?: string };
+      tx_json?: { Amount?: string | { value: string } };
     };
-    // The tx command response puts top-level fields next to `meta`.
-    // xrpl.js's typing is loose here so we narrow at the boundary.
-    const amount = typeof txMeta.Amount === 'string' ? txMeta.Amount : null;
+    const rawAmount = txMeta.tx_json?.Amount ?? txMeta.Amount;
+    const amount = typeof rawAmount === 'string' ? rawAmount : null;
     if (amount) {
       const updated = await db
         .update(schema.accounts)

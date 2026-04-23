@@ -172,9 +172,15 @@ function metaResult(raw: RawValidatedTx): string | null {
 }
 
 function pickTxFields(raw: RawValidatedTx): Record<string, unknown> {
-  // With `expand: true` some rippled versions nest tx fields under `tx`,
-  // others inline them. Prefer the nested `tx` object when present.
-  if (raw.tx && typeof raw.tx === 'object') return raw.tx;
+  // rippled exposes tx fields in three different shapes depending on
+  // api_version + command:
+  //   - v2 response:      raw.tx_json (xrpl.js v4.6 default)
+  //   - v1 `expand:true`: raw.tx
+  //   - v1 inline:        fields live directly on raw
+  // Prefer v2 → v1-nested → v1-inline.
+  const r = raw as { tx_json?: unknown; tx?: unknown };
+  if (r.tx_json && typeof r.tx_json === 'object') return r.tx_json as Record<string, unknown>;
+  if (r.tx && typeof r.tx === 'object') return r.tx as Record<string, unknown>;
   return raw as Record<string, unknown>;
 }
 
