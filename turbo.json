@@ -4,12 +4,26 @@
   "globalEnv": [
     "NODE_ENV",
     "XRPL_NETWORK",
+    "XRPL_NODE_URL",
     "XRPL_WS_URL",
     "DATABASE_URL",
     "REDIS_URL",
     "RAILFORGE_ALLOW_MAINNET",
     "API_KEY_SALT",
-    "IP_RATE_LIMIT"
+    "API_PORT",
+    "IP_RATE_LIMIT",
+    "TREASURY_SEED",
+    "TREASURY_ADDRESS",
+    "WEBHOOK_SIGNING_SECRET",
+    "DASHBOARD_ORIGIN",
+    "TRUSTED_PROXY_IPS",
+    "TOKEN_OPS_DAILY_LIMIT",
+    "HSM_PROVIDER",
+    "HSM_MODULE_PATH",
+    "HSM_SLOT",
+    "HSM_PIN",
+    "HSM_CU_USERNAME",
+    "HSM_CU_PASSWORD"
   ],
   "tasks": {
     "build": {
