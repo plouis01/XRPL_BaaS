@@ -238,14 +238,25 @@ export async function processTxConfirmJob(job: Job<TxConfirmJobData>): Promise<v
   // funding payments we know it's XRP — but we still defensively
   // type-check before parsing.
   if (isSuccess) {
-    // rippled API v1 flattens tx fields onto `result`; API v2 (the default
-    // for xrpl.js v4.6) nests them under `result.tx_json`. Read both so the
-    // confirmer works regardless of which shape the pool returns.
-    const txMeta = txResponse.result as {
-      Amount?: string | { value: string };
-      tx_json?: { Amount?: string | { value: string } };
+    // Extracting the delivered XRP amount for a funding Payment across
+    // rippled API versions. Field precedence (most authoritative first):
+    //   1. meta.delivered_amount — present in both v1 + v2 for validated
+    //      Payments. This is the AUTHORITATIVE delivered amount.
+    //   2. tx_json.DeliverMax    — v2 renamed the submitted-amount field
+    //      to DeliverMax (xrpl.js v4.6 default).
+    //   3. result.Amount         — v1 inline shape.
+    // We type-narrow to string — issued-currency and MPT amount objects
+    // cannot fund a new account (we're looking at XRP funding only).
+    const rawMeta = txResponse.result as {
+      Amount?: unknown;
+      tx_json?: { DeliverMax?: unknown; Amount?: unknown };
+      meta?: { delivered_amount?: unknown };
     };
-    const rawAmount = txMeta.tx_json?.Amount ?? txMeta.Amount;
+    const rawAmount =
+      rawMeta.meta?.delivered_amount ??
+      rawMeta.tx_json?.DeliverMax ??
+      rawMeta.tx_json?.Amount ??
+      rawMeta.Amount;
     const amount = typeof rawAmount === 'string' ? rawAmount : null;
     if (amount) {
       const updated = await db

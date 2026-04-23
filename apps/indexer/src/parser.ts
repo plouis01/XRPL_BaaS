@@ -235,7 +235,9 @@ export function parseTransaction(raw: unknown): TxEvent | null {
     case 'Payment': {
       const account = String(fields.Account ?? '');
       const destination = String(fields.Destination ?? '');
-      const amount = amountFromField(fields.Amount);
+      // API v2 renames the Payment submitted-amount field from Amount to
+      // DeliverMax. Read both so the parser works across pool versions.
+      const amount = amountFromField(fields.DeliverMax ?? fields.Amount);
       if (!account || !destination || !amount) return { kind: 'other', txType, ...base };
       const destinationTag =
         typeof fields.DestinationTag === 'number' ? fields.DestinationTag : undefined;
