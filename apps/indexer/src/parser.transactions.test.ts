@@ -252,6 +252,94 @@ describe('parseTransaction — Permissioned domains', () => {
     );
     expect(ev).toEqual(expect.objectContaining({ kind: 'domain_delete', domainId: 'ABC' }));
   });
+
+  it('PermissionedDomainSet UPDATE: isCreate=false, domainId from tx fields', () => {
+    // Update: the tx carries a DomainID referencing the existing entry.
+    // No CreatedNode for the domain in meta (it's ModifiedNode), so the
+    // parser must NOT set isCreate=true.
+    const raw = payload({
+      TransactionType: 'PermissionedDomainSet',
+      Account: 'rOwner',
+      DomainID: 'AC06A71C604FAA3FEED1E56970C19E4D649804F2F1D7CC95BEA90937101B1DF0',
+    });
+    // payload() puts meta as SUCCESS (no AffectedNodes) — exercise that path.
+    const ev = parseTransaction(raw);
+    expect(ev?.kind).toBe('domain_set');
+    if (ev?.kind === 'domain_set') {
+      expect(ev.domainId).toBe('AC06A71C604FAA3FEED1E56970C19E4D649804F2F1D7CC95BEA90937101B1DF0');
+      expect(ev.isCreate).toBe(false);
+    }
+  });
+
+  it('PermissionedDomainSet CREATE: isCreate=true, domainId from meta.CreatedNode.LedgerIndex', () => {
+    // Create: the tx has NO DomainID in fields. The id is the LedgerIndex
+    // of the PermissionedDomain CreatedNode in meta. This is the path the
+    // indexer backfill depends on — the id feeds domains.domain_id to
+    // resolve the API-side `pending-<uuid>` placeholder.
+    const raw = {
+      hash: 'ABCDEF'.padEnd(64, '0'),
+      ledger_index: 42,
+      TransactionType: 'PermissionedDomainSet',
+      Account: 'rOwner',
+      AcceptedCredentials: [{ Credential: { Issuer: 'rIssuer1', CredentialType: '4B5943' } }],
+      meta: {
+        TransactionResult: 'tesSUCCESS',
+        AffectedNodes: [
+          {
+            CreatedNode: {
+              LedgerEntryType: 'PermissionedDomain',
+              LedgerIndex: '5035443BE747BB85958801FA8C196FE0B8F222A4C486F501A35D796708C5C059',
+              NewFields: { Owner: 'rOwner', Sequence: 16777890 },
+            },
+          },
+        ],
+      },
+    };
+    const ev = parseTransaction(raw);
+    expect(ev?.kind).toBe('domain_set');
+    if (ev?.kind === 'domain_set') {
+      expect(ev.isCreate).toBe(true);
+      expect(ev.domainId).toBe('5035443BE747BB85958801FA8C196FE0B8F222A4C486F501A35D796708C5C059');
+    }
+  });
+
+  it('PermissionedDomainSet CREATE: ignores unrelated CreatedNode types (e.g. AccountRoot)', () => {
+    // Defense: the first matching CreatedNode must be LedgerEntryType ==
+    // "PermissionedDomain" — a Sequence-bumped AccountRoot CreatedNode
+    // would otherwise poison the backfill with an AccountRoot hash.
+    const raw = {
+      hash: 'ABCDEF'.padEnd(64, '0'),
+      ledger_index: 42,
+      TransactionType: 'PermissionedDomainSet',
+      Account: 'rOwner',
+      AcceptedCredentials: [{ Credential: { Issuer: 'rIssuer1', CredentialType: '4B5943' } }],
+      meta: {
+        TransactionResult: 'tesSUCCESS',
+        AffectedNodes: [
+          {
+            CreatedNode: {
+              LedgerEntryType: 'AccountRoot',
+              LedgerIndex: 'ACCTROOT'.padEnd(64, 'F'),
+              NewFields: {},
+            },
+          },
+          {
+            CreatedNode: {
+              LedgerEntryType: 'PermissionedDomain',
+              LedgerIndex: 'DOMAINENTRY'.padEnd(64, 'A'),
+              NewFields: { Owner: 'rOwner', Sequence: 1 },
+            },
+          },
+        ],
+      },
+    };
+    const ev = parseTransaction(raw);
+    expect(ev?.kind).toBe('domain_set');
+    if (ev?.kind === 'domain_set') {
+      expect(ev.isCreate).toBe(true);
+      expect(ev.domainId).toBe('DOMAINENTRY'.padEnd(64, 'A'));
+    }
+  });
 });
 
 describe('parseTransaction — fallback', () => {

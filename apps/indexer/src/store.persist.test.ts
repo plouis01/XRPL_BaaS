@@ -9,8 +9,13 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 // we queued up in `queuedInsertReturning`.
 const insertCalls: Array<{ table: string; values: unknown }> = [];
 const deleteCalls: Array<{ table: string }> = [];
+const updateCalls: Array<{ table: string; set: unknown }> = [];
 let queuedInsertReturning: unknown[] = [];
 let upsertCalls = 0;
+// Rows the select().from(domains).where().orderBy().limit() chain resolves to.
+// Used by backfillDomainId — set to [{id: 'domain-uuid'}] to simulate a
+// matching pending row, [] to simulate no match.
+let queuedSelectReturning: unknown[] = [];
 
 function fakeDb() {
   return {
@@ -46,6 +51,31 @@ function fakeDb() {
         return Promise.resolve();
       },
     }),
+    // Sprint-post: backfillDomainId uses select().from().where().orderBy().limit().
+    select: (_fields: unknown) => ({
+      from: (_table: { _tableName?: string }) => ({
+        where: (_cond: unknown) => ({
+          orderBy: (_order: unknown) => ({
+            limit: async (_n: number) => {
+              const r = queuedSelectReturning;
+              queuedSelectReturning = [];
+              return r;
+            },
+          }),
+        }),
+      }),
+    }),
+    // Update path used by backfillDomainId: update().set().where().
+    update: (table: { _tableName?: string }) => ({
+      set(set: unknown) {
+        return {
+          where() {
+            updateCalls.push({ table: table._tableName ?? 'unknown', set });
+            return Promise.resolve();
+          },
+        };
+      },
+    }),
   };
 }
 
@@ -61,6 +91,13 @@ vi.mock('@railforge/db', () => ({
     offerBook: { _tableName: 'offer_book', account: {}, sequence: {} },
     accountBalances: { _tableName: 'account_balances' },
     ammPools: { _tableName: 'amm_pools' },
+    domains: {
+      _tableName: 'domains',
+      id: {},
+      ownerAddress: {},
+      domainId: {},
+      createdAt: {},
+    },
   },
 }));
 
@@ -69,8 +106,10 @@ const { __setDbForTests, persistTransaction } = await import('./store.ts');
 beforeEach(() => {
   insertCalls.length = 0;
   deleteCalls.length = 0;
+  updateCalls.length = 0;
   upsertCalls = 0;
   queuedInsertReturning = [];
+  queuedSelectReturning = [];
   __setDbForTests(fakeDb() as unknown as typeof import('@railforge/db').db);
 });
 
@@ -166,5 +205,104 @@ describe('persistTransaction — dispatch', () => {
     });
     expect(upsertCalls).toBe(0);
     expect(insertCalls.filter((c) => c.table === 'offer_book')).toHaveLength(0);
+  });
+});
+
+// ── domain_set: backfill domain_id ─────────────────────────────────────────
+
+// The indexer closes the loop that the API opens: domain.service.createDomain
+// writes a `pending-<uuid>` placeholder so the API can return an id before
+// the tx lands. When the PermissionedDomainSet validates, parser extracts
+// the real DomainID from meta.CreatedNode.LedgerIndex; the store matches
+// the newest pending row for the same owner and UPDATEs it.
+
+describe('persistTransaction — domain_set backfill', () => {
+  const REAL_DOMAIN_ID = '5035443BE747BB85958801FA8C196FE0B8F222A4C486F501A35D796708C5C059';
+
+  it('CREATE: updates the newest pending row for the owner with the real DomainID', async () => {
+    queuedInsertReturning = [{ txHash: 'HDOM1' }]; // dedup: first time
+    queuedSelectReturning = [{ id: 'domain-row-uuid' }]; // pending row match
+    await persistTransaction({
+      kind: 'domain_set',
+      txHash: 'HDOM1',
+      ledgerIndex: 1,
+      success: true,
+      account: 'rOwner',
+      domainId: REAL_DOMAIN_ID,
+      isCreate: true,
+    });
+    // Exactly one UPDATE against domains, with the real id in `set`.
+    const domainUpdates = updateCalls.filter((c) => c.table === 'domains');
+    expect(domainUpdates).toHaveLength(1);
+    expect((domainUpdates[0]!.set as { domainId?: string }).domainId).toBe(REAL_DOMAIN_ID);
+  });
+
+  it('UPDATE (isCreate=false): does NOT touch the domains table', async () => {
+    // Reusing an existing DomainID — no placeholder to resolve.
+    queuedInsertReturning = [{ txHash: 'HDOM2' }];
+    queuedSelectReturning = [{ id: 'domain-row-uuid' }]; // even if a row existed,
+    await persistTransaction({
+      kind: 'domain_set',
+      txHash: 'HDOM2',
+      ledgerIndex: 1,
+      success: true,
+      account: 'rOwner',
+      domainId: REAL_DOMAIN_ID,
+      isCreate: false,
+    });
+    expect(updateCalls.filter((c) => c.table === 'domains')).toHaveLength(0);
+  });
+
+  it('CREATE with no matching pending row: no-op UPDATE (owner with no pending placeholder)', async () => {
+    // An unknown owner (or one whose placeholder was already resolved)
+    // must NOT trigger a bogus update. The store returns empty from the
+    // SELECT; the UPDATE path is skipped entirely.
+    queuedInsertReturning = [{ txHash: 'HDOM3' }];
+    queuedSelectReturning = []; // no pending row
+    await persistTransaction({
+      kind: 'domain_set',
+      txHash: 'HDOM3',
+      ledgerIndex: 1,
+      success: true,
+      account: 'rUnknownOwner',
+      domainId: REAL_DOMAIN_ID,
+      isCreate: true,
+    });
+    expect(updateCalls.filter((c) => c.table === 'domains')).toHaveLength(0);
+  });
+
+  it('CREATE without a domainId: no-op (defensive; parser should never emit this)', async () => {
+    // Double-guard: even if parser somehow flagged isCreate=true with no
+    // extractable DomainID, the store bails before SELECTing anything.
+    queuedInsertReturning = [{ txHash: 'HDOM4' }];
+    queuedSelectReturning = [{ id: 'would-be-matched' }];
+    await persistTransaction({
+      kind: 'domain_set',
+      txHash: 'HDOM4',
+      ledgerIndex: 1,
+      success: true,
+      account: 'rOwner',
+      // domainId: undefined on purpose
+      isCreate: true,
+    });
+    expect(updateCalls.filter((c) => c.table === 'domains')).toHaveLength(0);
+  });
+
+  it('failed tx (success=false): dedup-only, never backfills', async () => {
+    // A temINVALID_* / tec-coded PermissionedDomainSet lands on-chain
+    // (fee burned) but didn't create an entry. The store dedups but
+    // must not touch the domains row.
+    queuedInsertReturning = [{ txHash: 'HDOM5' }];
+    queuedSelectReturning = [{ id: 'would-be-matched' }];
+    await persistTransaction({
+      kind: 'domain_set',
+      txHash: 'HDOM5',
+      ledgerIndex: 1,
+      success: false,
+      account: 'rOwner',
+      domainId: REAL_DOMAIN_ID,
+      isCreate: true,
+    });
+    expect(updateCalls.filter((c) => c.table === 'domains')).toHaveLength(0);
   });
 });
