@@ -195,6 +195,53 @@ dashboard.get('/domains', async (c) => {
   });
 });
 
+// GET /tokens?environment=X — list token issuances for the client. Joins
+// tokens → accounts to surface the issuer classic address (the UI shows it,
+// not the UUID). Same coarse env filter as credentials/domains.
+dashboard.get('/tokens', async (c) => {
+  const clientId = c.get('clientId');
+  const parsed = parseNetworkParam(c.req.query('environment'), 'environment');
+  if (!parsed.ok) return c.json({ error: parsed.error }, 400);
+
+  if (!(await clientHasKeyInEnvironment(clientId, parsed.value))) {
+    return c.json({ data: [] });
+  }
+
+  const rows = await db
+    .select({
+      id: schema.tokens.id,
+      issuerAddress: schema.accounts.address,
+      tokenType: schema.tokens.tokenType,
+      currencyCode: schema.tokens.currencyCode,
+      mptIssuanceId: schema.tokens.mptIssuanceId,
+      transferFee: schema.tokens.transferFee,
+      clawback: schema.tokens.clawback,
+      freezeEnabled: schema.tokens.freezeEnabled,
+      maxSupply: schema.tokens.maxSupply,
+      createdAt: schema.tokens.createdAt,
+    })
+    .from(schema.tokens)
+    .innerJoin(schema.accounts, eq(schema.tokens.issuerAccount, schema.accounts.id))
+    .where(eq(schema.tokens.clientId, clientId))
+    .orderBy(desc(schema.tokens.createdAt))
+    .limit(200);
+
+  return c.json({
+    data: rows.map((r) => ({
+      id: r.id,
+      issuer_address: r.issuerAddress,
+      token_type: r.tokenType,
+      currency_code: r.currencyCode,
+      mpt_issuance_id: r.mptIssuanceId,
+      transfer_fee: r.transferFee ?? 0,
+      clawback: r.clawback ?? false,
+      freeze_enabled: r.freezeEnabled ?? false,
+      max_supply: r.maxSupply,
+      created_at: r.createdAt,
+    })),
+  });
+});
+
 // GET /keys?environment=X — list the client's API keys for the selected
 // environment. Key secrets are never returned (they were only shown at
 // creation time). This is the one endpoint where the filter is *inherent*

@@ -22,6 +22,16 @@ interface Select {
         limit: (n: number) => Promise<unknown[]>;
       };
     };
+    // `innerJoin(...)` chains into the same where/orderBy/limit shape. The
+    // dashboard /tokens route uses it to surface issuer classic addresses.
+    innerJoin: (
+      _table: unknown,
+      _on: unknown,
+    ) => {
+      where: (predicate: { __predicate: unknown }) => {
+        orderBy: (_o: unknown) => { limit: (n: number) => Promise<unknown[]> };
+      };
+    };
   };
 }
 
@@ -43,15 +53,15 @@ let apiKeysCallCount = 0;
 //   - resolves to `nextKeyCheckRows` for every SUBSEQUENT api_keys .limit(1)
 //     call (the env gate in the read handlers)
 function makeSelect(): Select {
+  const thenableOrderBy = () => {
+    const p = Promise.resolve(nextRows);
+    return Object.assign(p, {
+      limit: (_n: number) => Promise.resolve(nextRows),
+    });
+  };
   return {
     from: (table: { __tableName: string }) => ({
       where: () => {
-        const thenableOrderBy = () => {
-          const p = Promise.resolve(nextRows);
-          return Object.assign(p, {
-            limit: (_n: number) => Promise.resolve(nextRows),
-          });
-        };
         return {
           orderBy: thenableOrderBy,
           limit: (_n: number) => {
@@ -66,6 +76,9 @@ function makeSelect(): Select {
           },
         };
       },
+      innerJoin: (_t: unknown, _on: unknown) => ({
+        where: () => ({ orderBy: thenableOrderBy }),
+      }),
     }),
   } as unknown as Select;
 }
@@ -137,6 +150,25 @@ vi.mock('@railforge/db', () => ({
       expiresAt: {},
       acceptedAt: {},
       createdAt: {},
+    },
+    tokens: {
+      __tableName: 'tokens',
+      id: {},
+      clientId: {},
+      issuerAccount: {},
+      tokenType: {},
+      currencyCode: {},
+      mptIssuanceId: {},
+      transferFee: {},
+      clawback: {},
+      freezeEnabled: {},
+      maxSupply: {},
+      createdAt: {},
+    },
+    accounts: {
+      __tableName: 'accounts',
+      id: {},
+      address: {},
     },
     domains: {
       __tableName: 'domains',
@@ -255,6 +287,60 @@ describe('GET /dashboard/domains', () => {
     const app = makeApp();
     const res = await app.request('/dashboard/domains');
     expect(res.status).toBe(400);
+  });
+});
+
+describe('GET /dashboard/tokens', () => {
+  it('400 when environment param missing', async () => {
+    const app = makeApp();
+    const res = await app.request('/dashboard/tokens');
+    expect(res.status).toBe(400);
+  });
+
+  it('empty data when client has no key in selected env', async () => {
+    nextKeyCheckRows = [];
+    const app = makeApp();
+    const res = await app.request('/dashboard/tokens?environment=mainnet');
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as { data: unknown[] }).data).toEqual([]);
+  });
+
+  it('maps rows with issuer classic address from the join', async () => {
+    nextKeyCheckRows = [{ id: 'k1' }];
+    nextRows = [
+      {
+        id: 'tok-1',
+        issuerAddress: 'rIssuerClassic',
+        tokenType: 'mpt',
+        currencyCode: 'USDC',
+        mptIssuanceId: 'DEADBEEF',
+        transferFee: 0,
+        clawback: true,
+        freezeEnabled: true,
+        maxSupply: null,
+        createdAt: new Date('2026-01-01'),
+      },
+    ];
+    const app = makeApp();
+    const res = await app.request('/dashboard/tokens?environment=testnet');
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      data: Array<{
+        id: string;
+        issuer_address: string;
+        token_type: string;
+        mpt_issuance_id: string | null;
+      }>;
+    };
+    expect(body.data).toHaveLength(1);
+    expect(body.data[0]).toEqual(
+      expect.objectContaining({
+        id: 'tok-1',
+        issuer_address: 'rIssuerClassic',
+        token_type: 'mpt',
+        mpt_issuance_id: 'DEADBEEF',
+      }),
+    );
   });
 });
 
