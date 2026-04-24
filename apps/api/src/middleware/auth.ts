@@ -103,6 +103,7 @@ export const auth: MiddlewareHandler<AppEnv> = async (c, next) => {
     clientId: string;
     environment: string;
     rateLimit: number;
+    agentId: string | null;
   }[];
   try {
     rows = await db
@@ -111,6 +112,10 @@ export const auth: MiddlewareHandler<AppEnv> = async (c, next) => {
         clientId: schema.apiKeys.clientId,
         environment: schema.apiKeys.environment,
         rateLimit: schema.apiKeys.rateLimit,
+        // VISION.md agent launcher: carry forward so handlers can scope
+        // payments / DEX ops to the agent's allowlist. NULL for regular
+        // client-scoped keys (most traffic).
+        agentId: schema.apiKeys.agentId,
       })
       .from(schema.apiKeys)
       .where(
@@ -150,6 +155,7 @@ export const auth: MiddlewareHandler<AppEnv> = async (c, next) => {
   c.set('apiKeyId', row.id);
   c.set('rateLimit', row.rateLimit);
   c.set('environment', env);
+  c.set('agentId', row.agentId);
 
   // REVIEW.md HIGH-10: key prefix is logged server-side on failure paths
   // above (lines 73, 126) but is NOT echoed back to the client. Any future

@@ -47,6 +47,7 @@ function paymentErrorResponse(err: PaymentServiceError) {
 
 payments.post('/', zValidator('json', sendPaymentSchema), async (c) => {
   const clientId = c.get('clientId');
+  const agentId = c.get('agentId');
   const body = c.req.valid('json');
   try {
     const result = await sendPayment({
@@ -61,6 +62,7 @@ payments.post('/', zValidator('json', sendPaymentSchema), async (c) => {
       currency: body.currency,
       issuer: body.issuer,
       idempotencyKey: c.req.header('idempotency-key'),
+      agentId,
     });
     return c.json({ tx_id: result.txId, status: 'queued' }, 202);
   } catch (err) {

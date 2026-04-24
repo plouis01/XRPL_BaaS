@@ -18,23 +18,34 @@ const agents = new Hono<AppEnv>();
 
 // revocationCheck is mounted globally on /v1 — no per-router duplicate.
 
-function agentErrorResponse(err: AgentServiceError) {
+function agentErrorResponse(err: AgentServiceError): {
+  error: string;
+  status: 400 | 403 | 404 | 409 | 503;
+} {
   switch (err.code) {
     case 'invalid_preset':
     case 'invalid_allowlist':
     case 'allowlist_required':
-      return { error: err.message, status: 400 } as const;
+      return { error: err.message, status: 400 };
     case 'parent_not_found':
-      return { error: 'Parent account not found', status: 404 } as const;
+      return { error: 'Parent account not found', status: 404 };
     case 'parent_not_funded':
-      return { error: err.message, status: 409 } as const;
+      return { error: err.message, status: 409 };
     case 'enqueue_failed':
-      return {
-        error: 'Failed to enqueue — please retry',
-        status: 503,
-      } as const;
+      return { error: 'Failed to enqueue — please retry', status: 503 };
     case 'db_conflict':
-      return { error: 'Conflict — please retry', status: 409 } as const;
+      return { error: 'Conflict — please retry', status: 409 };
+    // Authorization codes — thrown by authorizeAgentPayment, not
+    // provisionAgent. They shouldn't normally reach this route, but the
+    // switch must be exhaustive. Map to 403 with the original message so
+    // any accidental bubble-up surfaces cleanly instead of 500'ing.
+    case 'agent_not_found':
+      return { error: 'Agent not found', status: 404 };
+    case 'agent_not_active':
+    case 'source_not_parent':
+    case 'destination_not_allowlisted':
+    case 'token_not_allowlisted':
+      return { error: err.message, status: 403 };
   }
 }
 
