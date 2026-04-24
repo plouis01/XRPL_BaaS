@@ -28,6 +28,10 @@ const accountUpdateReturning = { current: [] as unknown[] };
 // applyCredentialAcceptOutcome UPDATE returns. Empty = "already
 // transitioned, noop"; non-empty = "we won the transition".
 const credentialUpdateReturning = { current: [] as unknown[] };
+// VISION.md agent launcher: applyAgentGrantOutcome's UPDATE returns the
+// matched agents row(s). Empty = no pending agents row for this grant
+// (standalone delegation), non-empty = "we won the transition".
+const agentsUpdateReturning = { current: [] as unknown[] };
 
 // ── Sprint 3 webhook fan-out: extra mock state ──
 //
@@ -63,6 +67,7 @@ vi.mock('@railforge/db', () => {
           returning: vi.fn(async () => {
             if (table.__name === 'accounts') return accountUpdateReturning.current;
             if (table.__name === 'credentials') return credentialUpdateReturning.current;
+            if (table.__name === 'agents') return agentsUpdateReturning.current;
             return [];
           }),
         });
@@ -134,6 +139,12 @@ vi.mock('@railforge/db', () => {
         deletedAt: 'deletedAt',
         updatedAt: 'updatedAt',
       },
+      agents: {
+        __name: 'agents',
+        id: 'id',
+        agentAddress: 'agentAddress',
+        status: 'status',
+      },
     },
     eq: vi.fn((col: unknown, val: unknown) => ({ col, val })),
     and: vi.fn((...args: unknown[]) => ({ and: args })),
@@ -162,6 +173,7 @@ vi.mock('../queues.ts', () => ({
 }));
 
 const {
+  applyAgentGrantOutcome,
   applyCredentialAcceptOutcome,
   applyDomainMutationOutcome,
   extractFundingAmount,
@@ -1148,5 +1160,119 @@ describe('extractFundingAmount (API v1/v2 shape parser)', () => {
     expect(extractFundingAmount(undefined)).toBeNull();
     expect(extractFundingAmount({})).toBeNull();
     expect(extractFundingAmount({ meta: null })).toBeNull();
+  });
+});
+
+// VISION.md agent launcher: applyAgentGrantOutcome finalizes the agents.status
+// flip on validation of the SignerListSet grant tx enqueued by provisionAgent.
+// The contract it must honor:
+//   - Only SignerListSet + requestBody.op='grantPermission' is touched; any
+//     other tx type or op string is a no-op.
+//   - Success flips status='active' only on rows currently status='pending'
+//     (idempotent against replays).
+//   - Failure flips status='failed' on pending rows so operators can see
+//     they need review, rather than silently stuck at 'pending'.
+//   - If no agents row matches (standalone grantPermission call without an
+//     agent vault), the helper returns without throwing.
+describe('applyAgentGrantOutcome (unit)', () => {
+  const silentLog = {
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+    debug: vi.fn(),
+    // biome-ignore lint/suspicious/noExplicitAny: test Logger stub
+  } as any;
+
+  beforeEach(() => {
+    dbUpdateCalls.length = 0;
+    dbSelectResult.current = [];
+    agentsUpdateReturning.current = [];
+  });
+
+  afterEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('non-SignerListSet tx: no agents UPDATE', async () => {
+    dbSelectResult.current = [{ txType: 'Payment', requestBody: { op: 'sendPayment' } }];
+    await applyAgentGrantOutcome('tx-uuid-1', true, silentLog);
+    expect(dbUpdateCalls.filter((u) => u.table === 'agents')).toHaveLength(0);
+  });
+
+  it('missing tx row: no agents UPDATE', async () => {
+    dbSelectResult.current = [];
+    await applyAgentGrantOutcome('tx-uuid-1', true, silentLog);
+    expect(dbUpdateCalls.filter((u) => u.table === 'agents')).toHaveLength(0);
+  });
+
+  it("SignerListSet with op='revokePermission' (revoke helper's domain): no agents UPDATE", async () => {
+    dbSelectResult.current = [
+      {
+        txType: 'SignerListSet',
+        requestBody: { op: 'revokePermission', delegationId: 'deleg-1' },
+      },
+    ];
+    await applyAgentGrantOutcome('tx-uuid-1', true, silentLog);
+    expect(dbUpdateCalls.filter((u) => u.table === 'agents')).toHaveLength(0);
+  });
+
+  it('grantPermission with missing delegate in requestBody: no agents UPDATE', async () => {
+    dbSelectResult.current = [
+      {
+        txType: 'SignerListSet',
+        requestBody: { op: 'grantPermission' },
+      },
+    ];
+    await applyAgentGrantOutcome('tx-uuid-1', true, silentLog);
+    expect(dbUpdateCalls.filter((u) => u.table === 'agents')).toHaveLength(0);
+  });
+
+  it("success path: flips agents.status='active'", async () => {
+    dbSelectResult.current = [
+      {
+        txType: 'SignerListSet',
+        requestBody: { op: 'grantPermission', delegate: 'rAGENT000000000' },
+      },
+    ];
+    agentsUpdateReturning.current = [{ id: 'agent-1' }];
+
+    await applyAgentGrantOutcome('tx-uuid-1', true, silentLog);
+
+    const agentUpdate = dbUpdateCalls.find((u) => u.table === 'agents');
+    expect(agentUpdate).toBeDefined();
+    const set = agentUpdate?.set as Record<string, unknown>;
+    expect(set?.status).toBe('active');
+  });
+
+  it("failure path: flips agents.status='failed' (visible for operator review)", async () => {
+    dbSelectResult.current = [
+      {
+        txType: 'SignerListSet',
+        requestBody: { op: 'grantPermission', delegate: 'rAGENT000000000' },
+      },
+    ];
+    agentsUpdateReturning.current = [{ id: 'agent-1' }];
+
+    await applyAgentGrantOutcome('tx-uuid-1', false, silentLog);
+
+    const agentUpdate = dbUpdateCalls.find((u) => u.table === 'agents');
+    expect(agentUpdate).toBeDefined();
+    const set = agentUpdate?.set as Record<string, unknown>;
+    expect(set?.status).toBe('failed');
+  });
+
+  it('no matching agents row (standalone delegation): UPDATE fires but noop, does not throw', async () => {
+    dbSelectResult.current = [
+      {
+        txType: 'SignerListSet',
+        requestBody: { op: 'grantPermission', delegate: 'rAGENT000000000' },
+      },
+    ];
+    agentsUpdateReturning.current = [];
+
+    await expect(applyAgentGrantOutcome('tx-uuid-1', true, silentLog)).resolves.toBeUndefined();
+
+    // UPDATE was attempted; idempotency guard (WHERE status='pending') returned zero rows.
+    expect(dbUpdateCalls.filter((u) => u.table === 'agents')).toHaveLength(1);
   });
 });

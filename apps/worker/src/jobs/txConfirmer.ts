@@ -181,6 +181,14 @@ export async function processTxConfirmJob(job: Job<TxConfirmJobData>): Promise<v
       } catch (err) {
         log.error({ err }, 'credential revoke outcome failed (non-fatal)');
       }
+      // VISION.md agent launcher: if this expired tx was a grantPermission
+      // for an agent provisioning, mark the agents row 'failed' so it's
+      // visible for operator review instead of stuck at 'pending'.
+      try {
+        await applyAgentGrantOutcome(txId, false, log);
+      } catch (err) {
+        log.error({ err }, 'agent grant outcome failed (non-fatal)');
+      }
       return; // done — do NOT throw, or BullMQ will retry a dead job
     }
 
@@ -324,6 +332,16 @@ export async function processTxConfirmJob(job: Job<TxConfirmJobData>): Promise<v
     await applyCredentialRevokeOutcome(txId, isSuccess, log);
   } catch (err) {
     log.error({ err }, 'credential revoke outcome failed (non-fatal)');
+  }
+
+  // VISION.md agent launcher: finalize agent provisioning. tesSUCCESS
+  // flips agents.status pending → active so the row starts rejecting
+  // revocationCheck skips; any failure flips to 'failed' for operator
+  // review (the delegate key has no on-ledger signing authority).
+  try {
+    await applyAgentGrantOutcome(txId, isSuccess, log);
+  } catch (err) {
+    log.error({ err }, 'agent grant outcome failed (non-fatal)');
   }
 
   // 6. Backfill tokens.mpt_issuance_id from tx metadata.
@@ -814,6 +832,81 @@ export async function applyDelegationRevocationOutcome(
     { delegationId, newStatus: isSuccess ? 'revoked' : 'active' },
     'delegation revocation outcome applied',
   );
+}
+
+/**
+ * Partner to the VISION.md agent launcher. `provisionAgent` inserts an
+ * `agents` row with status='pending' and hands off to permission.service
+ * which enqueues a SignerListSet tx (requestBody.op='grantPermission').
+ * This helper finalizes the DB state once rippled validates (or expires)
+ * that tx.
+ *
+ *   tesSUCCESS → agents.status='active'
+ *   failure/expiry → agents.status='failed' so the row is visible for
+ *     operator review rather than silently stuck at 'pending' forever.
+ *     The delegate key pair is already persisted in the accounts table,
+ *     but without the on-ledger signer-list entry it has no signing
+ *     authority — the agent row should not claim to be 'active'.
+ *
+ * Both branches are guarded by status='pending' so replays of a
+ * confirmation job are silent no-ops rather than overwrites.
+ *
+ * Only grantPermission-originated SignerListSet txs are touched. Direct
+ * grantPermission callers (non-agent-launcher use of the permission API)
+ * won't have an agents row — the UPDATE then matches zero rows, which is
+ * the intended behavior: a permission.service grant without a paired
+ * agent row is a standalone delegation, not an agent vault.
+ */
+export async function applyAgentGrantOutcome(
+  txId: string,
+  isSuccess: boolean,
+  log: Logger,
+): Promise<void> {
+  const rows = await db
+    .select({
+      txType: schema.transactions.txType,
+      requestBody: schema.transactions.requestBody,
+    })
+    .from(schema.transactions)
+    .where(eq(schema.transactions.id, txId))
+    .limit(1);
+
+  const row = rows[0];
+  if (!row || row.txType !== 'SignerListSet') return;
+
+  const body = row.requestBody as {
+    op?: unknown;
+    delegate?: unknown;
+  } | null;
+  const op = typeof body?.op === 'string' ? body.op : null;
+  const delegateAddress = typeof body?.delegate === 'string' ? body.delegate : null;
+  // Only finalize grantPermission txs. revokePermission has its own helper
+  // above; any other SignerListSet path (configureSigners from
+  // account.service, for example) skips both.
+  if (op !== 'grantPermission' || !delegateAddress) return;
+
+  // Match the agents row by agent_address — the column is UNIQUE and was
+  // populated at provisioning time. Matching via delegation_id instead
+  // would require an additional SELECT because the requestBody carries
+  // the delegate address, not the delegation FK.
+  const newStatus = isSuccess ? 'active' : 'failed';
+  const updated = await db
+    .update(schema.agents)
+    .set({ status: newStatus })
+    .where(
+      and(eq(schema.agents.agentAddress, delegateAddress), eq(schema.agents.status, 'pending')),
+    )
+    .returning({ id: schema.agents.id });
+
+  if (updated.length === 0) {
+    log.debug(
+      { delegateAddress, isSuccess },
+      'no pending agents row for this grant (noop — standalone delegation or already transitioned)',
+    );
+    return;
+  }
+
+  log.info({ agentId: updated[0]?.id, newStatus, delegateAddress }, 'agent grant outcome applied');
 }
 
 /**
