@@ -28,6 +28,7 @@ import {
   buildXrpPayment,
 } from '@railforge/xrpl-core';
 import { logger } from '../logger.ts';
+import { AgentServiceError, authorizeAgentPayment } from './agent.service.ts';
 import { enforceSpendPolicy, enforceTokenOpCount } from './spendPolicy.service.ts';
 
 export class PaymentServiceError extends Error {
@@ -99,6 +100,12 @@ export interface SendPaymentInput {
   issuer?: string;
   /** REVIEW.md HIGH-04: thread into transactions.idempotency_key. */
   idempotencyKey?: string;
+  /**
+   * VISION.md agent launcher: when non-null, the auth'd API key belongs to
+   * an agent. Payment is gated against the agent's allowlist + status
+   * (see authorizeAgentPayment) before any tx is enqueued.
+   */
+  agentId?: string | null;
 }
 
 export async function sendPayment(input: SendPaymentInput): Promise<{ txId: string }> {
@@ -110,6 +117,47 @@ export async function sendPayment(input: SendPaymentInput): Promise<{ txId: stri
   });
 
   const source = await requireFundedSource(input.clientId, input.source)();
+
+  // VISION.md agent launcher: if this API key is bound to an agent, gate
+  // the payment against the agent's allowlist + status BEFORE building or
+  // enqueueing the tx. Runs after source resolution so a non-owned source
+  // still returns source_not_found (cross-tenant check wins) and before
+  // spend-policy enforcement so a blocked tx doesn't burn the daily budget.
+  if (input.agentId) {
+    const assetKey = input.mptIssuanceId
+      ? input.mptIssuanceId
+      : input.currency && input.issuer
+        ? `${input.currency}:${input.issuer}`
+        : null;
+    try {
+      await authorizeAgentPayment({
+        clientId: input.clientId,
+        agentId: input.agentId,
+        sourceAddress: source.address,
+        destinationAddress: input.destination,
+        assetKey,
+      });
+    } catch (err) {
+      if (err instanceof AgentServiceError) {
+        // Translate the subset of AgentServiceError codes the authorize
+        // helper throws into PaymentServiceError codes the route map
+        // already knows about. Preserving the agent-specific code would
+        // require broadening PaymentServiceError; simpler to keep the
+        // route mapper's surface narrow and re-classify here.
+        if (err.code === 'agent_not_found' || err.code === 'agent_not_active') {
+          throw new PaymentServiceError('invalid_input', err.message);
+        }
+        if (
+          err.code === 'source_not_parent' ||
+          err.code === 'destination_not_allowlisted' ||
+          err.code === 'token_not_allowlisted'
+        ) {
+          throw new PaymentServiceError('invalid_input', err.message);
+        }
+      }
+      throw err;
+    }
+  }
 
   // Pick the right builder based on which amount fields are set.
   // biome-ignore lint/suspicious/noExplicitAny: builder return types vary

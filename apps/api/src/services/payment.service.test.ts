@@ -79,9 +79,33 @@ vi.mock('./spendPolicy.service.ts', () => ({
   enforceTokenOpCount: vi.fn(async () => {}),
 }));
 
+// VISION.md agent launcher: stub authorizeAgentPayment so the gated-path
+// tests can assert on its call without spinning up the full mock DB shape.
+// The default is a no-op (resolves); individual tests opt into a rejection.
+const authorizeAgentPaymentMock = vi.fn(async (_input: unknown) => {});
+vi.mock('./agent.service.ts', () => ({
+  authorizeAgentPayment: (input: unknown) => authorizeAgentPaymentMock(input),
+  AgentServiceError: class AgentServiceError extends Error {
+    constructor(
+      public readonly code: string,
+      message: string,
+    ) {
+      super(message);
+      this.name = 'AgentServiceError';
+    }
+  },
+}));
+
 // Import after mocks.
 const { PaymentServiceError, cancelEscrow, createEscrow, finishEscrow, getPayment, sendPayment } =
   await import('./payment.service.ts');
+// Pull the MOCKED AgentServiceError class so the rejection test can throw
+// an instance that passes payment.service's `err instanceof AgentServiceError`
+// check. A plain `new Error(...)` with name='AgentServiceError' would fail
+// the instanceof and bubble up instead of translating to invalid_input.
+const { AgentServiceError: MockedAgentServiceError } = (await import('./agent.service.ts')) as {
+  AgentServiceError: new (code: string, message: string) => Error & { code: string };
+};
 
 // ── Fixtures ────────────────────────────────────────────────────────────────
 
@@ -326,5 +350,111 @@ describe('cancelEscrow', () => {
     };
     expect(enq.txJson.TransactionType).toBe('EscrowCancel');
     expect(enq.txJson.OfferSequence).toBe(42);
+  });
+});
+
+// ── VISION.md agent launcher — sendPayment gating ──────────────────────────
+// These tests verify that when `agentId` is threaded in, sendPayment calls
+// authorizeAgentPayment BEFORE enqueueing and propagates its rejections as
+// PaymentServiceError('invalid_input') with the original agent-code message.
+// The authorize helper itself is fully tested in agent.service.test.ts —
+// here we only verify the integration point.
+
+describe('sendPayment — agent gating', () => {
+  beforeEach(() => {
+    dbSelectResult.current = [FUNDED_SOURCE];
+    dbInsertCalls.length = 0;
+    dbInsertResult.current = [{ id: 'tx-uuid-agent' }];
+    enqueueCalls.length = 0;
+    authorizeAgentPaymentMock.mockReset();
+    authorizeAgentPaymentMock.mockResolvedValue(undefined);
+  });
+
+  afterEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('XRP payment with agentId: calls authorizeAgentPayment with no assetKey', async () => {
+    const result = await sendPayment({
+      clientId: 'client-1',
+      agentId: 'agent-uuid-1',
+      source: FUNDED_SOURCE.address,
+      destination: 'rDest0000000000000000000000000000',
+      amountDrops: '1000000',
+    });
+
+    expect(result.txId).toBe('tx-uuid-agent');
+    expect(authorizeAgentPaymentMock).toHaveBeenCalledTimes(1);
+    const call = authorizeAgentPaymentMock.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(call?.agentId).toBe('agent-uuid-1');
+    expect(call?.sourceAddress).toBe(FUNDED_SOURCE.address);
+    expect(call?.destinationAddress).toBe('rDest0000000000000000000000000000');
+    expect(call?.assetKey).toBeNull();
+  });
+
+  it('MPT payment with agentId: assetKey is the 48-hex issuance id', async () => {
+    await sendPayment({
+      clientId: 'client-1',
+      agentId: 'agent-uuid-1',
+      source: FUNDED_SOURCE.address,
+      destination: 'rDest0000000000000000000000000000',
+      mptIssuanceId: 'a'.repeat(48),
+      value: '100',
+    });
+    const call = authorizeAgentPaymentMock.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(call?.assetKey).toBe('a'.repeat(48));
+  });
+
+  it("Issued-currency payment with agentId: assetKey is '<currency>:<issuer>'", async () => {
+    await sendPayment({
+      clientId: 'client-1',
+      agentId: 'agent-uuid-1',
+      source: FUNDED_SOURCE.address,
+      destination: 'rDest0000000000000000000000000000',
+      currency: 'USD',
+      issuer: 'rIssuer00000000000000000000000000',
+      value: '100',
+    });
+    const call = authorizeAgentPaymentMock.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(call?.assetKey).toBe('USD:rIssuer00000000000000000000000000');
+  });
+
+  it("authorize rejection → PaymentServiceError('invalid_input'); no enqueue, no insert", async () => {
+    authorizeAgentPaymentMock.mockImplementation(async () => {
+      // Must be an instance of the MOCKED AgentServiceError so the service's
+      // `err instanceof AgentServiceError` check takes the code-mapping
+      // branch instead of rethrowing.
+      throw new MockedAgentServiceError(
+        'destination_not_allowlisted',
+        "Destination rDest... is not on the agent's allowlist",
+      );
+    });
+
+    await expect(
+      sendPayment({
+        clientId: 'client-1',
+        agentId: 'agent-uuid-1',
+        source: FUNDED_SOURCE.address,
+        destination: 'rDest0000000000000000000000000000',
+        amountDrops: '1000000',
+      }),
+    ).rejects.toMatchObject({
+      name: 'PaymentServiceError',
+      code: 'invalid_input',
+    });
+
+    // Gate runs BEFORE tx build / insert / enqueue — none of those fire.
+    expect(dbInsertCalls).toHaveLength(0);
+    expect(enqueueCalls).toHaveLength(0);
+  });
+
+  it('no agentId: authorize is NOT called (regular client-scoped key path)', async () => {
+    await sendPayment({
+      clientId: 'client-1',
+      source: FUNDED_SOURCE.address,
+      destination: 'rDest0000000000000000000000000000',
+      amountDrops: '1000000',
+    });
+    expect(authorizeAgentPaymentMock).not.toHaveBeenCalled();
   });
 });
