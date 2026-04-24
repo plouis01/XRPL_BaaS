@@ -11,6 +11,7 @@ import { ipRateLimit } from './middleware/ipRateLimit.ts';
 import { rateLimit } from './middleware/rateLimit.ts';
 import { revocationCheck } from './middleware/revocationCheck.ts';
 import accountsRoute from './routes/accounts.ts';
+import agentsRoute from './routes/agents.ts';
 import credentialsRoute from './routes/credentials.ts';
 import dashboardRoute from './routes/dashboard.ts';
 import dashboardSessionRoute from './routes/dashboardSession.ts';
@@ -89,6 +90,7 @@ v1.use('*', idempotency);
 v1.use('*', auditLog);
 
 v1.route('/accounts', accountsRoute);
+v1.route('/agents', agentsRoute);
 v1.route('/tokens', tokensRoute);
 v1.route('/credentials', credentialsRoute);
 v1.route('/permissions', permissionsRoute);

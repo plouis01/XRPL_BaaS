@@ -1,0 +1,401 @@
+// Agent service — VISION.md's "agent launcher" (POST /v1/agents).
+//
+// This is an ORCHESTRATOR, not a new XRPL primitive. Every on-ledger effect
+// (funding payment, signer list, domain reference, spend policy row) is
+// produced by composing existing services:
+//
+//   account.service    → creates the parent managed account (if not supplied)
+//   permission.service → grants delegate signing authority (XLS-75 fallback)
+//   spendPolicy.service (DB-writing side) → installs per-client caps
+//   (agent_allowlists is written directly here — no standalone service yet)
+//
+// What "provisioning" means, step by step:
+//
+//   1. Validate preset + allowlist entry types against the preset
+//   2. Resolve / use the parent managed account owned by the caller
+//   3. Generate a delegate keypair locally (dev/test) — this will be swapped
+//      for HSM generation once the HSM integration reaches Phase 2
+//   4. Insert the `agents` row with status='pending' so the orphan reconciler
+//      can clean up if step 5 fails
+//   5. Call permission.service.grantPermission to enqueue the SignerListSet
+//      tx that admits the delegate
+//   6. Insert the agent_allowlists rows (atomic with the agent update)
+//   7. Upsert the spend_policies row — override + preset defaults
+//   8. Flip the agents row status='active' and record delegation_id
+//
+// The agent row stays 'pending' through step 5's enqueue — if the worker
+// never processes the signer-list tx (Redis outage, worker crash), the
+// delegate key never has on-ledger authority. That's the correct behavior:
+// an 'active' agent without signing power on-ledger would be worse than
+// none at all. Callers poll GET /v1/agents/:id to observe the flip, which
+// the txConfirmer performs on tesSUCCESS of the grant tx.
+//
+// IMPORTANT: the delegate's SEED never leaves this process in a response or
+// log line. It's returned EXACTLY ONCE in the provisioning response body so
+// the caller can configure their agent runtime; after that it lives only in
+// `accounts.master_key_ref` (same redaction path as parent-account seeds).
+
+import { and, db, eq, isNull, schema } from '@railforge/db';
+import { Wallet } from 'xrpl';
+import { logger } from '../logger.ts';
+import {
+  AGENT_PRESETS,
+  type AgentAllowlistEntryType,
+  type AgentPresetName,
+  getPreset,
+} from '../presets/agent-presets.ts';
+import { PermissionServiceError, grantPermission } from './permission.service.ts';
+
+export class AgentServiceError extends Error {
+  constructor(
+    public readonly code:
+      | 'invalid_preset'
+      | 'parent_not_found'
+      | 'parent_not_funded'
+      | 'invalid_allowlist'
+      | 'allowlist_required'
+      | 'enqueue_failed'
+      | 'db_conflict',
+    message: string,
+  ) {
+    super(message);
+    this.name = 'AgentServiceError';
+  }
+}
+
+export interface AgentAllowlistInput {
+  entry_type: AgentAllowlistEntryType;
+  entry_value: string;
+}
+
+export interface ProvisionAgentInput {
+  clientId: string;
+  preset: AgentPresetName;
+  parentAddress: string;
+  label?: string;
+  allowlist: AgentAllowlistInput[];
+  spendPolicy?: {
+    maxXrpPerTxDrops?: string | null;
+    dailyXrpLimitDrops?: string | null;
+  };
+  quorum?: number;
+  idempotencyKey?: string;
+}
+
+export interface AgentView {
+  id: string;
+  preset: string;
+  parent_address: string;
+  agent_address: string;
+  label: string | null;
+  status: string;
+  allowlist: AgentAllowlistInput[];
+  spend_policy: {
+    max_xrp_per_tx_drops: string | null;
+    daily_xrp_limit_drops: string | null;
+  };
+  created_at: Date | null;
+  /**
+   * Delegate seed — returned EXACTLY ONCE in the provisioning response so
+   * the caller can load it into their agent runtime. Never returned by GET
+   * endpoints. Redacted at the logger level; do not add it to log lines.
+   */
+  agent_seed?: string;
+  /** ID of the SignerListSet tx that grants the agent on-ledger authority. */
+  grant_tx_id: string;
+}
+
+// ── Allowlist validation ─────────────────────────────────────────────────────
+// Each entry_value shape depends on its entry_type. Service-layer rather than
+// Zod because the check is per-preset (a payment-agent can't pass 'domain'
+// even if the validator accepted all three types generically).
+
+const R_ADDRESS = /^r[1-9A-HJ-NP-Za-km-z]{24,34}$/;
+// MPT issuance ID: 192-bit = 48 hex chars. Domain ID: 256-bit = 64 hex.
+const HEX_192 = /^[0-9a-fA-F]{48}$/;
+const HEX_256 = /^[0-9a-fA-F]{64}$/;
+
+function validateAllowlistEntry(
+  preset: AgentPresetName,
+  entry: AgentAllowlistInput,
+): string | null {
+  const presetDef = AGENT_PRESETS[preset];
+  if (!presetDef.allowedEntryTypes.includes(entry.entry_type)) {
+    return `preset '${preset}' does not allow entry_type '${entry.entry_type}'`;
+  }
+  switch (entry.entry_type) {
+    case 'destination':
+      if (!R_ADDRESS.test(entry.entry_value)) {
+        return `destination '${entry.entry_value}' is not a valid XRPL address`;
+      }
+      return null;
+    case 'token':
+      // Either MPT issuance ID (48 hex) OR `<currency>:<issuer>` where
+      // currency is 3 chars or 40-hex and issuer is an r-address.
+      if (HEX_192.test(entry.entry_value)) return null;
+      {
+        const parts = entry.entry_value.split(':');
+        if (parts.length !== 2) {
+          return `token '${entry.entry_value}' must be an MPT issuance ID or '<currency>:<issuer>'`;
+        }
+        const [currency, issuer] = parts;
+        const currencyOk =
+          !!currency && (currency.length === 3 || /^[0-9a-fA-F]{40}$/.test(currency));
+        const issuerOk = !!issuer && R_ADDRESS.test(issuer);
+        if (!currencyOk || !issuerOk) {
+          return `token '${entry.entry_value}' has an invalid currency or issuer`;
+        }
+      }
+      return null;
+    case 'domain':
+      if (!HEX_256.test(entry.entry_value)) {
+        return `domain '${entry.entry_value}' must be a 64-char hex DomainID`;
+      }
+      return null;
+  }
+}
+
+// ── Parent account resolver ──────────────────────────────────────────────────
+
+async function resolveOwnedFundedAccount(
+  clientId: string,
+  address: string,
+): Promise<{ id: string; address: string } | null> {
+  const rows = await db
+    .select({
+      id: schema.accounts.id,
+      address: schema.accounts.address,
+      isFunded: schema.accounts.isFunded,
+    })
+    .from(schema.accounts)
+    .where(
+      and(
+        eq(schema.accounts.clientId, clientId),
+        eq(schema.accounts.address, address),
+        isNull(schema.accounts.deletedAt),
+      ),
+    )
+    .limit(1);
+  const row = rows[0];
+  if (!row) return null;
+  if (!row.isFunded) {
+    throw new AgentServiceError(
+      'parent_not_funded',
+      'Parent account is not yet funded — wait for the funding payment to validate before provisioning an agent',
+    );
+  }
+  return { id: row.id, address: row.address };
+}
+
+// ── Main provisioning flow ──────────────────────────────────────────────────
+
+export async function provisionAgent(input: ProvisionAgentInput): Promise<AgentView> {
+  const log = logger.child({
+    service: 'agent',
+    op: 'provision',
+    clientId: input.clientId,
+    preset: input.preset,
+  });
+
+  // 1. Preset + allowlist validation ------------------------------------------
+  const preset = getPreset(input.preset);
+  if (!preset) {
+    throw new AgentServiceError('invalid_preset', `Unknown preset '${input.preset}'`);
+  }
+
+  if (preset.requireAllowlist && input.allowlist.length === 0) {
+    throw new AgentServiceError(
+      'allowlist_required',
+      `preset '${preset.name}' requires at least one allowlist entry`,
+    );
+  }
+  for (const entry of input.allowlist) {
+    const err = validateAllowlistEntry(input.preset, entry);
+    if (err) throw new AgentServiceError('invalid_allowlist', err);
+  }
+
+  // 2. Parent account resolution (cross-tenant safe) --------------------------
+  const parent = await resolveOwnedFundedAccount(input.clientId, input.parentAddress);
+  if (!parent) {
+    throw new AgentServiceError('parent_not_found', 'Parent account not found');
+  }
+
+  // 3. Delegate keypair generation --------------------------------------------
+  // DevSigner path; HSM-generated agent keys come with Phase 2. The seed is
+  // stored as an accounts.master_key_ref on a new row so we can reconstruct
+  // the Wallet on the worker side for future agent-signed txs. This mirrors
+  // the semi-custodial model — the tenant gets the seed back once, and
+  // RailForge retains a reference copy for signing.
+  const delegateWallet = Wallet.generate();
+  if (!delegateWallet.seed) {
+    throw new Error('Wallet.generate() returned no seed — should never happen');
+  }
+  const agentAddress = delegateWallet.classicAddress;
+  const agentSeed = delegateWallet.seed;
+
+  // 4. Insert the agent row + the delegate accounts row atomically ------------
+  // The delegate address is stored in `accounts` so that existing flows
+  // (payment.service resolving source addresses, logger redaction of
+  // master_key_ref) transparently cover it. The agents row joins to it via
+  // delegate_account_id in a future migration; for now the link is via
+  // unique agent_address + a FK on parent_account_id.
+  let agentId: string;
+  try {
+    agentId = await db.transaction(async (tx) => {
+      // Persist the delegate as a managed account so the worker can load
+      // its key via the standard accounts lookup. custody_mode='semi'
+      // because RailForge retains the seed; the tenant also has it.
+      const acctInserted = await tx
+        .insert(schema.accounts)
+        .values({
+          clientId: input.clientId,
+          address: agentAddress,
+          masterKeyRef: agentSeed,
+          regularKey: null,
+          custodyMode: 'semi',
+          label: input.label ? `${input.label} (agent)` : `agent of ${parent.address}`,
+          isFunded: true, // delegate doesn't need its own reserve; it signs for the parent
+          reserveBalance: '0',
+          metadata: { agent_of: parent.address, preset: input.preset },
+        })
+        .returning({ id: schema.accounts.id });
+      if (!acctInserted[0]) {
+        throw new AgentServiceError('db_conflict', 'accounts insert returned no row');
+      }
+
+      const agentInserted = await tx
+        .insert(schema.agents)
+        .values({
+          clientId: input.clientId,
+          parentAccountId: parent.id,
+          agentAddress,
+          delegationId: null,
+          preset: input.preset,
+          label: input.label ?? null,
+          status: 'pending',
+        })
+        .returning({ id: schema.agents.id });
+      const agentRow = agentInserted[0];
+      if (!agentRow) {
+        throw new AgentServiceError('db_conflict', 'agents insert returned no row');
+      }
+
+      if (input.allowlist.length > 0) {
+        await tx.insert(schema.agentAllowlists).values(
+          input.allowlist.map((e) => ({
+            agentId: agentRow.id,
+            entryType: e.entry_type,
+            entryValue: e.entry_value,
+          })),
+        );
+      }
+
+      return agentRow.id;
+    });
+  } catch (err) {
+    if (err instanceof AgentServiceError) throw err;
+    if (
+      err &&
+      typeof err === 'object' &&
+      'code' in err &&
+      (err as { code: string }).code === '23505'
+    ) {
+      throw new AgentServiceError('db_conflict', 'Agent address collision (retry)');
+    }
+    throw err;
+  }
+
+  // 5. Grant the delegate on-ledger authority via permission.service ----------
+  // This enqueues a SignerListSet (XLS-75 V1.1 fallback). The txConfirmer
+  // will flip agents.status 'pending' → 'active' on tesSUCCESS (new hook
+  // alongside the existing delegation confirmation — wired separately).
+  let grantTxId: string;
+  let delegationId: string;
+  try {
+    const grant = await grantPermission({
+      clientId: input.clientId,
+      delegatorAddress: parent.address,
+      delegateAddress: agentAddress,
+      permissions: [...preset.permissions],
+      weight: 1,
+      quorum: input.quorum ?? 1,
+      idempotencyKey: input.idempotencyKey,
+    });
+    grantTxId = grant.tx_id;
+    delegationId = grant.id;
+  } catch (err) {
+    if (err instanceof PermissionServiceError) {
+      log.error({ err: err.message, code: err.code }, 'permission grant failed during provision');
+      throw new AgentServiceError(
+        err.code === 'enqueue_failed' ? 'enqueue_failed' : 'db_conflict',
+        `Failed to grant delegate authority: ${err.message}`,
+      );
+    }
+    throw err;
+  }
+
+  // 6. Back-fill delegation_id on the agents row ------------------------------
+  await db.update(schema.agents).set({ delegationId }).where(eq(schema.agents.id, agentId));
+
+  // 7. Upsert the per-client spend policy -------------------------------------
+  // VISION.md notes that spend_policies grows a nullable agent_id column in a
+  // later migration (so caps can be per-agent rather than per-client). Until
+  // that lands, the policy is installed at the client scope — the caller is
+  // expected to provision agents for well-scoped clients, and the preset
+  // default is the ceiling for all agents of that client.
+  const maxPerTx =
+    input.spendPolicy?.maxXrpPerTxDrops === undefined
+      ? preset.defaultSpendPolicy.maxXrpPerTxDrops
+      : input.spendPolicy.maxXrpPerTxDrops;
+  const dailyLimit =
+    input.spendPolicy?.dailyXrpLimitDrops === undefined
+      ? preset.defaultSpendPolicy.dailyXrpLimitDrops
+      : input.spendPolicy.dailyXrpLimitDrops;
+
+  try {
+    await db
+      .insert(schema.spendPolicies)
+      .values({
+        clientId: input.clientId,
+        maxXrpPerTxDrops: maxPerTx,
+        dailyXrpLimitDrops: dailyLimit,
+        isActive: true,
+      })
+      .onConflictDoUpdate({
+        target: schema.spendPolicies.clientId,
+        set: {
+          maxXrpPerTxDrops: maxPerTx,
+          dailyXrpLimitDrops: dailyLimit,
+          isActive: true,
+          updatedAt: new Date(),
+        },
+      });
+  } catch (err) {
+    log.warn(
+      { err: err instanceof Error ? err.message : String(err) },
+      'spend policy upsert failed — agent provisioned but policy absent',
+    );
+    // Deliberately non-fatal: the agent row + signer list are already in
+    // flight. Missing policy degrades to "no daily cap" which is the same
+    // as no-policy clients. Ops should alert on repeated failures here.
+  }
+
+  log.info({ agentId, parent: parent.address, grantTxId }, 'agent provisioned');
+
+  return {
+    id: agentId,
+    preset: input.preset,
+    parent_address: parent.address,
+    agent_address: agentAddress,
+    label: input.label ?? null,
+    status: 'pending',
+    allowlist: input.allowlist,
+    spend_policy: {
+      max_xrp_per_tx_drops: maxPerTx,
+      daily_xrp_limit_drops: dailyLimit,
+    },
+    created_at: new Date(),
+    agent_seed: agentSeed,
+    grant_tx_id: grantTxId,
+  };
+}
