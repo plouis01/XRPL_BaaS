@@ -355,6 +355,67 @@ export const revokePermissionSchema = z.object({
   delegator_address: xrplAddressSchema,
 });
 
+// ── Agent launcher (VISION.md) ──────────────────────────────────────────
+//
+// POST /v1/agents provisions a delegate sub-account of a parent managed
+// account. Preset + overrides + allowlist go into a single request; the
+// service composes account.service, permission.service, spendPolicy.service,
+// and (optionally) domain.service. See apps/api/src/presets/agent-presets.ts
+// for the preset registry.
+
+const agentAllowlistEntrySchema = z.object({
+  entry_type: z.enum(['destination', 'token', 'domain']),
+  /**
+   * Value shape depends on entry_type:
+   *   destination → XRPL r-address (24-34 chars base58 after 'r')
+   *   token       → MPT issuance ID OR `<currency>:<issuer>` for IOU
+   *   domain      → XLS-80 domain_id hex (64 chars)
+   *
+   * Service-layer validation rejects malformed entries rather than doing
+   * three conditional regexes here.
+   */
+  entry_value: z.string().min(1).max(256),
+});
+
+export const AGENT_PRESET_NAME_VALUES = ['payment-agent', 'treasury-agent'] as const;
+
+export const provisionAgentSchema = z.object({
+  /** Preset name. See apps/api/src/presets/agent-presets.ts. */
+  preset: z.enum(AGENT_PRESET_NAME_VALUES),
+  /**
+   * Parent account address. Must be a managed, funded account owned by the
+   * caller. The agent (delegate) will be granted signing authority on this
+   * account via the permission service.
+   */
+  parent_address: xrplAddressSchema,
+  label: z.string().min(1).max(128).optional(),
+  /**
+   * Optional spend-policy override. Any field omitted falls back to the
+   * preset's defaultSpendPolicy value. Pass `null` explicitly to remove a
+   * default cap (e.g. `max_xrp_per_tx_drops: null` to disable the per-tx
+   * limit that the preset provides).
+   */
+  spend_policy: z
+    .object({
+      max_xrp_per_tx_drops: z.string().nullable().optional(),
+      daily_xrp_limit_drops: z.string().nullable().optional(),
+    })
+    .optional(),
+  /**
+   * Allowlist entries. Shape per entry: {entry_type, entry_value}. Preset
+   * dictates which entry_types are valid (payment-agent rejects 'domain',
+   * for example). Service layer validates against the preset.
+   */
+  allowlist: z.array(agentAllowlistEntrySchema).max(100).default([]),
+  /**
+   * Signer-list quorum on the parent account. Optional — defaults to 1 for
+   * a fresh vault (single-agent single-sign). Pass a higher value if the
+   * parent already has co-signers and you want the new agent to require
+   * co-authorization.
+   */
+  quorum: z.number().int().min(1).max(65535).optional(),
+});
+
 // ── DEX ─────────────────────────────────────────────────────────────────
 
 /**

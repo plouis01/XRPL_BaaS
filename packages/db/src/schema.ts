@@ -329,6 +329,75 @@ export const spendPolicies = pgTable('spend_policies', {
   updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow(),
 });
 
+// ── Agent launcher (VISION.md) ───────────────────────────────────────────────
+// An "agent" is a delegated sub-account of a parent managed account. The
+// parent account holds funds via HSM-custodied master key; the agent gets
+// its own delegate keypair (XLS-75 V1.1 when live, multi-sign fallback until
+// then). Agent-scoped guardrails — destination/token/domain allowlist,
+// per-agent spend policy — are enforced in the service layer (payment.service,
+// dex.service) by reading ctx.agentId off the request and gating against
+// these tables. Status drives revocationCheck: paused/revoked agents can't
+// move money even if their API key is still active.
+//
+// Ownership model:
+//   clients → accounts (parent) → agents (sub) → delegations (on-ledger ref)
+//
+// The `delegation_id` column is nullable so provisioning can insert the
+// agent row first, then populate the FK once the permission.service grant
+// returns. If the grant fails, the agent row stays with status='pending'
+// and the orphan reconciler cleans it up.
+
+export const agents = pgTable(
+  'agents',
+  {
+    id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+    clientId: uuid('client_id')
+      .notNull()
+      .references(() => clients.id),
+    parentAccountId: uuid('parent_account_id')
+      .notNull()
+      .references(() => accounts.id),
+    agentAddress: text('agent_address').notNull().unique(),
+    delegationId: uuid('delegation_id').references(() => delegations.id),
+    // Preset name (e.g. 'payment-agent', 'treasury-agent') — references the
+    // static preset registry in apps/api/src/presets/agent-presets.ts. Not
+    // FK'd because presets are code-defined, not DB rows.
+    preset: text('preset').notNull(),
+    label: text('label'),
+    status: text('status').notNull().default('pending'),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
+    revokedAt: timestamp('revoked_at', { withTimezone: true }),
+  },
+  (t) => ({
+    clientIdx: index('idx_agents_client').on(t.clientId),
+    parentIdx: index('idx_agents_parent').on(t.parentAccountId),
+  }),
+);
+
+// agent_allowlists is the on-platform equivalent of MultiClaw's protocol
+// allowlist: which destinations / tokens / domains this agent is permitted
+// to interact with. Service-layer enforcement (not middleware) because the
+// decision depends on the parsed body (destination, asset). entry_type:
+//   - 'destination' → XRPL r-address (Payment destination)
+//   - 'token'       → MPT issuance ID OR `currency:issuer` for IOU
+//   - 'domain'      → XLS-80 DomainID (for Permissioned DEX offers)
+export const agentAllowlists = pgTable(
+  'agent_allowlists',
+  {
+    id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+    agentId: uuid('agent_id')
+      .notNull()
+      .references(() => agents.id),
+    entryType: text('entry_type').notNull(),
+    entryValue: text('entry_value').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
+  },
+  (t) => ({
+    agentIdx: index('idx_agent_allowlist_agent').on(t.agentId),
+    uniq: unique('uniq_agent_allowlist').on(t.agentId, t.entryType, t.entryValue),
+  }),
+);
+
 // ── Indexer state ────────────────────────────────────────────────────────────
 // Tables written exclusively by the indexer process. These are derived
 // views of on-ledger state — the ledger is authoritative, these rows are
