@@ -44,6 +44,14 @@ export const apiKeys = pgTable('api_keys', {
   // boolean — never NULL, which would silently exclude rows from auth lookups
   // and produce hard-to-debug auth failures.
   isActive: boolean('is_active').notNull().default(true),
+  // VISION.md agent launcher: when non-null, this API key is bound to a
+  // specific agent (sub-account of a managed parent). The auth middleware
+  // sets ctx.agentId and the payment / DEX services gate against the
+  // agent's allowlist + status. NULL for regular client-scoped keys.
+  // FK added in a later migration once agents exists — defined here as
+  // a plain uuid() to avoid a forward reference; lint/CI still catches
+  // missing agent rows via the service-layer resolve.
+  agentId: uuid('agent_id'),
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
   revokedAt: timestamp('revoked_at', { withTimezone: true }),
 });
