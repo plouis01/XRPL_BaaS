@@ -55,7 +55,13 @@ export class AgentServiceError extends Error {
       | 'invalid_allowlist'
       | 'allowlist_required'
       | 'enqueue_failed'
-      | 'db_conflict',
+      | 'db_conflict'
+      // ── authorization failure codes (service-layer gating) ──────────────
+      | 'agent_not_found'
+      | 'agent_not_active'
+      | 'source_not_parent'
+      | 'destination_not_allowlisted'
+      | 'token_not_allowlisted',
     message: string,
   ) {
     super(message);
@@ -398,4 +404,127 @@ export async function provisionAgent(input: ProvisionAgentInput): Promise<AgentV
     agent_seed: agentSeed,
     grant_tx_id: grantTxId,
   };
+}
+
+// ── Authorization: called from payment.service / dex.service when the ───────
+// auth middleware put an agentId on the context. This is the SERVICE-LAYER
+// gate VISION.md §"Enforcement path" describes — the middleware chain (auth,
+// revocationCheck, etc.) is generic across all clients, but deciding whether
+// a given payment's destination / token is on this specific agent's allowlist
+// needs the parsed body, which only the service has.
+//
+// Contract:
+//   - agent exists for this clientId (cross-tenant defense)
+//   - agent.status === 'active' (pending / failed / revoked → reject)
+//   - source address IS the agent's parent account (an agent can't drain a
+//     different managed account even if the API key technically auth'd)
+//   - destination (rXXXX) is in agent_allowlists with entry_type='destination'
+//   - if the tx moves a non-XRP asset, the token identifier is in
+//     agent_allowlists with entry_type='token'
+//
+// Throws AgentServiceError on any rejection. The route's error response
+// mapper translates each code to a 4xx.
+
+export interface AuthorizePaymentInput {
+  clientId: string;
+  agentId: string;
+  sourceAddress: string;
+  destinationAddress: string;
+  /**
+   * Asset identifier if the payment is non-XRP. MPT payments pass the
+   * 48-hex issuance id; issued-currency payments pass `<currency>:<issuer>`.
+   * Omit (or null) for XRP-only payments — destination check still runs.
+   */
+  assetKey?: string | null;
+}
+
+interface AgentRowForAuth {
+  id: string;
+  status: string;
+  parentAccountId: string;
+  parentAddress: string;
+}
+
+async function loadAgentForAuth(
+  clientId: string,
+  agentId: string,
+): Promise<AgentRowForAuth | null> {
+  // Join agents → accounts to resolve parent address in a single round trip.
+  // Scoped by clientId so a stolen agent_id from one tenant can't authorize
+  // payments against another tenant's agents.
+  const rows = await db
+    .select({
+      id: schema.agents.id,
+      status: schema.agents.status,
+      parentAccountId: schema.agents.parentAccountId,
+      parentAddress: schema.accounts.address,
+    })
+    .from(schema.agents)
+    .innerJoin(schema.accounts, eq(schema.accounts.id, schema.agents.parentAccountId))
+    .where(and(eq(schema.agents.id, agentId), eq(schema.agents.clientId, clientId)))
+    .limit(1);
+  return rows[0] ?? null;
+}
+
+async function isAllowlisted(
+  agentId: string,
+  entryType: AgentAllowlistEntryType,
+  entryValue: string,
+): Promise<boolean> {
+  const rows = await db
+    .select({ id: schema.agentAllowlists.id })
+    .from(schema.agentAllowlists)
+    .where(
+      and(
+        eq(schema.agentAllowlists.agentId, agentId),
+        eq(schema.agentAllowlists.entryType, entryType),
+        eq(schema.agentAllowlists.entryValue, entryValue),
+      ),
+    )
+    .limit(1);
+  return rows.length > 0;
+}
+
+export async function authorizeAgentPayment(input: AuthorizePaymentInput): Promise<void> {
+  const log = logger.child({
+    service: 'agent',
+    op: 'authorizePayment',
+    clientId: input.clientId,
+    agentId: input.agentId,
+  });
+
+  const agent = await loadAgentForAuth(input.clientId, input.agentId);
+  if (!agent) {
+    // 404-style: no row OR wrong tenant — indistinguishable, on purpose.
+    throw new AgentServiceError('agent_not_found', 'Agent not found');
+  }
+  if (agent.status !== 'active') {
+    throw new AgentServiceError('agent_not_active', `Agent is not active (status=${agent.status})`);
+  }
+  if (agent.parentAddress !== input.sourceAddress) {
+    // An agent key can sign for its parent account only. Anything else
+    // is either a config error (agent bound to the wrong parent) or an
+    // attempt to route a payment through a different managed account.
+    throw new AgentServiceError('source_not_parent', 'Agent may only send from its parent account');
+  }
+
+  const destOk = await isAllowlisted(input.agentId, 'destination', input.destinationAddress);
+  if (!destOk) {
+    log.warn({ destination: input.destinationAddress }, 'destination not in agent allowlist');
+    throw new AgentServiceError(
+      'destination_not_allowlisted',
+      `Destination ${input.destinationAddress} is not on the agent's allowlist`,
+    );
+  }
+
+  if (input.assetKey) {
+    const tokenOk = await isAllowlisted(input.agentId, 'token', input.assetKey);
+    if (!tokenOk) {
+      log.warn({ assetKey: input.assetKey }, 'token not in agent allowlist');
+      throw new AgentServiceError(
+        'token_not_allowlisted',
+        `Token ${input.assetKey} is not on the agent's allowlist`,
+      );
+    }
+  }
 }
