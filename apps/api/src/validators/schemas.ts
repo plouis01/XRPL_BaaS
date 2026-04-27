@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { AGENT_PRESET_NAMES } from '../presets/agent-presets.ts';
 
 // Zod schemas — single source of truth for request/response shapes.
 // Each route imports its schemas from here. Keep them grouped by resource.
@@ -377,11 +378,9 @@ const agentAllowlistEntrySchema = z.object({
   entry_value: z.string().min(1).max(256),
 });
 
-export const AGENT_PRESET_NAME_VALUES = ['payment-agent', 'treasury-agent'] as const;
-
 export const provisionAgentSchema = z.object({
   /** Preset name. See apps/api/src/presets/agent-presets.ts. */
-  preset: z.enum(AGENT_PRESET_NAME_VALUES),
+  preset: z.enum(AGENT_PRESET_NAMES),
   /**
    * Parent account address. Must be a managed, funded account owned by the
    * caller. The agent (delegate) will be granted signing authority on this

@@ -97,14 +97,20 @@ const TREASURY_AGENT: AgentPreset = {
   requireAllowlist: false,
 };
 
-export const AGENT_PRESETS = {
+// Single source of truth for the preset name list. The Zod schema in
+// validators/schemas.ts imports this directly (`z.enum(AGENT_PRESET_NAMES)`),
+// so the validator and the runtime registry can never drift. Adding a new
+// preset is a 2-step change in this file: append the literal here, then
+// add the matching `AGENT_PRESETS` entry — TS won't compile until both
+// are done.
+export const AGENT_PRESET_NAMES = ['payment-agent', 'treasury-agent'] as const;
+
+export type AgentPresetName = (typeof AGENT_PRESET_NAMES)[number];
+
+export const AGENT_PRESETS: Record<AgentPresetName, AgentPreset> = {
   'payment-agent': PAYMENT_AGENT,
   'treasury-agent': TREASURY_AGENT,
-} as const satisfies Record<string, AgentPreset>;
-
-export type AgentPresetName = keyof typeof AGENT_PRESETS;
-
-export const AGENT_PRESET_NAMES = Object.keys(AGENT_PRESETS) as readonly AgentPresetName[];
+};
 
 export function getPreset(name: string): AgentPreset | null {
   if (!Object.hasOwn(AGENT_PRESETS, name)) return null;

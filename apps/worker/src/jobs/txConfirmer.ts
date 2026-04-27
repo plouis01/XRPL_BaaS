@@ -899,9 +899,20 @@ export async function applyAgentGrantOutcome(
     .returning({ id: schema.agents.id });
 
   if (updated.length === 0) {
-    log.debug(
-      { delegateAddress, isSuccess },
-      'no pending agents row for this grant (noop — standalone delegation or already transitioned)',
+    // Two known-safe causes:
+    //   - already-transitioned: a duplicate confirmer run after the row
+    //     was flipped on a prior pass (row.status !== 'pending' anymore)
+    //   - standalone grantPermission: a non-agent code path called
+    //     permission.service directly without inserting an `agents` row
+    //
+    // The second case is contractual today (only provisionAgent calls
+    // grantPermission with this requestBody.op). If a future call site
+    // breaks that invariant, this warn is the one breadcrumb that
+    // explains why a pending agent never flipped — silent debug logs
+    // would make the bug effectively invisible.
+    log.warn(
+      { delegateAddress, isSuccess, txId },
+      'agent grant outcome: no pending agents row matched — already transitioned, or a non-agent grantPermission call site exists (verify provisionAgent invariant)',
     );
     return;
   }
