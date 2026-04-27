@@ -11,6 +11,7 @@
 
 import { zValidator } from '@hono/zod-validator';
 import { Hono } from 'hono';
+import { requireNotAgent } from '../middleware/agentScope.ts';
 import {
   PaymentServiceError,
   cancelEscrow,
@@ -96,7 +97,11 @@ payments.get('/:id', async (c) => {
   });
 });
 
-payments.post('/escrows', zValidator('json', createEscrowSchema), async (c) => {
+// Escrow + batch endpoints reject agent-bound API keys at the route layer
+// (see middleware/agentScope.ts). authorizeAgentPayment is wired only into
+// the simple `POST /` payment path; without these per-route guards, an
+// agent could move funds via /escrows or /batch bypassing its allowlist.
+payments.post('/escrows', requireNotAgent, zValidator('json', createEscrowSchema), async (c) => {
   const clientId = c.get('clientId');
   const body = c.req.valid('json');
   try {
@@ -121,55 +126,65 @@ payments.post('/escrows', zValidator('json', createEscrowSchema), async (c) => {
   }
 });
 
-payments.post('/escrows/:id/finish', zValidator('json', finishEscrowSchema), async (c) => {
-  const clientId = c.get('clientId');
-  const body = c.req.valid('json');
-  try {
-    const result = await finishEscrow({
-      clientId,
-      source: body.source,
-      owner: body.owner,
-      offerSequence: body.offer_sequence,
-      condition: body.condition,
-      fulfillment: body.fulfillment,
-      idempotencyKey: c.req.header('idempotency-key'),
-    });
-    return c.json({ tx_id: result.txId, status: 'queued' }, 202);
-  } catch (err) {
-    if (err instanceof PaymentServiceError) {
-      const r = paymentErrorResponse(err);
-      return c.json({ error: r.error }, r.status);
+payments.post(
+  '/escrows/:id/finish',
+  requireNotAgent,
+  zValidator('json', finishEscrowSchema),
+  async (c) => {
+    const clientId = c.get('clientId');
+    const body = c.req.valid('json');
+    try {
+      const result = await finishEscrow({
+        clientId,
+        source: body.source,
+        owner: body.owner,
+        offerSequence: body.offer_sequence,
+        condition: body.condition,
+        fulfillment: body.fulfillment,
+        idempotencyKey: c.req.header('idempotency-key'),
+      });
+      return c.json({ tx_id: result.txId, status: 'queued' }, 202);
+    } catch (err) {
+      if (err instanceof PaymentServiceError) {
+        const r = paymentErrorResponse(err);
+        return c.json({ error: r.error }, r.status);
+      }
+      throw err;
     }
-    throw err;
-  }
-});
+  },
+);
 
-payments.post('/escrows/:id/cancel', zValidator('json', cancelEscrowSchema), async (c) => {
-  const clientId = c.get('clientId');
-  const body = c.req.valid('json');
-  try {
-    const result = await cancelEscrow({
-      clientId,
-      source: body.source,
-      owner: body.owner,
-      offerSequence: body.offer_sequence,
-      idempotencyKey: c.req.header('idempotency-key'),
-    });
-    return c.json({ tx_id: result.txId, status: 'queued' }, 202);
-  } catch (err) {
-    if (err instanceof PaymentServiceError) {
-      const r = paymentErrorResponse(err);
-      return c.json({ error: r.error }, r.status);
+payments.post(
+  '/escrows/:id/cancel',
+  requireNotAgent,
+  zValidator('json', cancelEscrowSchema),
+  async (c) => {
+    const clientId = c.get('clientId');
+    const body = c.req.valid('json');
+    try {
+      const result = await cancelEscrow({
+        clientId,
+        source: body.source,
+        owner: body.owner,
+        offerSequence: body.offer_sequence,
+        idempotencyKey: c.req.header('idempotency-key'),
+      });
+      return c.json({ tx_id: result.txId, status: 'queued' }, 202);
+    } catch (err) {
+      if (err instanceof PaymentServiceError) {
+        const r = paymentErrorResponse(err);
+        return c.json({ error: r.error }, r.status);
+      }
+      throw err;
     }
-    throw err;
-  }
-});
+  },
+);
 
 // Batch payments — pre-XLS-56 sequential fallback. Supports UNTIL_FAILURE
 // (default) and INDEPENDENT. ALL_OR_NOTHING and ONLY_ONE are explicitly
 // rejected at the schema layer; the service only accepts the two modes
 // that can be faithfully emulated without atomic on-chain batching.
-payments.post('/batch', zValidator('json', batchPaymentsSchema), async (c) => {
+payments.post('/batch', requireNotAgent, zValidator('json', batchPaymentsSchema), async (c) => {
   const clientId = c.get('clientId');
   const body = c.req.valid('json');
 

@@ -1,6 +1,7 @@
 import { Hono } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
 import { logger } from './logger.ts';
+import { requireNotAgent } from './middleware/agentScope.ts';
 import { auditLog } from './middleware/auditLog.ts';
 import { auth } from './middleware/auth.ts';
 import { corsMiddleware } from './middleware/cors.ts';
@@ -88,6 +89,23 @@ v1.use('*', revocationCheck);
 v1.use('*', rateLimit);
 v1.use('*', idempotency);
 v1.use('*', auditLog);
+
+// Agent-scope gate (see middleware/agentScope.ts). Agents are payment-only:
+// every router below EXCEPT /payments rejects agent-bound API keys at the
+// route layer (fail-closed). /payments still accepts agents and gates them
+// at the service layer via authorizeAgentPayment, but its escrow + batch
+// sub-paths apply requireNotAgent per-route inside payments.ts. Mounted
+// here, before the routers, so every new non-payment surface inherits the
+// gate by default — adding a future router that should accept agents is
+// the explicit-opt-in path.
+v1.use('/accounts/*', requireNotAgent);
+v1.use('/agents/*', requireNotAgent);
+v1.use('/tokens/*', requireNotAgent);
+v1.use('/credentials/*', requireNotAgent);
+v1.use('/permissions/*', requireNotAgent);
+v1.use('/domains/*', requireNotAgent);
+v1.use('/dex/*', requireNotAgent);
+v1.use('/webhooks/*', requireNotAgent);
 
 v1.route('/accounts', accountsRoute);
 v1.route('/agents', agentsRoute);

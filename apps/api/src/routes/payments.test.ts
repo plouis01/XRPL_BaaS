@@ -47,13 +47,14 @@ const { PaymentServiceError } = await import('../services/payment.service.ts');
 const VALID_SRC = 'rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh';
 const VALID_DST = 'rPT1Sjq2YGrBMTttX4GZHjKu9dyfzbpAYe';
 
-function makeApp(): Hono<AppEnv> {
+function makeApp(opts: { agentId?: string } = {}): Hono<AppEnv> {
   const app = new Hono<AppEnv>();
   app.use('*', async (c, next) => {
     c.set('clientId', 'client-1');
     c.set('apiKeyId', 'key-1');
     c.set('rateLimit', 100);
     c.set('environment', 'testnet');
+    if (opts.agentId) c.set('agentId', opts.agentId);
     await next();
   });
   app.route('/payments', paymentsRoute);
@@ -317,4 +318,53 @@ describe('POST /payments/batch (XLS-56 sequential fallback)', () => {
 
     expect(res.status).toBe(400);
   });
+});
+
+// Agent-scope route gates. The simple `POST /payments` is permitted (the
+// service layer runs authorizeAgentPayment), but every other state-changing
+// path under /payments must reject agent-bound keys at the route layer
+// because none of them call authorizeAgentPayment — without this, an
+// agent could move funds via /escrows or /batch bypassing its allowlist.
+describe('agent-bound API keys (requireNotAgent)', () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it('POST /payments still accepts agent keys (gated at service layer)', async () => {
+    mockSendPayment.mockResolvedValue({ txId: 'tx-agent-1' });
+    const app = makeApp({ agentId: 'agent-uuid-1' });
+    const res = await app.request('/payments', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        source: VALID_SRC,
+        destination: VALID_DST,
+        amount_drops: '1000000',
+      }),
+    });
+    expect(res.status).toBe(202);
+    expect(mockSendPayment).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ['/payments/escrows', () => mockCreateEscrow],
+    ['/payments/escrows/some-id/finish', () => mockFinishEscrow],
+    ['/payments/escrows/some-id/cancel', () => mockCancelEscrow],
+    ['/payments/batch', () => mockSendBatchPayments],
+  ] as const)(
+    'POST %s rejects agent keys with 403 (handler not invoked)',
+    async (path, getMock) => {
+      const app = makeApp({ agentId: 'agent-uuid-1' });
+      const res = await app.request(path, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        // Body intentionally minimal — the request must short-circuit at the
+        // requireNotAgent gate, before zValidator runs. If validation ran
+        // first we'd see a 400, not the expected 403.
+        body: JSON.stringify({}),
+      });
+      expect(res.status).toBe(403);
+      expect(getMock()).not.toHaveBeenCalled();
+      const body = (await res.json()) as { error: string };
+      expect(body.error).toBe('Forbidden');
+    },
+  );
 });
