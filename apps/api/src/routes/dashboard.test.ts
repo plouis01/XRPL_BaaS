@@ -125,6 +125,7 @@ vi.mock('@railforge/db', () => ({
       isActive: {},
       createdAt: {},
       revokedAt: {},
+      agentId: {},
     },
     transactions: {
       __tableName: 'transactions',
@@ -173,6 +174,17 @@ vi.mock('@railforge/db', () => ({
       label: {},
       custodyMode: {},
       isFunded: {},
+      createdAt: {},
+    },
+    agents: {
+      __tableName: 'agents',
+      id: {},
+      clientId: {},
+      parentAccountId: {},
+      agentAddress: {},
+      preset: {},
+      label: {},
+      status: {},
       createdAt: {},
     },
     domains: {
@@ -447,6 +459,55 @@ describe('GET /dashboard/accounts', () => {
   });
 });
 
+describe('GET /dashboard/agents', () => {
+  it('400 when environment param missing', async () => {
+    const app = makeApp();
+    const res = await app.request('/dashboard/agents');
+    expect(res.status).toBe(400);
+  });
+
+  it('empty data when client has no key in selected env', async () => {
+    nextKeyCheckRows = [];
+    const app = makeApp();
+    const res = await app.request('/dashboard/agents?environment=mainnet');
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as { data: unknown[] }).data).toEqual([]);
+  });
+
+  it('returns mapped agent rows joined with parent address (no agent_seed leak)', async () => {
+    nextKeyCheckRows = [{ id: 'k1' }];
+    nextRows = [
+      {
+        id: 'agent-1',
+        preset: 'payment-agent',
+        parentAddress: 'rParentAddress',
+        agentAddress: 'rAgentAddress',
+        label: 'invoice-bot',
+        status: 'active',
+        createdAt: new Date('2026-04-27'),
+      },
+    ];
+    const app = makeApp();
+    const res = await app.request('/dashboard/agents?environment=testnet');
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      data: Array<Record<string, unknown>>;
+    };
+    expect(body.data).toHaveLength(1);
+    expect(body.data[0]).toEqual(
+      expect.objectContaining({
+        id: 'agent-1',
+        preset: 'payment-agent',
+        parent_address: 'rParentAddress',
+        agent_address: 'rAgentAddress',
+        status: 'active',
+      }),
+    );
+    // Critical: dashboard list never carries the seed.
+    expect('agent_seed' in (body.data[0] ?? {})).toBe(false);
+  });
+});
+
 describe('GET /dashboard/keys', () => {
   it('400 when environment param missing', async () => {
     const app = makeApp();
@@ -578,6 +639,102 @@ describe('POST /dashboard/keys', () => {
       body: 'not-json',
     });
     expect(res.status).toBe(400);
+  });
+
+  // Agent-binding (Part 2 of the agent launcher follow-up). When the
+  // POST body includes agent_id, the handler validates the agent exists,
+  // belongs to the same client, and isn't revoked/failed; then threads
+  // agent_id into the api_keys insert so the auth middleware can later
+  // resolve the binding into c.get('agentId').
+  const VALID_AGENT_ID = '11111111-2222-4333-8444-555555555555';
+
+  it('binds agent_id when the agent exists and is not revoked', async () => {
+    nextRows = [{ id: VALID_AGENT_ID, status: 'pending' }];
+    nextInsertReturning = [
+      {
+        id: 'k-bound',
+        prefix: 'rf_test_',
+        environment: 'testnet',
+        isActive: true,
+        createdAt: new Date('2026-04-27'),
+        agentId: VALID_AGENT_ID,
+      },
+    ];
+    const app = makeApp();
+    const res = await app.request('/dashboard/keys', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        environment: 'testnet',
+        agent_id: VALID_AGENT_ID,
+      }),
+    });
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as { agent_id: string };
+    expect(body.agent_id).toBe(VALID_AGENT_ID);
+
+    // The insert was called with the agent id threaded through.
+    const keyRow = insertCalls.find((c) => c.table === 'api_keys');
+    const vals = keyRow?.values as Record<string, unknown>;
+    expect(vals.agentId).toBe(VALID_AGENT_ID);
+  });
+
+  it('404 when agent_id does not match an agent owned by the caller', async () => {
+    nextRows = []; // no agent row
+    const app = makeApp();
+    const res = await app.request('/dashboard/keys', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        environment: 'testnet',
+        agent_id: VALID_AGENT_ID,
+      }),
+    });
+    expect(res.status).toBe(404);
+    expect(insertCalls.find((c) => c.table === 'api_keys')).toBeUndefined();
+  });
+
+  it("409 when agent_id resolves to an agent in status='revoked'", async () => {
+    nextRows = [{ id: VALID_AGENT_ID, status: 'revoked' }];
+    const app = makeApp();
+    const res = await app.request('/dashboard/keys', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        environment: 'testnet',
+        agent_id: VALID_AGENT_ID,
+      }),
+    });
+    expect(res.status).toBe(409);
+    expect(insertCalls.find((c) => c.table === 'api_keys')).toBeUndefined();
+  });
+
+  it("409 when agent_id resolves to an agent in status='failed'", async () => {
+    nextRows = [{ id: VALID_AGENT_ID, status: 'failed' }];
+    const app = makeApp();
+    const res = await app.request('/dashboard/keys', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        environment: 'testnet',
+        agent_id: VALID_AGENT_ID,
+      }),
+    });
+    expect(res.status).toBe(409);
+  });
+
+  it('400 on malformed agent_id (not a UUID)', async () => {
+    const app = makeApp();
+    const res = await app.request('/dashboard/keys', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        environment: 'testnet',
+        agent_id: 'not-a-uuid',
+      }),
+    });
+    expect(res.status).toBe(400);
+    expect(insertCalls.find((c) => c.table === 'api_keys')).toBeUndefined();
   });
 });
 

@@ -330,6 +330,57 @@ dashboard.get('/accounts', async (c) => {
   });
 });
 
+// GET /agents?environment=X — list the client's agents (powers the
+// dashboard Agents page). Same coarse env gate as /tokens, /credentials,
+// /domains: agents have no environment column (binding lives on the
+// api_keys row), so we confirm the caller has a key in the selected env
+// before returning the full agent list.
+//
+// Shape mirrors the public GET /v1/agents route from agents.ts but joins
+// to accounts so the parent classic address is in the response (avoids a
+// per-row hop for the dashboard). Allowlist + spend_policy are loaded
+// per-row to match the SDK contract.
+dashboard.get('/agents', async (c) => {
+  const clientId = c.get('clientId');
+  const parsed = parseNetworkParam(c.req.query('environment'), 'environment');
+  if (!parsed.ok) return c.json({ error: parsed.error }, 400);
+
+  if (!(await clientHasKeyInEnvironment(clientId, parsed.value))) {
+    return c.json({ data: [] });
+  }
+
+  const rows = await db
+    .select({
+      id: schema.agents.id,
+      preset: schema.agents.preset,
+      parentAddress: schema.accounts.address,
+      agentAddress: schema.agents.agentAddress,
+      label: schema.agents.label,
+      status: schema.agents.status,
+      createdAt: schema.agents.createdAt,
+    })
+    .from(schema.agents)
+    .innerJoin(schema.accounts, eq(schema.agents.parentAccountId, schema.accounts.id))
+    .where(eq(schema.agents.clientId, clientId))
+    .orderBy(desc(schema.agents.createdAt))
+    .limit(200);
+
+  return c.json({
+    data: rows.map((r) => ({
+      id: r.id,
+      preset: r.preset,
+      parent_address: r.parentAddress,
+      agent_address: r.agentAddress,
+      label: r.label,
+      status: r.status,
+      created_at: r.createdAt,
+      // agent_seed deliberately absent; allowlist + spend_policy are
+      // available via the public GET /v1/agents/:id endpoint when the
+      // dashboard expands a row.
+    })),
+  });
+});
+
 // GET /keys?environment=X — list the client's API keys for the selected
 // environment. Key secrets are never returned (they were only shown at
 // creation time). This is the one endpoint where the filter is *inherent*
@@ -347,6 +398,7 @@ dashboard.get('/keys', async (c) => {
       isActive: schema.apiKeys.isActive,
       createdAt: schema.apiKeys.createdAt,
       revokedAt: schema.apiKeys.revokedAt,
+      agentId: schema.apiKeys.agentId,
     })
     .from(schema.apiKeys)
     .where(and(eq(schema.apiKeys.clientId, clientId), eq(schema.apiKeys.environment, parsed.value)))
@@ -360,6 +412,7 @@ dashboard.get('/keys', async (c) => {
       is_active: r.isActive,
       created_at: r.createdAt,
       revoked_at: r.revokedAt,
+      agent_id: r.agentId,
     })),
   });
 });
@@ -369,18 +422,28 @@ dashboard.get('/keys', async (c) => {
 // stores the HMAC-SHA256(pepper, key). The dashboard must copy it out
 // immediately — there is no recovery path if the client loses it.
 //
-// Body: { environment: 'testnet' | 'mainnet', label?: string }.
-// Rate limit: piggybacks on the per-client rateLimit middleware above.
+// Body: { environment, label?, agent_id? }.
+//
+// agent_id (optional): bind the new key to an existing agent. The auth
+// middleware reads `api_keys.agent_id` and sets `c.get('agentId')`, which
+// the agent-scope middleware (requireNotAgent) and payment.service
+// (authorizeAgentPayment) gate against. Without a binding, agents are
+// provisioned but unusable — there's no key that resolves to them.
 const createKeySchema = z.object({
   environment: networkSchema,
   label: z.string().min(1).max(200).optional(),
+  agent_id: z.string().uuid().optional(),
 });
 
 dashboard.post('/keys', async (c) => {
   const clientId = c.get('clientId');
   const callerEnv = c.get('environment');
 
-  let body: { environment: 'testnet' | 'mainnet'; label?: string };
+  let body: {
+    environment: 'testnet' | 'mainnet';
+    label?: string;
+    agent_id?: string;
+  };
   try {
     body = createKeySchema.parse(await c.req.json());
   } catch {
@@ -406,6 +469,34 @@ dashboard.post('/keys', async (c) => {
     );
   }
 
+  // Optional agent binding: validate the agent exists, belongs to this
+  // client, and isn't revoked. Cross-tenant resolution is done at the SQL
+  // level via the (id, clientId) predicate — a row owned by another tenant
+  // returns no match and surfaces as "agent not found".
+  //
+  // Status check: 'pending' agents are bindable on purpose so the caller
+  // can mint a key while the SignerListSet is still validating; the
+  // service-layer authorizeAgentPayment gate will reject payments until
+  // the txConfirmer flips status to 'active'. 'revoked' (future state) is
+  // explicitly rejected so a stale binding can't resurrect a key.
+  if (body.agent_id) {
+    const agentRows = await db
+      .select({
+        id: schema.agents.id,
+        status: schema.agents.status,
+      })
+      .from(schema.agents)
+      .where(and(eq(schema.agents.id, body.agent_id), eq(schema.agents.clientId, clientId)))
+      .limit(1);
+    const agent = agentRows[0];
+    if (!agent) {
+      return c.json({ error: 'Agent not found' }, 404);
+    }
+    if (agent.status === 'revoked' || agent.status === 'failed') {
+      return c.json({ error: `Cannot bind a key to an agent in status '${agent.status}'` }, 409);
+    }
+  }
+
   // Wire format matches the existing `rf_<env>_<random>` convention used
   // across the codebase (see SETUP.md and k6 load-test env). 32 random
   // bytes → 43 base64url chars → ~258 bits of entropy. Prefix tag is
@@ -426,6 +517,7 @@ dashboard.post('/keys', async (c) => {
       label: body.label ?? null,
       environment: body.environment,
       isActive: true,
+      agentId: body.agent_id ?? null,
     })
     .returning({
       id: schema.apiKeys.id,
@@ -433,6 +525,7 @@ dashboard.post('/keys', async (c) => {
       environment: schema.apiKeys.environment,
       isActive: schema.apiKeys.isActive,
       createdAt: schema.apiKeys.createdAt,
+      agentId: schema.apiKeys.agentId,
     });
   const row = inserted[0];
   if (!row) throw new Error('api_keys insert returned no row');
@@ -444,6 +537,7 @@ dashboard.post('/keys', async (c) => {
       environment: row.environment,
       is_active: row.isActive,
       created_at: row.createdAt,
+      agent_id: row.agentId,
       key: rawKey, // ← ONLY returned here. Never re-readable afterward.
     },
     201,
