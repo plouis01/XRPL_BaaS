@@ -48,10 +48,14 @@ export const apiKeys = pgTable('api_keys', {
   // specific agent (sub-account of a managed parent). The auth middleware
   // sets ctx.agentId and the payment / DEX services gate against the
   // agent's allowlist + status. NULL for regular client-scoped keys.
-  // FK added in a later migration once agents exists — defined here as
-  // a plain uuid() to avoid a forward reference; lint/CI still catches
-  // missing agent rows via the service-layer resolve.
-  agentId: uuid('agent_id'),
+  // FK is `() => agents.id` (lazy lambda) because `agents` is declared
+  // further down in this file and a direct reference would be a forward-
+  // reference TDZ error. ON DELETE SET NULL: deleting an agent
+  // un-binds its keys rather than orphaning them or cascading the
+  // deletion to keys (which the auth path would then reject anyway).
+  agentId: uuid('agent_id').references(() => agents.id, {
+    onDelete: 'set null',
+  }),
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
   revokedAt: timestamp('revoked_at', { withTimezone: true }),
 });
