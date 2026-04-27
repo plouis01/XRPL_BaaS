@@ -245,6 +245,19 @@ export async function provisionAgent(input: ProvisionAgentInput): Promise<AgentV
   // master_key_ref) transparently cover it. The agents row joins to it via
   // delegate_account_id in a future migration; for now the link is via
   // unique agent_address + a FK on parent_account_id.
+  // Resolve the spend-policy values up front so the upsert can run inside
+  // the agents transaction (same atomic unit). Caller overrides win; any
+  // field omitted falls back to the preset default. `null` is honored as
+  // "explicitly disable this cap."
+  const maxPerTx =
+    input.spendPolicy?.maxXrpPerTxDrops === undefined
+      ? preset.defaultSpendPolicy.maxXrpPerTxDrops
+      : input.spendPolicy.maxXrpPerTxDrops;
+  const dailyLimit =
+    input.spendPolicy?.dailyXrpLimitDrops === undefined
+      ? preset.defaultSpendPolicy.dailyXrpLimitDrops
+      : input.spendPolicy.dailyXrpLimitDrops;
+
   let agentId: string;
   try {
     agentId = await db.transaction(async (tx) => {
@@ -296,6 +309,34 @@ export async function provisionAgent(input: ProvisionAgentInput): Promise<AgentV
         );
       }
 
+      // Spend-policy upsert is FATAL and runs inside this transaction so a
+      // failure rolls back the agents/accounts rows. Previously this was
+      // wrapped in try/catch and non-fatal — that left a window where the
+      // agent could flip to 'active' on-ledger but have no daily XRP cap,
+      // silently degrading to "no policy" (security regression). Doing it
+      // here, before grantPermission queues any on-ledger work, means a
+      // failure leaves no SignerListSet in flight and no orphaned-active
+      // agent on retry. VISION.md notes spend_policies grows a nullable
+      // agent_id column in a later migration; until then, the policy is
+      // installed at client scope.
+      await tx
+        .insert(schema.spendPolicies)
+        .values({
+          clientId: input.clientId,
+          maxXrpPerTxDrops: maxPerTx,
+          dailyXrpLimitDrops: dailyLimit,
+          isActive: true,
+        })
+        .onConflictDoUpdate({
+          target: schema.spendPolicies.clientId,
+          set: {
+            maxXrpPerTxDrops: maxPerTx,
+            dailyXrpLimitDrops: dailyLimit,
+            isActive: true,
+            updatedAt: new Date(),
+          },
+        });
+
       return agentRow.id;
     });
   } catch (err) {
@@ -308,7 +349,11 @@ export async function provisionAgent(input: ProvisionAgentInput): Promise<AgentV
     ) {
       throw new AgentServiceError('db_conflict', 'Agent address collision (retry)');
     }
-    throw err;
+    log.error(
+      { err: err instanceof Error ? err.message : String(err) },
+      'agent provisioning transaction failed (rolled back, no on-ledger work)',
+    );
+    throw new AgentServiceError('db_conflict', 'Failed to persist agent state — please retry');
   }
 
   // 5. Grant the delegate on-ledger authority via permission.service ----------
@@ -341,50 +386,9 @@ export async function provisionAgent(input: ProvisionAgentInput): Promise<AgentV
   }
 
   // 6. Back-fill delegation_id on the agents row ------------------------------
+  // The spend-policy upsert was hoisted into the agents transaction above
+  // (was step 7) so it can no longer leave the agent without a daily cap.
   await db.update(schema.agents).set({ delegationId }).where(eq(schema.agents.id, agentId));
-
-  // 7. Upsert the per-client spend policy -------------------------------------
-  // VISION.md notes that spend_policies grows a nullable agent_id column in a
-  // later migration (so caps can be per-agent rather than per-client). Until
-  // that lands, the policy is installed at the client scope — the caller is
-  // expected to provision agents for well-scoped clients, and the preset
-  // default is the ceiling for all agents of that client.
-  const maxPerTx =
-    input.spendPolicy?.maxXrpPerTxDrops === undefined
-      ? preset.defaultSpendPolicy.maxXrpPerTxDrops
-      : input.spendPolicy.maxXrpPerTxDrops;
-  const dailyLimit =
-    input.spendPolicy?.dailyXrpLimitDrops === undefined
-      ? preset.defaultSpendPolicy.dailyXrpLimitDrops
-      : input.spendPolicy.dailyXrpLimitDrops;
-
-  try {
-    await db
-      .insert(schema.spendPolicies)
-      .values({
-        clientId: input.clientId,
-        maxXrpPerTxDrops: maxPerTx,
-        dailyXrpLimitDrops: dailyLimit,
-        isActive: true,
-      })
-      .onConflictDoUpdate({
-        target: schema.spendPolicies.clientId,
-        set: {
-          maxXrpPerTxDrops: maxPerTx,
-          dailyXrpLimitDrops: dailyLimit,
-          isActive: true,
-          updatedAt: new Date(),
-        },
-      });
-  } catch (err) {
-    log.warn(
-      { err: err instanceof Error ? err.message : String(err) },
-      'spend policy upsert failed — agent provisioned but policy absent',
-    );
-    // Deliberately non-fatal: the agent row + signer list are already in
-    // flight. Missing policy degrades to "no daily cap" which is the same
-    // as no-policy clients. Ops should alert on repeated failures here.
-  }
 
   log.info({ agentId, parent: parent.address, grantTxId }, 'agent provisioned');
 

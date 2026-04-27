@@ -23,8 +23,9 @@ const dbInsertResults: Record<string, unknown[]> = {
   spend_policies: [],
 };
 // Side-channel: tests can set an error here to make the next insert/upsert
-// for a given table throw (used to exercise the non-fatal spend-policy
-// upsert branch in provisionAgent).
+// for a given table throw (used to exercise the fatal spend-policy upsert
+// branch in provisionAgent — failure inside the tx must roll back the
+// whole provision before grantPermission runs).
 const dbInsertErrors: Record<string, Error> = {};
 // FIFO queue for agent_allowlists results — `authorizeAgentPayment` calls
 // `isAllowlisted` twice (destination, then token) through the SAME query
@@ -362,34 +363,36 @@ describe('provisionAgent — happy path', () => {
     expect(result.spend_policy.daily_xrp_limit_drops).toBe('50000000');
   });
 
-  // agent.service.ts:379-387 — the spend-policy upsert is wrapped in try/catch
-  // and explicitly non-fatal: by the time we reach it, the agent row + signer
-  // list are already in flight, so a failed policy upsert degrades to "no
-  // daily cap" rather than orphaning the agent. This test pins that behavior.
-  it('non-fatal: when spend-policy upsert throws, provisioning still completes', async () => {
+  // Spend-policy upsert is FATAL and runs inside the same transaction as the
+  // agents/accounts inserts. Previously this was wrapped in try/catch and
+  // non-fatal — that left a window where the agent flipped to 'active' on-
+  // ledger with no daily XRP cap (security regression). Failing fatally
+  // before grantPermission queues any on-ledger work means a policy-insert
+  // failure leaves nothing in flight on retry.
+  it('fatal: spend-policy upsert failure aborts provisioning before grantPermission runs', async () => {
     seedFundedParent();
     dbInsertErrors.spend_policies = new Error('connection reset by peer');
 
-    const result = await provisionAgent({
-      clientId: CLIENT_ID,
-      preset: 'payment-agent',
-      parentAddress: PARENT_ADDRESS,
-      allowlist: [{ entry_type: 'destination', entry_value: OTHER_DESTINATION }],
+    await expect(
+      provisionAgent({
+        clientId: CLIENT_ID,
+        preset: 'payment-agent',
+        parentAddress: PARENT_ADDRESS,
+        allowlist: [{ entry_type: 'destination', entry_value: OTHER_DESTINATION }],
+      }),
+    ).rejects.toMatchObject({
+      name: 'AgentServiceError',
+      code: 'db_conflict',
     });
 
-    expect(result.id).toBe('agent-1');
-    expect(result.status).toBe('pending');
-    expect(result.grant_tx_id).toBe('grant-tx-1');
-
-    // Response surfaces the resolved policy values even though the row didn't
-    // persist — better than hiding intent; ops alerts on the warn log are the
-    // recovery channel.
-    expect(result.spend_policy.max_xrp_per_tx_drops).toBe('10000000');
-    expect(result.spend_policy.daily_xrp_limit_drops).toBe('100000000');
-
-    // The upsert *was* attempted (so the failure is from the right call site,
+    // The upsert was attempted (so the failure is from the right call site,
     // not a missed branch above it).
     expect(dbInsertCalls.some((c) => c.table === 'spend_policies')).toBe(true);
+
+    // Critical invariant: NO on-ledger work was kicked off. If
+    // grantPermission ran, the SignerListSet would still validate even
+    // though the caller failed, leaving an orphaned active agent.
+    expect(grantPermissionMock).not.toHaveBeenCalled();
   });
 });
 
