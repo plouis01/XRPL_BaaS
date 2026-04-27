@@ -104,11 +104,17 @@ export interface AgentView {
   /**
    * Delegate seed — returned EXACTLY ONCE in the provisioning response so
    * the caller can load it into their agent runtime. Never returned by GET
-   * endpoints. Redacted at the logger level; do not add it to log lines.
+   * endpoints (getAgent / listAgents construct AgentView WITHOUT this
+   * field). Redacted at the logger level; do not add it to log lines.
    */
   agent_seed?: string;
-  /** ID of the SignerListSet tx that grants the agent on-ledger authority. */
-  grant_tx_id: string;
+  /**
+   * ID of the SignerListSet tx that grants the agent on-ledger authority.
+   * Set on POST /agents response only. GET endpoints omit this (caller can
+   * filter /transactions by type=SignerListSet + source=parent_address if
+   * they need the tx).
+   */
+  grant_tx_id?: string;
 }
 
 // ── Allowlist validation ─────────────────────────────────────────────────────
@@ -531,4 +537,141 @@ export async function authorizeAgentPayment(input: AuthorizePaymentInput): Promi
       );
     }
   }
+}
+
+// ── Read endpoints (GET /v1/agents, GET /v1/agents/:id) ─────────────────────
+// Both functions assemble an AgentView WITHOUT `agent_seed` and WITHOUT
+// `grant_tx_id`. The seed contract is critical: the seed lives only in
+// `accounts.master_key_ref` after provisioning and must never surface on a
+// read path. The shape stays consistent with provisionAgent's response so
+// the SDK can use one type.
+//
+// Spend policy is currently per-client (VISION.md notes a future migration
+// adds an agent_id column). Both reads pull spend_policies by clientId; if
+// no row exists, the agent surfaces with null caps — the same shape the
+// preset would produce when both fields are explicitly disabled.
+
+interface AgentJoinedRow {
+  id: string;
+  preset: string;
+  parentAddress: string;
+  agentAddress: string;
+  label: string | null;
+  status: string;
+  createdAt: Date | null;
+}
+
+async function loadAllowlist(agentId: string): Promise<AgentAllowlistInput[]> {
+  const rows = await db
+    .select({
+      entryType: schema.agentAllowlists.entryType,
+      entryValue: schema.agentAllowlists.entryValue,
+    })
+    .from(schema.agentAllowlists)
+    .where(eq(schema.agentAllowlists.agentId, agentId));
+  return rows.map((r) => ({
+    entry_type: r.entryType as AgentAllowlistEntryType,
+    entry_value: r.entryValue,
+  }));
+}
+
+async function loadSpendPolicy(clientId: string): Promise<{
+  max_xrp_per_tx_drops: string | null;
+  daily_xrp_limit_drops: string | null;
+}> {
+  const rows = await db
+    .select({
+      maxXrpPerTxDrops: schema.spendPolicies.maxXrpPerTxDrops,
+      dailyXrpLimitDrops: schema.spendPolicies.dailyXrpLimitDrops,
+      isActive: schema.spendPolicies.isActive,
+    })
+    .from(schema.spendPolicies)
+    .where(eq(schema.spendPolicies.clientId, clientId))
+    .limit(1);
+  const row = rows[0];
+  // No row, or row exists but is_active=false → no caps. Caller sees null/null
+  // and can interpret that as "no cap installed" exactly like a preset that
+  // disabled both fields.
+  if (!row || !row.isActive) {
+    return { max_xrp_per_tx_drops: null, daily_xrp_limit_drops: null };
+  }
+  return {
+    max_xrp_per_tx_drops: row.maxXrpPerTxDrops,
+    daily_xrp_limit_drops: row.dailyXrpLimitDrops,
+  };
+}
+
+function rowToView(
+  row: AgentJoinedRow,
+  allowlist: AgentAllowlistInput[],
+  spendPolicy: {
+    max_xrp_per_tx_drops: string | null;
+    daily_xrp_limit_drops: string | null;
+  },
+): AgentView {
+  return {
+    id: row.id,
+    preset: row.preset,
+    parent_address: row.parentAddress,
+    agent_address: row.agentAddress,
+    label: row.label,
+    status: row.status,
+    allowlist,
+    spend_policy: spendPolicy,
+    created_at: row.createdAt,
+    // agent_seed deliberately omitted — never returned on GET.
+    // grant_tx_id deliberately omitted — only on POST response.
+  };
+}
+
+export async function getAgent(clientId: string, agentId: string): Promise<AgentView | null> {
+  const rows = await db
+    .select({
+      id: schema.agents.id,
+      preset: schema.agents.preset,
+      parentAddress: schema.accounts.address,
+      agentAddress: schema.agents.agentAddress,
+      label: schema.agents.label,
+      status: schema.agents.status,
+      createdAt: schema.agents.createdAt,
+    })
+    .from(schema.agents)
+    .innerJoin(schema.accounts, eq(schema.agents.parentAccountId, schema.accounts.id))
+    .where(and(eq(schema.agents.clientId, clientId), eq(schema.agents.id, agentId)))
+    .limit(1);
+  const row = rows[0];
+  if (!row) return null;
+  const [allowlist, spendPolicy] = await Promise.all([
+    loadAllowlist(row.id),
+    loadSpendPolicy(clientId),
+  ]);
+  return rowToView(row, allowlist, spendPolicy);
+}
+
+export async function listAgents(clientId: string): Promise<AgentView[]> {
+  const rows = await db
+    .select({
+      id: schema.agents.id,
+      preset: schema.agents.preset,
+      parentAddress: schema.accounts.address,
+      agentAddress: schema.agents.agentAddress,
+      label: schema.agents.label,
+      status: schema.agents.status,
+      createdAt: schema.agents.createdAt,
+    })
+    .from(schema.agents)
+    .innerJoin(schema.accounts, eq(schema.agents.parentAccountId, schema.accounts.id))
+    .where(eq(schema.agents.clientId, clientId))
+    .limit(200);
+  // Spend policy is currently shared across all agents of a client, so one
+  // load instead of per-row. Allowlist is per-agent — sequential, since
+  // tenants typically have a handful of agents (parallelizing would just
+  // hammer Postgres for marginal gains and complicate error handling).
+  const spendPolicy = await loadSpendPolicy(clientId);
+  const views: AgentView[] = [];
+  for (const row of rows) {
+    const allowlist = await loadAllowlist(row.id);
+    views.push(rowToView(row, allowlist, spendPolicy));
+  }
+  return views;
 }

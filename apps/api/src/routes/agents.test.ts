@@ -10,9 +10,13 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AppEnv } from '../types.ts';
 
 const mockProvisionAgent = vi.fn();
+const mockGetAgent = vi.fn();
+const mockListAgents = vi.fn();
 
 vi.mock('../services/agent.service.ts', () => ({
   provisionAgent: (...args: unknown[]) => mockProvisionAgent(...args),
+  getAgent: (...args: unknown[]) => mockGetAgent(...args),
+  listAgents: (...args: unknown[]) => mockListAgents(...args),
   AgentServiceError: class AgentServiceError extends Error {
     constructor(
       public readonly code: string,
@@ -270,5 +274,99 @@ describe('POST /agents — service-error mapping', () => {
       body: JSON.stringify(bareValidBody()),
     });
     expect(res.status).toBe(500);
+  });
+});
+
+const VALID_AGENT_ID = '11111111-2222-4333-8444-555555555555';
+
+function viewWithoutSeed() {
+  return {
+    id: VALID_AGENT_ID,
+    preset: 'payment-agent',
+    parent_address: VALID_PARENT,
+    agent_address: 'rAGENT00000000000000000000000',
+    label: 'invoice-bot',
+    status: 'active',
+    allowlist: [{ entry_type: 'destination', entry_value: VALID_DEST }],
+    spend_policy: {
+      max_xrp_per_tx_drops: '10000000',
+      daily_xrp_limit_drops: '100000000',
+    },
+    created_at: new Date('2026-04-27T00:00:00Z'),
+    // No agent_seed, no grant_tx_id — read-path contract.
+  };
+}
+
+describe('GET /agents/:id', () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it('400 on malformed agent id (not a UUID)', async () => {
+    const app = makeApp();
+    const res = await app.request('/agents/not-a-uuid');
+    expect(res.status).toBe(400);
+    expect(mockGetAgent).not.toHaveBeenCalled();
+  });
+
+  it('404 when the agent does not belong to the client', async () => {
+    mockGetAgent.mockResolvedValue(null);
+    const app = makeApp();
+    const res = await app.request(`/agents/${VALID_AGENT_ID}`);
+    expect(res.status).toBe(404);
+    // The service is responsible for cross-tenant scoping — the route
+    // simply maps null → 404. Confirm we passed the auth'd clientId in.
+    expect(mockGetAgent).toHaveBeenCalledTimes(1);
+    expect(mockGetAgent.mock.calls[0]?.[0]).toBe('client-1');
+  });
+
+  it('200 returns the AgentView with no agent_seed', async () => {
+    mockGetAgent.mockResolvedValue(viewWithoutSeed());
+    const app = makeApp();
+    const res = await app.request(`/agents/${VALID_AGENT_ID}`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.id).toBe(VALID_AGENT_ID);
+    expect(body.status).toBe('active');
+    expect('agent_seed' in body).toBe(false);
+    expect('grant_tx_id' in body).toBe(false);
+  });
+});
+
+describe('GET /agents (list)', () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it('200 with empty data array when client has no agents', async () => {
+    mockListAgents.mockResolvedValue([]);
+    const app = makeApp();
+    const res = await app.request('/agents');
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { data: unknown[] };
+    expect(body.data).toEqual([]);
+  });
+
+  it('200 with mapped views, none containing agent_seed', async () => {
+    mockListAgents.mockResolvedValue([
+      viewWithoutSeed(),
+      {
+        ...viewWithoutSeed(),
+        id: '22222222-2222-4333-8444-555555555555',
+        status: 'pending',
+      },
+    ]);
+    const app = makeApp();
+    const res = await app.request('/agents');
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      data: Array<Record<string, unknown>>;
+    };
+    expect(body.data).toHaveLength(2);
+    expect(body.data[0]?.status).toBe('active');
+    expect(body.data[1]?.status).toBe('pending');
+    for (const view of body.data) {
+      expect('agent_seed' in view).toBe(false);
+      expect('grant_tx_id' in view).toBe(false);
+    }
+    // Confirm we passed the auth'd clientId.
+    expect(mockListAgents).toHaveBeenCalledTimes(1);
+    expect(mockListAgents.mock.calls[0]?.[0]).toBe('client-1');
   });
 });

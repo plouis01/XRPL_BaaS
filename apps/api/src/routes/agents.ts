@@ -1,16 +1,23 @@
 // Agent launcher routes (VISION.md).
 //
-// POST /v1/agents — one-shot provisioning: generate delegate keypair,
-// grant on-ledger authority on the parent account, install per-client spend
-// policy, insert destination/token/domain allowlist. Returns the delegate
-// seed EXACTLY ONCE — subsequent GETs never include it.
+// POST   /v1/agents       — one-shot provisioning: generate delegate keypair,
+//                            grant on-ledger authority, install spend policy,
+//                            insert allowlist. Returns the delegate seed
+//                            EXACTLY ONCE — subsequent GETs never include it.
+// GET    /v1/agents       — list agents for the authenticated client.
+// GET    /v1/agents/:id   — single agent. Used by callers polling for the
+//                            'pending' → 'active' transition after POST.
 //
-// Only POST is exposed in this first cut; GET/PUT/DELETE come in the
-// follow-up described in VISION.md "One-week MVP".
+// PUT/DELETE come in a follow-up (VISION.md "One-week MVP").
 
 import { zValidator } from '@hono/zod-validator';
 import { Hono } from 'hono';
-import { AgentServiceError, provisionAgent } from '../services/agent.service.ts';
+import {
+  AgentServiceError,
+  getAgent,
+  listAgents,
+  provisionAgent,
+} from '../services/agent.service.ts';
 import type { AppEnv } from '../types.ts';
 import { provisionAgentSchema } from '../validators/schemas.ts';
 
@@ -76,6 +83,29 @@ agents.post('/', zValidator('json', provisionAgentSchema), async (c) => {
     }
     throw err;
   }
+});
+
+// UUID v4 shape — same check as dashboard.ts /transactions/:id. Prevents a
+// malformed id from reaching Drizzle (Postgres throws on bad uuid casts).
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+agents.get('/', async (c) => {
+  const clientId = c.get('clientId');
+  const data = await listAgents(clientId);
+  return c.json({ data });
+});
+
+agents.get('/:id', async (c) => {
+  const clientId = c.get('clientId');
+  const id = c.req.param('id');
+  if (!UUID_RE.test(id)) {
+    return c.json({ error: 'invalid agent id' }, 400);
+  }
+  const agent = await getAgent(clientId, id);
+  if (!agent) {
+    return c.json({ error: 'Agent not found' }, 404);
+  }
+  return c.json(agent);
 });
 
 export default agents;

@@ -145,7 +145,7 @@ vi.mock('../logger.ts', () => ({
 }));
 
 // Import AFTER mocks are registered.
-import { authorizeAgentPayment, provisionAgent } from './agent.service.ts';
+import { authorizeAgentPayment, getAgent, listAgents, provisionAgent } from './agent.service.ts';
 
 // ── Fixtures & helpers ──────────────────────────────────────────────────────
 
@@ -549,5 +549,134 @@ describe('authorizeAgentPayment', () => {
       name: 'AgentServiceError',
       code: 'token_not_allowlisted',
     });
+  });
+});
+
+// ── getAgent / listAgents ──────────────────────────────────────────────────
+// Read endpoints. Both functions must construct AgentView WITHOUT
+// `agent_seed` and WITHOUT `grant_tx_id` — that contract is critical
+// (the seed lives only in accounts.master_key_ref after provisioning;
+// the grant tx id is a POST-response detail).
+
+const SAMPLE_AGENT_ROW = {
+  id: 'agent-uuid-1',
+  preset: 'payment-agent',
+  parentAddress: PARENT_ADDRESS,
+  agentAddress: 'rAGENT00000000000000000000000',
+  label: 'invoice-bot',
+  status: 'active',
+  createdAt: new Date('2026-04-27T00:00:00Z'),
+};
+
+describe('getAgent', () => {
+  it('returns null when the agent row is missing or wrong tenant', async () => {
+    dbSelectResults.agents_joined = []; // join produces no row
+    const result = await getAgent(CLIENT_ID, 'agent-uuid-1');
+    expect(result).toBeNull();
+  });
+
+  it('returns the AgentView WITHOUT agent_seed or grant_tx_id', async () => {
+    dbSelectResults.agents_joined = [SAMPLE_AGENT_ROW];
+    dbSelectResults.agent_allowlists = [
+      { entryType: 'destination', entryValue: OTHER_DESTINATION },
+    ];
+    dbSelectResults.spend_policies = [
+      {
+        maxXrpPerTxDrops: '10000000',
+        dailyXrpLimitDrops: '100000000',
+        isActive: true,
+      },
+    ];
+
+    const result = await getAgent(CLIENT_ID, 'agent-uuid-1');
+
+    expect(result).not.toBeNull();
+    if (!result) throw new Error('unreachable');
+    expect(result.id).toBe('agent-uuid-1');
+    expect(result.parent_address).toBe(PARENT_ADDRESS);
+    expect(result.status).toBe('active');
+    expect(result.allowlist).toEqual([
+      { entry_type: 'destination', entry_value: OTHER_DESTINATION },
+    ]);
+    expect(result.spend_policy).toEqual({
+      max_xrp_per_tx_drops: '10000000',
+      daily_xrp_limit_drops: '100000000',
+    });
+
+    // Critical: read path never returns the seed or the provisioning tx id.
+    expect('agent_seed' in result).toBe(false);
+    expect('grant_tx_id' in result).toBe(false);
+  });
+
+  it('surfaces null caps when no spend_policy row exists', async () => {
+    dbSelectResults.agents_joined = [SAMPLE_AGENT_ROW];
+    dbSelectResults.agent_allowlists = [];
+    dbSelectResults.spend_policies = []; // no row
+
+    const result = await getAgent(CLIENT_ID, 'agent-uuid-1');
+    expect(result?.spend_policy).toEqual({
+      max_xrp_per_tx_drops: null,
+      daily_xrp_limit_drops: null,
+    });
+  });
+
+  it('surfaces null caps when spend_policy row is is_active=false', async () => {
+    dbSelectResults.agents_joined = [SAMPLE_AGENT_ROW];
+    dbSelectResults.agent_allowlists = [];
+    dbSelectResults.spend_policies = [
+      {
+        maxXrpPerTxDrops: '10000000',
+        dailyXrpLimitDrops: '100000000',
+        isActive: false,
+      },
+    ];
+
+    const result = await getAgent(CLIENT_ID, 'agent-uuid-1');
+    // is_active=false is the platform's "policy installed but disabled"
+    // signal — read like no policy at all so the UI can't show stale caps
+    // that aren't actually enforced.
+    expect(result?.spend_policy).toEqual({
+      max_xrp_per_tx_drops: null,
+      daily_xrp_limit_drops: null,
+    });
+  });
+});
+
+describe('listAgents', () => {
+  it('returns empty array when the client has no agents', async () => {
+    dbSelectResults.agents_joined = [];
+    const result = await listAgents(CLIENT_ID);
+    expect(result).toEqual([]);
+  });
+
+  it('returns mapped views for each row, none with agent_seed or grant_tx_id', async () => {
+    dbSelectResults.agents_joined = [
+      SAMPLE_AGENT_ROW,
+      { ...SAMPLE_AGENT_ROW, id: 'agent-uuid-2', status: 'pending' },
+    ];
+    // listAgents shares one allowlist source per call (the mock returns the
+    // same dbSelectResults.agent_allowlists for every loadAllowlist), which
+    // is fine for shape verification — the real DB scopes by agentId via
+    // the WHERE clause.
+    dbSelectResults.agent_allowlists = [
+      { entryType: 'destination', entryValue: OTHER_DESTINATION },
+    ];
+    dbSelectResults.spend_policies = [
+      {
+        maxXrpPerTxDrops: '10000000',
+        dailyXrpLimitDrops: '100000000',
+        isActive: true,
+      },
+    ];
+
+    const result = await listAgents(CLIENT_ID);
+
+    expect(result).toHaveLength(2);
+    expect(result[0]?.status).toBe('active');
+    expect(result[1]?.status).toBe('pending');
+    for (const view of result) {
+      expect('agent_seed' in view).toBe(false);
+      expect('grant_tx_id' in view).toBe(false);
+    }
   });
 });
