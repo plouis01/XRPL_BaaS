@@ -12,11 +12,13 @@ import type { AppEnv } from '../types.ts';
 const mockProvisionAgent = vi.fn();
 const mockGetAgent = vi.fn();
 const mockListAgents = vi.fn();
+const mockRevokeAgent = vi.fn();
 
 vi.mock('../services/agent.service.ts', () => ({
   provisionAgent: (...args: unknown[]) => mockProvisionAgent(...args),
   getAgent: (...args: unknown[]) => mockGetAgent(...args),
   listAgents: (...args: unknown[]) => mockListAgents(...args),
+  revokeAgent: (...args: unknown[]) => mockRevokeAgent(...args),
   AgentServiceError: class AgentServiceError extends Error {
     constructor(
       public readonly code: string,
@@ -368,5 +370,55 @@ describe('GET /agents (list)', () => {
     // Confirm we passed the auth'd clientId.
     expect(mockListAgents).toHaveBeenCalledTimes(1);
     expect(mockListAgents.mock.calls[0]?.[0]).toBe('client-1');
+  });
+});
+
+describe('DELETE /agents/:id', () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it('400 on malformed id (not a UUID)', async () => {
+    const app = makeApp();
+    const res = await app.request('/agents/not-a-uuid', { method: 'DELETE' });
+    expect(res.status).toBe(400);
+    expect(mockRevokeAgent).not.toHaveBeenCalled();
+  });
+
+  it('202 on success — returns the staged result', async () => {
+    mockRevokeAgent.mockResolvedValue({
+      agent_id: VALID_AGENT_ID,
+      status: 'revoking',
+      tx_id: 'tx-revoke-1',
+    });
+    const app = makeApp();
+    const res = await app.request(`/agents/${VALID_AGENT_ID}`, {
+      method: 'DELETE',
+      headers: { 'Idempotency-Key': 'caller-uuid-1' },
+    });
+    expect(res.status).toBe(202);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.agent_id).toBe(VALID_AGENT_ID);
+    expect(body.status).toBe('revoking');
+    expect(body.tx_id).toBe('tx-revoke-1');
+
+    // The caller's Idempotency-Key was threaded into the service.
+    const arg = mockRevokeAgent.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(arg.idempotencyKey).toBe('caller-uuid-1');
+    expect(arg.clientId).toBe('client-1');
+    expect(arg.agentId).toBe(VALID_AGENT_ID);
+  });
+
+  it.each([
+    ['agent_not_found', 404],
+    ['agent_not_revocable', 409],
+    ['agent_already_revoking', 409],
+    ['enqueue_failed', 503],
+    ['db_conflict', 409],
+  ] as const)('maps %s → %i on revocation paths', async (code, status) => {
+    mockRevokeAgent.mockRejectedValue(new AgentServiceError(code, `simulated ${code}`));
+    const app = makeApp();
+    const res = await app.request(`/agents/${VALID_AGENT_ID}`, {
+      method: 'DELETE',
+    });
+    expect(res.status).toBe(status);
   });
 });

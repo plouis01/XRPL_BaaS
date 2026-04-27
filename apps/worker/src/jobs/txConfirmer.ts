@@ -836,6 +836,60 @@ export async function applyDelegationRevocationOutcome(
     { delegationId, newStatus: isSuccess ? 'revoked' : 'active' },
     'delegation revocation outcome applied',
   );
+
+  // VISION.md agent launcher revocation (DELETE /v1/agents/:id): a
+  // delegations row may have a paired agents row. Mirror the delegation's
+  // staging-resolution onto the agents row so callers polling
+  // GET /v1/agents/:id see status='revoked' (or pendingRevocation cleared
+  // on failure). Same idempotency guard via WHERE pendingRevocation=true.
+  // Standalone delegations (no agents row) are silent no-ops, mirroring
+  // applyAgentGrantOutcome's standalone-grant path.
+  const agentSet = isSuccess
+    ? { status: 'revoked', revokedAt: new Date(), pendingRevocation: false }
+    : { pendingRevocation: false };
+  const updatedAgents = await db
+    .update(schema.agents)
+    .set(agentSet)
+    .where(
+      and(eq(schema.agents.delegationId, delegationId), eq(schema.agents.pendingRevocation, true)),
+    )
+    .returning({
+      id: schema.agents.id,
+      agentAddress: schema.agents.agentAddress,
+    });
+
+  if (updatedAgents.length === 0) {
+    // Either a standalone delegation (no agents row), or already
+    // transitioned by a duplicate confirmer pass. Both are safe.
+    return;
+  }
+
+  const agentRow = updatedAgents[0];
+  log.info(
+    { agentId: agentRow?.id, isSuccess },
+    'agent revocation outcome applied (paired with delegation)',
+  );
+
+  // Fan out webhook only on successful revocation. The `agent.failed`
+  // event already covers grant failures, but a failed revocation just
+  // means the delegate retains authority — there's no terminal state
+  // change worth notifying about (status stays 'active').
+  if (!isSuccess) return;
+  try {
+    await fanOutWebhooks(txId, 'agent.revoked', {
+      agent_id: agentRow?.id,
+      agent_address: agentRow?.agentAddress,
+      status: 'revoked',
+    });
+  } catch (err) {
+    log.error(
+      {
+        err: err instanceof Error ? err.message : String(err),
+        agentId: agentRow?.id,
+      },
+      'agent.revoked webhook fan-out failed (non-fatal)',
+    );
+  }
 }
 
 /**

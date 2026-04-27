@@ -162,6 +162,7 @@ export const WEBHOOK_EVENT_TYPES = [
   // @railforge/jobs AGENT_OUTCOME_EVENT_TYPES (drift-proof by import).
   'agent.activated',
   'agent.failed',
+  'agent.revoked',
 ] as const;
 
 export const createWebhookEndpointSchema = z.object({

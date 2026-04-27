@@ -377,6 +377,14 @@ export const agents = pgTable(
     preset: text('preset').notNull(),
     label: text('label'),
     status: text('status').notNull().default('pending'),
+    // VISION.md agent launcher revocation: staging slot mirroring the
+    // delegations.pending_revocation pattern (REVIEW.md C-1). DELETE
+    // /v1/agents/:id sets this true + queues a SignerListSet that strips
+    // the delegate; txConfirmer.applyDelegationRevocationOutcome commits
+    // (status='revoked', revokedAt=now, pendingRevocation=false) on
+    // tesSUCCESS or clears the flag on failure/expiry. While true, repeat
+    // revoke calls are rejected (one revocation in flight at a time).
+    pendingRevocation: boolean('pending_revocation').notNull().default(false),
     createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
     revokedAt: timestamp('revoked_at', { withTimezone: true }),
   },

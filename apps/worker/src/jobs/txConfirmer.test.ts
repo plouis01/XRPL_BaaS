@@ -32,6 +32,10 @@ const credentialUpdateReturning = { current: [] as unknown[] };
 // matched agents row(s). Empty = no pending agents row for this grant
 // (standalone delegation), non-empty = "we won the transition".
 const agentsUpdateReturning = { current: [] as unknown[] };
+// VISION.md agent launcher revocation: applyDelegationRevocationOutcome's
+// delegations UPDATE returning. Non-empty = the delegation transition
+// succeeded; the helper then proceeds to the agents-row mirror update.
+const delegationsUpdateReturning = { current: [] as unknown[] };
 
 // ── Sprint 3 webhook fan-out: extra mock state ──
 //
@@ -68,6 +72,7 @@ vi.mock('@railforge/db', () => {
             if (table.__name === 'accounts') return accountUpdateReturning.current;
             if (table.__name === 'credentials') return credentialUpdateReturning.current;
             if (table.__name === 'agents') return agentsUpdateReturning.current;
+            if (table.__name === 'delegations') return delegationsUpdateReturning.current;
             return [];
           }),
         });
@@ -144,6 +149,13 @@ vi.mock('@railforge/db', () => {
         id: 'id',
         agentAddress: 'agentAddress',
         status: 'status',
+        delegationId: 'delegationId',
+        pendingRevocation: 'pendingRevocation',
+      },
+      delegations: {
+        __name: 'delegations',
+        id: 'id',
+        pendingRevocation: 'pendingRevocation',
       },
     },
     eq: vi.fn((col: unknown, val: unknown) => ({ col, val })),
@@ -175,6 +187,7 @@ vi.mock('../queues.ts', () => ({
 const {
   applyAgentGrantOutcome,
   applyCredentialAcceptOutcome,
+  applyDelegationRevocationOutcome,
   applyDomainMutationOutcome,
   extractFundingAmount,
   extractMptIssuanceIdFromMeta,
@@ -1356,6 +1369,136 @@ describe('applyAgentGrantOutcome (unit)', () => {
     // Agent flip happened.
     expect(dbUpdateCalls.filter((u) => u.table === 'agents')).toHaveLength(1);
     // No deliveries inserted, no enqueue.
+    expect(dbInsertCalls.find((c) => c.table === 'webhook_deliveries')).toBeUndefined();
+    expect(enqueueWebhookDeliveryMock).not.toHaveBeenCalled();
+  });
+});
+
+// VISION.md agent launcher revocation: applyDelegationRevocationOutcome
+// is the partner of revokePermission's staging. Beyond the existing
+// delegation-row commit (covered above by integration with
+// processTxConfirmJob), it now also mirrors the transition onto the
+// paired agents row and fires `agent.revoked` on tesSUCCESS.
+describe('applyDelegationRevocationOutcome — agent mirror (unit)', () => {
+  const silentLog = {
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+    debug: vi.fn(),
+    // biome-ignore lint/suspicious/noExplicitAny: test Logger stub
+  } as any;
+
+  beforeEach(() => {
+    dbUpdateCalls.length = 0;
+    dbInsertCalls.length = 0;
+    dbSelectResult.current = [];
+    delegationsUpdateReturning.current = [];
+    agentsUpdateReturning.current = [];
+    subscribersResult.current = [];
+    deliveryInsertResult.current = [];
+    enqueueWebhookDeliveryMock.mockClear();
+  });
+
+  it('non-revokePermission tx: no agents UPDATE', async () => {
+    dbSelectResult.current = [
+      {
+        txType: 'SignerListSet',
+        requestBody: { op: 'grantPermission', delegate: 'rAGENT' },
+      },
+    ];
+    await applyDelegationRevocationOutcome('tx-uuid-1', true, silentLog);
+    expect(dbUpdateCalls.filter((u) => u.table === 'agents')).toHaveLength(0);
+  });
+
+  it('delegation already transitioned: no agents UPDATE, no fan-out', async () => {
+    dbSelectResult.current = [
+      {
+        txType: 'SignerListSet',
+        requestBody: { op: 'revokePermission', delegationId: 'deleg-1' },
+      },
+    ];
+    delegationsUpdateReturning.current = []; // delegation idempotency guard returns 0 rows
+
+    await applyDelegationRevocationOutcome('tx-uuid-1', true, silentLog);
+
+    expect(dbUpdateCalls.filter((u) => u.table === 'agents')).toHaveLength(0);
+    expect(enqueueWebhookDeliveryMock).not.toHaveBeenCalled();
+  });
+
+  it('standalone delegation (no paired agent): delegation flips, agent UPDATE no-op, no fan-out', async () => {
+    dbSelectResult.current = [
+      {
+        txType: 'SignerListSet',
+        requestBody: { op: 'revokePermission', delegationId: 'deleg-1' },
+      },
+    ];
+    delegationsUpdateReturning.current = [{ id: 'deleg-1' }];
+    agentsUpdateReturning.current = []; // no agent row paired with this delegation
+
+    await applyDelegationRevocationOutcome('tx-uuid-1', true, silentLog);
+
+    // Both UPDATEs were attempted (delegation + agents) but only the
+    // delegation one matched — so no webhook fan-out.
+    expect(dbUpdateCalls.filter((u) => u.table === 'agents')).toHaveLength(1);
+    expect(enqueueWebhookDeliveryMock).not.toHaveBeenCalled();
+  });
+
+  it("success path with paired agent: flips agent + fans out 'agent.revoked'", async () => {
+    dbSelectResult.current = [
+      {
+        txType: 'SignerListSet',
+        requestBody: { op: 'revokePermission', delegationId: 'deleg-1' },
+      },
+    ];
+    delegationsUpdateReturning.current = [{ id: 'deleg-1' }];
+    agentsUpdateReturning.current = [
+      { id: 'agent-1', agentAddress: 'rAGENT00000000000000000000000' },
+    ];
+    subscribersResult.current = [{ endpointId: 'ep-1' }];
+    deliveryInsertResult.current = [{ id: 'del-1', endpointId: 'ep-1' }];
+
+    await applyDelegationRevocationOutcome('tx-uuid-1', true, silentLog);
+
+    // Agent row was flipped to revoked.
+    const agentUpdate = dbUpdateCalls.find((u) => u.table === 'agents');
+    expect(agentUpdate).toBeDefined();
+    const set = agentUpdate?.set as Record<string, unknown>;
+    expect(set?.status).toBe('revoked');
+    expect(set?.pendingRevocation).toBe(false);
+
+    // Webhook fan-out fired with the right event type and payload.
+    const deliveryInsert = dbInsertCalls.find((c) => c.table === 'webhook_deliveries');
+    expect(deliveryInsert).toBeDefined();
+    const values = deliveryInsert!.values as Array<Record<string, unknown>>;
+    expect(values[0]?.eventType).toBe('agent.revoked');
+    const payload = values[0]?.payload as Record<string, unknown>;
+    expect(payload.agent_id).toBe('agent-1');
+    expect(payload.status).toBe('revoked');
+    expect(enqueueWebhookDeliveryMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('failure path: clears agents.pendingRevocation, does NOT fan out a webhook', async () => {
+    dbSelectResult.current = [
+      {
+        txType: 'SignerListSet',
+        requestBody: { op: 'revokePermission', delegationId: 'deleg-1' },
+      },
+    ];
+    delegationsUpdateReturning.current = [{ id: 'deleg-1' }];
+    agentsUpdateReturning.current = [
+      { id: 'agent-1', agentAddress: 'rAGENT00000000000000000000000' },
+    ];
+
+    await applyDelegationRevocationOutcome('tx-uuid-1', false, silentLog);
+
+    const agentUpdate = dbUpdateCalls.find((u) => u.table === 'agents');
+    const set = agentUpdate?.set as Record<string, unknown>;
+    // status is left as-is ('active'); pendingRevocation cleared.
+    expect(set?.pendingRevocation).toBe(false);
+    expect(set?.status).toBeUndefined();
+
+    // No webhook on failed revocation — the agent's effective state
+    // didn't change, so there's nothing terminal to notify about.
     expect(dbInsertCalls.find((c) => c.table === 'webhook_deliveries')).toBeUndefined();
     expect(enqueueWebhookDeliveryMock).not.toHaveBeenCalled();
   });

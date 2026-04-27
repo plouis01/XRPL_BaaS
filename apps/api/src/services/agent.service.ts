@@ -44,7 +44,7 @@ import {
   type AgentPresetName,
   getPreset,
 } from '../presets/agent-presets.ts';
-import { PermissionServiceError, grantPermission } from './permission.service.ts';
+import { PermissionServiceError, grantPermission, revokePermission } from './permission.service.ts';
 
 export class AgentServiceError extends Error {
   constructor(
@@ -61,7 +61,10 @@ export class AgentServiceError extends Error {
       | 'agent_not_active'
       | 'source_not_parent'
       | 'destination_not_allowlisted'
-      | 'token_not_allowlisted',
+      | 'token_not_allowlisted'
+      // ── revocation codes ────────────────────────────────────────────────
+      | 'agent_not_revocable'
+      | 'agent_already_revoking',
     message: string,
   ) {
     super(message);
@@ -674,4 +677,136 @@ export async function listAgents(clientId: string): Promise<AgentView[]> {
     views.push(rowToView(row, allowlist, spendPolicy));
   }
   return views;
+}
+
+// ── Revocation (DELETE /v1/agents/:id) ──────────────────────────────────────
+//
+// Mirrors revokePermission's staging pattern (REVIEW.md C-1):
+//   - This fn sets agents.pendingRevocation=true (NOT status='revoked')
+//   - Calls permission.service.revokePermission to stage the underlying
+//     delegations row + queue the SignerListSet that strips the delegate
+//   - Rejects if pendingRevocation is already true (one revoke in flight)
+//   - txConfirmer.applyDelegationRevocationOutcome commits the agent row's
+//     status='revoked' on tesSUCCESS or clears pendingRevocation on
+//     failure/expiry, mirroring the delegation row's transition
+//
+// Cross-tenant scope: the agent + clientId predicate refuses agents owned
+// by other tenants. Indistinguishable from "not found" by design.
+
+export interface RevokeAgentInput {
+  clientId: string;
+  agentId: string;
+  idempotencyKey?: string;
+}
+
+export interface RevokeAgentResult {
+  agent_id: string;
+  status: 'revoking';
+  /** ID of the SignerListSet tx that strips the delegate. */
+  tx_id: string;
+}
+
+export async function revokeAgent(input: RevokeAgentInput): Promise<RevokeAgentResult> {
+  const log = logger.child({
+    service: 'agent',
+    op: 'revoke',
+    clientId: input.clientId,
+    agentId: input.agentId,
+  });
+
+  // Load the agent + parent address. Cross-tenant safety: the WHERE clause
+  // pairs id with clientId, so an agent owned by another tenant returns
+  // null and surfaces as 'agent_not_found' (404). Same shape as getAgent.
+  const rows = await db
+    .select({
+      id: schema.agents.id,
+      status: schema.agents.status,
+      pendingRevocation: schema.agents.pendingRevocation,
+      agentAddress: schema.agents.agentAddress,
+      parentAddress: schema.accounts.address,
+    })
+    .from(schema.agents)
+    .innerJoin(schema.accounts, eq(schema.agents.parentAccountId, schema.accounts.id))
+    .where(and(eq(schema.agents.id, input.agentId), eq(schema.agents.clientId, input.clientId)))
+    .limit(1);
+  const agent = rows[0];
+  if (!agent) {
+    throw new AgentServiceError('agent_not_found', 'Agent not found');
+  }
+  if (agent.status !== 'active') {
+    // 'pending' would mean the grant SignerListSet hasn't validated yet —
+    // refusing here keeps the revocation flow simple. Callers can wait
+    // for the activation, then revoke. 'revoked' / 'failed' are terminal.
+    throw new AgentServiceError(
+      'agent_not_revocable',
+      `Agent must be in status='active' to revoke (current: ${agent.status})`,
+    );
+  }
+  if (agent.pendingRevocation) {
+    throw new AgentServiceError(
+      'agent_already_revoking',
+      'Agent has a pending revocation — wait for on-chain confirmation',
+    );
+  }
+
+  // Delegate to permission.service. revokePermission opens its own
+  // transaction with FOR UPDATE on the delegation, queues the
+  // SignerListSet, and stages delegations.pendingRevocation=true. We then
+  // mirror the staging on the agents row in a second UPDATE.
+  let revokeTxId: string;
+  try {
+    const result = await revokePermission({
+      clientId: input.clientId,
+      delegatorAddress: agent.parentAddress,
+      delegateAddress: agent.agentAddress,
+      idempotencyKey: input.idempotencyKey,
+    });
+    revokeTxId = result.tx_id;
+  } catch (err) {
+    if (err instanceof PermissionServiceError) {
+      log.error(
+        { err: err.message, code: err.code },
+        'permission.revokePermission failed during agent revoke',
+      );
+      // Map onto our error codes. 'not_found' from permission.service
+      // means the delegation has already been revoked — surface as
+      // not-revocable rather than 404 to avoid client confusion.
+      if (err.code === 'not_found') {
+        throw new AgentServiceError(
+          'agent_not_revocable',
+          'No active delegation found — agent may already be revoked',
+        );
+      }
+      if (err.code === 'invalid_input') {
+        throw new AgentServiceError('agent_already_revoking', err.message);
+      }
+      throw new AgentServiceError(
+        err.code === 'enqueue_failed' ? 'enqueue_failed' : 'db_conflict',
+        `Failed to enqueue revocation: ${err.message}`,
+      );
+    }
+    throw err;
+  }
+
+  // Mirror staging on the agents row. Guarded by the same status='active'
+  // + pendingRevocation=false predicate so a concurrent caller can't
+  // double-stage between our load and this update.
+  await db
+    .update(schema.agents)
+    .set({ pendingRevocation: true })
+    .where(
+      and(
+        eq(schema.agents.id, agent.id),
+        eq(schema.agents.status, 'active'),
+        eq(schema.agents.pendingRevocation, false),
+      ),
+    );
+
+  log.info({ revokeTxId, agentAddress: agent.agentAddress }, 'agent revocation staged');
+
+  return {
+    agent_id: agent.id,
+    status: 'revoking',
+    tx_id: revokeTxId,
+  };
 }

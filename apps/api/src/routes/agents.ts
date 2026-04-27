@@ -17,6 +17,7 @@ import {
   getAgent,
   listAgents,
   provisionAgent,
+  revokeAgent,
 } from '../services/agent.service.ts';
 import type { AppEnv } from '../types.ts';
 import { provisionAgentSchema } from '../validators/schemas.ts';
@@ -53,6 +54,10 @@ function agentErrorResponse(err: AgentServiceError): {
     case 'destination_not_allowlisted':
     case 'token_not_allowlisted':
       return { error: err.message, status: 403 };
+    // Revocation codes (DELETE /v1/agents/:id).
+    case 'agent_not_revocable':
+    case 'agent_already_revoking':
+      return { error: err.message, status: 409 };
   }
 }
 
@@ -106,6 +111,32 @@ agents.get('/:id', async (c) => {
     return c.json({ error: 'Agent not found' }, 404);
   }
   return c.json(agent);
+});
+
+// DELETE /v1/agents/:id — stage a revocation. Queues a SignerListSet that
+// strips the delegate; agents.pendingRevocation is set to true and the
+// txConfirmer flips status='revoked' (or clears the flag on failure) when
+// the tx validates. Body-less; idempotency-key is honored.
+agents.delete('/:id', async (c) => {
+  const clientId = c.get('clientId');
+  const id = c.req.param('id');
+  if (!UUID_RE.test(id)) {
+    return c.json({ error: 'invalid agent id' }, 400);
+  }
+  try {
+    const result = await revokeAgent({
+      clientId,
+      agentId: id,
+      idempotencyKey: c.req.header('idempotency-key'),
+    });
+    return c.json(result, 202);
+  } catch (err) {
+    if (err instanceof AgentServiceError) {
+      const r = agentErrorResponse(err);
+      return c.json({ error: r.error }, r.status);
+    }
+    throw err;
+  }
 });
 
 export default agents;

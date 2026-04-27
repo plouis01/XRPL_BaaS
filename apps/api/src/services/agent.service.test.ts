@@ -120,8 +120,10 @@ vi.mock('@railforge/db', () => {
 // ── Permission service mock ─────────────────────────────────────────────────
 
 const grantPermissionMock = vi.fn();
+const revokePermissionMock = vi.fn();
 vi.mock('./permission.service.ts', () => ({
   grantPermission: (...args: unknown[]) => grantPermissionMock(...args),
+  revokePermission: (...args: unknown[]) => revokePermissionMock(...args),
   PermissionServiceError: class PermissionServiceError extends Error {
     constructor(
       public readonly code: string,
@@ -145,7 +147,16 @@ vi.mock('../logger.ts', () => ({
 }));
 
 // Import AFTER mocks are registered.
-import { authorizeAgentPayment, getAgent, listAgents, provisionAgent } from './agent.service.ts';
+import {
+  authorizeAgentPayment,
+  getAgent,
+  listAgents,
+  provisionAgent,
+  revokeAgent,
+} from './agent.service.ts';
+// Bring in the mocked PermissionServiceError class so revokeAgent's
+// `instanceof` check matches values constructed from the test side.
+import { PermissionServiceError as MockedPermissionServiceError } from './permission.service.ts';
 
 // ── Fixtures & helpers ──────────────────────────────────────────────────────
 
@@ -172,6 +183,8 @@ beforeEach(() => {
   for (const key of Object.keys(dbInsertErrors)) delete dbInsertErrors[key];
   dbAgentAllowlistsQueue.length = 0;
   grantPermissionMock.mockReset();
+  revokePermissionMock.mockReset();
+  revokePermissionMock.mockResolvedValue({ tx_id: 'revoke-tx-1' });
   grantPermissionMock.mockResolvedValue({
     id: 'delegation-1',
     tx_id: 'grant-tx-1',
@@ -678,5 +691,123 @@ describe('listAgents', () => {
       expect('agent_seed' in view).toBe(false);
       expect('grant_tx_id' in view).toBe(false);
     }
+  });
+});
+
+// ── revokeAgent (DELETE /v1/agents/:id) ─────────────────────────────────────
+// Mirrors revokePermission's staging pattern: agents.pendingRevocation flag
+// + delegated to permission.service which queues the SignerListSet. The
+// txConfirmer commits status='revoked' on tesSUCCESS (covered separately
+// in apps/worker/src/jobs/txConfirmer.test.ts).
+
+describe('revokeAgent', () => {
+  it('404 when the agent does not belong to the caller', async () => {
+    dbSelectResults.agents_joined = []; // no row owned by clientId
+    await expect(
+      revokeAgent({ clientId: CLIENT_ID, agentId: 'agent-uuid-1' }),
+    ).rejects.toMatchObject({
+      name: 'AgentServiceError',
+      code: 'agent_not_found',
+    });
+    expect(revokePermissionMock).not.toHaveBeenCalled();
+  });
+
+  it("409 when the agent is in status='pending' (not yet on-ledger active)", async () => {
+    dbSelectResults.agents_joined = [
+      {
+        id: 'agent-uuid-1',
+        status: 'pending',
+        pendingRevocation: false,
+        agentAddress: 'rAGENT00000000000000000000000',
+        parentAddress: PARENT_ADDRESS,
+      },
+    ];
+    await expect(
+      revokeAgent({ clientId: CLIENT_ID, agentId: 'agent-uuid-1' }),
+    ).rejects.toMatchObject({
+      name: 'AgentServiceError',
+      code: 'agent_not_revocable',
+    });
+    expect(revokePermissionMock).not.toHaveBeenCalled();
+  });
+
+  it('409 when pendingRevocation is already true (one revoke in flight)', async () => {
+    dbSelectResults.agents_joined = [
+      {
+        id: 'agent-uuid-1',
+        status: 'active',
+        pendingRevocation: true, // already in flight
+        agentAddress: 'rAGENT00000000000000000000000',
+        parentAddress: PARENT_ADDRESS,
+      },
+    ];
+    await expect(
+      revokeAgent({ clientId: CLIENT_ID, agentId: 'agent-uuid-1' }),
+    ).rejects.toMatchObject({
+      name: 'AgentServiceError',
+      code: 'agent_already_revoking',
+    });
+    expect(revokePermissionMock).not.toHaveBeenCalled();
+  });
+
+  it('happy path: calls revokePermission and stages agents.pendingRevocation=true', async () => {
+    dbSelectResults.agents_joined = [
+      {
+        id: 'agent-uuid-1',
+        status: 'active',
+        pendingRevocation: false,
+        agentAddress: 'rAGENT00000000000000000000000',
+        parentAddress: PARENT_ADDRESS,
+      },
+    ];
+
+    const result = await revokeAgent({
+      clientId: CLIENT_ID,
+      agentId: 'agent-uuid-1',
+      idempotencyKey: 'caller-uuid-1',
+    });
+
+    expect(result).toEqual({
+      agent_id: 'agent-uuid-1',
+      status: 'revoking',
+      tx_id: 'revoke-tx-1',
+    });
+
+    // permission.service was called with the parent (delegator) and
+    // agent address (delegate), and the idempotency key threaded through.
+    expect(revokePermissionMock).toHaveBeenCalledTimes(1);
+    const arg = revokePermissionMock.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(arg.delegatorAddress).toBe(PARENT_ADDRESS);
+    expect(arg.delegateAddress).toBe('rAGENT00000000000000000000000');
+    expect(arg.idempotencyKey).toBe('caller-uuid-1');
+
+    // The agents row was staged: pendingRevocation=true.
+    const agentUpdate = dbUpdateCalls.find(
+      (u) => (u as { pendingRevocation?: boolean }).pendingRevocation === true,
+    );
+    expect(agentUpdate).toBeDefined();
+  });
+
+  it("maps permission.service 'not_found' to agent_not_revocable (already revoked)", async () => {
+    dbSelectResults.agents_joined = [
+      {
+        id: 'agent-uuid-1',
+        status: 'active',
+        pendingRevocation: false,
+        agentAddress: 'rAGENT00000000000000000000000',
+        parentAddress: PARENT_ADDRESS,
+      },
+    ];
+    // Simulate the delegation having been already revoked out-of-band.
+    revokePermissionMock.mockRejectedValueOnce(
+      new MockedPermissionServiceError('not_found', 'no active delegation'),
+    );
+
+    await expect(
+      revokeAgent({ clientId: CLIENT_ID, agentId: 'agent-uuid-1' }),
+    ).rejects.toMatchObject({
+      name: 'AgentServiceError',
+      code: 'agent_not_revocable',
+    });
   });
 });

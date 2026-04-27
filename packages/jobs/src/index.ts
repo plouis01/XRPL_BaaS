@@ -55,7 +55,11 @@ export type TxConfirmerEventType = (typeof TX_CONFIRMER_EVENT_TYPES)[number];
  * means: append here, register in WEBHOOK_EVENT_TYPES (schemas.ts), and
  * emit from txConfirmer.
  */
-export const AGENT_OUTCOME_EVENT_TYPES = ['agent.activated', 'agent.failed'] as const;
+export const AGENT_OUTCOME_EVENT_TYPES = [
+  'agent.activated',
+  'agent.failed',
+  'agent.revoked',
+] as const;
 export type AgentOutcomeEventType = (typeof AGENT_OUTCOME_EVENT_TYPES)[number];
 
 /** Union of all event types the txConfirmer fan-out can emit. */
