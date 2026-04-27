@@ -156,6 +156,12 @@ export const WEBHOOK_EVENT_TYPES = [
   'domain.created',
   'domain.updated',
   'domain.deleted',
+  // VISION.md agent launcher: txConfirmer's applyAgentGrantOutcome hook
+  // fans these out so clients don't have to poll GET /v1/agents/:id for
+  // the pending → active flip. Source-of-truth literals live in
+  // @railforge/jobs AGENT_OUTCOME_EVENT_TYPES (drift-proof by import).
+  'agent.activated',
+  'agent.failed',
 ] as const;
 
 export const createWebhookEndpointSchema = z.object({

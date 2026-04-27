@@ -29,7 +29,7 @@ import { logger } from '../logger.ts';
 import {
   TX_CONFIRM_QUEUE,
   type TxConfirmJobData,
-  type TxConfirmerEventType,
+  type WebhookFanoutEventType,
   enqueueWebhookDelivery,
   getSequencer,
   getXrplPool,
@@ -541,7 +541,11 @@ async function fanOutWebhooks(
   // REVIEW.md MED-14: typed against the shared @railforge/jobs union so
   // extending that const automatically propagates here. Drift-proof by
   // construction — a new event type flows in without a manual edit.
-  eventType: TxConfirmerEventType,
+  // VISION.md agent launcher: widened from TxConfirmerEventType to
+  // WebhookFanoutEventType so applyAgentGrantOutcome can fire the same
+  // path with `agent.activated` / `agent.failed`. The query joins through
+  // the transactions row (clientId resolution) regardless of event type.
+  eventType: WebhookFanoutEventType,
   // biome-ignore lint/suspicious/noExplicitAny: webhook payload is a free-form JSON shape
   payload: Record<string, any>,
 ): Promise<void> {
@@ -917,7 +921,29 @@ export async function applyAgentGrantOutcome(
     return;
   }
 
-  log.info({ agentId: updated[0]?.id, newStatus, delegateAddress }, 'agent grant outcome applied');
+  const agentId = updated[0]?.id;
+  log.info({ agentId, newStatus, delegateAddress }, 'agent grant outcome applied');
+
+  // VISION.md agent launcher: webhook fan-out so subscribers learn about
+  // the pending → active flip without polling. Reuses the same
+  // fanOutWebhooks join (transactions → webhook_endpoints → clientId)
+  // because the SignerListSet tx is owned by the same client as the
+  // agent. Failure here is non-fatal: the row is already updated, and
+  // webhookDelivery has its own retry/orphan recovery (Sprint 7 G-1).
+  // Payload deliberately omits the seed (it lives only in
+  // accounts.master_key_ref after provisioning).
+  try {
+    await fanOutWebhooks(txId, isSuccess ? 'agent.activated' : 'agent.failed', {
+      agent_id: agentId,
+      agent_address: delegateAddress,
+      status: newStatus,
+    });
+  } catch (err) {
+    log.error(
+      { err: err instanceof Error ? err.message : String(err), agentId },
+      'agent webhook fan-out failed (non-fatal)',
+    );
+  }
 }
 
 /**

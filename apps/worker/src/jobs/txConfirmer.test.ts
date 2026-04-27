@@ -1187,6 +1187,13 @@ describe('applyAgentGrantOutcome (unit)', () => {
     dbUpdateCalls.length = 0;
     dbSelectResult.current = [];
     agentsUpdateReturning.current = [];
+    // Webhook fan-out state — reset so a prior test's subscribers /
+    // deliveries don't leak into the next one. Without this, the new
+    // 'agent.activated' / 'agent.failed' tests see stale insert rows.
+    dbInsertCalls.length = 0;
+    subscribersResult.current = [];
+    deliveryInsertResult.current = [];
+    enqueueWebhookDeliveryMock.mockClear();
   });
 
   afterEach(() => {
@@ -1274,5 +1281,82 @@ describe('applyAgentGrantOutcome (unit)', () => {
 
     // UPDATE was attempted; idempotency guard (WHERE status='pending') returned zero rows.
     expect(dbUpdateCalls.filter((u) => u.table === 'agents')).toHaveLength(1);
+  });
+
+  // Webhook fan-out (agent.activated / agent.failed). VISION.md follow-up
+  // step #3: clients shouldn't have to poll GET /v1/agents/:id to see the
+  // pending → active flip. The fan-out reuses the same SignerListSet tx
+  // for client-id resolution (transactions → webhook_endpoints join).
+
+  it("success path: fans out 'agent.activated' to subscribers with the agent payload", async () => {
+    dbSelectResult.current = [
+      {
+        txType: 'SignerListSet',
+        requestBody: { op: 'grantPermission', delegate: 'rAGENT000000000' },
+      },
+    ];
+    agentsUpdateReturning.current = [{ id: 'agent-1' }];
+    subscribersResult.current = [{ endpointId: 'ep-1' }, { endpointId: 'ep-2' }];
+    deliveryInsertResult.current = [
+      { id: 'del-1', endpointId: 'ep-1' },
+      { id: 'del-2', endpointId: 'ep-2' },
+    ];
+
+    await applyAgentGrantOutcome('tx-uuid-1', true, silentLog);
+
+    const deliveryInsert = dbInsertCalls.find((c) => c.table === 'webhook_deliveries');
+    expect(deliveryInsert).toBeDefined();
+    const values = deliveryInsert!.values as Array<Record<string, unknown>>;
+    expect(values).toHaveLength(2);
+    expect(values[0]?.eventType).toBe('agent.activated');
+    const payload = values[0]?.payload as Record<string, unknown>;
+    expect(payload.agent_id).toBe('agent-1');
+    expect(payload.agent_address).toBe('rAGENT000000000');
+    expect(payload.status).toBe('active');
+    // CRITICAL: the payload must NEVER include the seed. The seed lives
+    // only in accounts.master_key_ref after provisioning.
+    expect('agent_seed' in payload).toBe(false);
+
+    expect(enqueueWebhookDeliveryMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("failure path: fans out 'agent.failed' (not 'agent.activated') with the right payload", async () => {
+    dbSelectResult.current = [
+      {
+        txType: 'SignerListSet',
+        requestBody: { op: 'grantPermission', delegate: 'rAGENT000000000' },
+      },
+    ];
+    agentsUpdateReturning.current = [{ id: 'agent-1' }];
+    subscribersResult.current = [{ endpointId: 'ep-1' }];
+    deliveryInsertResult.current = [{ id: 'del-1', endpointId: 'ep-1' }];
+
+    await applyAgentGrantOutcome('tx-uuid-1', false, silentLog);
+
+    const deliveryInsert = dbInsertCalls.find((c) => c.table === 'webhook_deliveries');
+    expect(deliveryInsert).toBeDefined();
+    const values = deliveryInsert!.values as Array<Record<string, unknown>>;
+    expect(values[0]?.eventType).toBe('agent.failed');
+    const payload = values[0]?.payload as Record<string, unknown>;
+    expect(payload.status).toBe('failed');
+  });
+
+  it('no subscribers: agent UPDATE still happens, fan-out is a no-op', async () => {
+    dbSelectResult.current = [
+      {
+        txType: 'SignerListSet',
+        requestBody: { op: 'grantPermission', delegate: 'rAGENT000000000' },
+      },
+    ];
+    agentsUpdateReturning.current = [{ id: 'agent-1' }];
+    subscribersResult.current = []; // no one subscribed
+
+    await applyAgentGrantOutcome('tx-uuid-1', true, silentLog);
+
+    // Agent flip happened.
+    expect(dbUpdateCalls.filter((u) => u.table === 'agents')).toHaveLength(1);
+    // No deliveries inserted, no enqueue.
+    expect(dbInsertCalls.find((c) => c.table === 'webhook_deliveries')).toBeUndefined();
+    expect(enqueueWebhookDeliveryMock).not.toHaveBeenCalled();
   });
 });

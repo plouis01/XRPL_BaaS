@@ -19,6 +19,7 @@ export {
   WEBHOOK_DELIVERY_QUEUE,
   ACCOUNT_SETUP_QUEUE,
   TX_CONFIRMER_EVENT_TYPES,
+  AGENT_OUTCOME_EVENT_TYPES,
   getJobsRedis,
   getTxSubmitQueue,
   getTxConfirmQueue,
@@ -34,6 +35,8 @@ export type {
   WebhookDeliveryJobData,
   AccountSetupJobData,
   TxConfirmerEventType,
+  AgentOutcomeEventType,
+  WebhookFanoutEventType,
 } from '@railforge/jobs';
 
 // ── Worker-only singletons ──────────────────────────────────────────────────

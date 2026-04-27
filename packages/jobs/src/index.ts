@@ -46,6 +46,21 @@ export const ACCOUNT_SETUP_QUEUE = 'railforge-account-setup';
 export const TX_CONFIRMER_EVENT_TYPES = ['transaction.validated', 'transaction.failed'] as const;
 export type TxConfirmerEventType = (typeof TX_CONFIRMER_EVENT_TYPES)[number];
 
+/**
+ * Agent-outcome events fired from txConfirmer's `applyAgentGrantOutcome`
+ * hook (VISION.md agent launcher). Same fan-out site as the tx events
+ * above — kept in a sibling const so the indexer's TX_CONFIRMER_HANDLED
+ * skip-gate doesn't accidentally include events the indexer would never
+ * derive from raw ledger txs anyway. Adding a new agent.* terminal event
+ * means: append here, register in WEBHOOK_EVENT_TYPES (schemas.ts), and
+ * emit from txConfirmer.
+ */
+export const AGENT_OUTCOME_EVENT_TYPES = ['agent.activated', 'agent.failed'] as const;
+export type AgentOutcomeEventType = (typeof AGENT_OUTCOME_EVENT_TYPES)[number];
+
+/** Union of all event types the txConfirmer fan-out can emit. */
+export type WebhookFanoutEventType = TxConfirmerEventType | AgentOutcomeEventType;
+
 // ── Job payload shapes ──────────────────────────────────────────────────────
 
 export interface TxSubmitJobData {
