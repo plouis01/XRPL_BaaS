@@ -98,6 +98,15 @@ export interface AgentView {
   agent_address: string;
   label: string | null;
   status: string;
+  /**
+   * True while a DELETE /v1/agents/:id has queued a SignerListSet that
+   * hasn't yet validated. The dashboard surfaces this as "Revoking…" so
+   * the user sees the in-flight state — once the txConfirmer flips
+   * status to 'revoked' (or clears the flag on failure) callers can
+   * read the terminal state. Optional on the type so provisionAgent's
+   * fresh-agent return value (always false) doesn't have to set it.
+   */
+  pending_revocation?: boolean;
   allowlist: AgentAllowlistInput[];
   spend_policy: {
     max_xrp_per_tx_drops: string | null;
@@ -561,6 +570,7 @@ interface AgentJoinedRow {
   agentAddress: string;
   label: string | null;
   status: string;
+  pendingRevocation: boolean;
   createdAt: Date | null;
 }
 
@@ -619,6 +629,7 @@ function rowToView(
     agent_address: row.agentAddress,
     label: row.label,
     status: row.status,
+    pending_revocation: row.pendingRevocation,
     allowlist,
     spend_policy: spendPolicy,
     created_at: row.createdAt,
@@ -636,6 +647,7 @@ export async function getAgent(clientId: string, agentId: string): Promise<Agent
       agentAddress: schema.agents.agentAddress,
       label: schema.agents.label,
       status: schema.agents.status,
+      pendingRevocation: schema.agents.pendingRevocation,
       createdAt: schema.agents.createdAt,
     })
     .from(schema.agents)
@@ -660,6 +672,7 @@ export async function listAgents(clientId: string): Promise<AgentView[]> {
       agentAddress: schema.agents.agentAddress,
       label: schema.agents.label,
       status: schema.agents.status,
+      pendingRevocation: schema.agents.pendingRevocation,
       createdAt: schema.agents.createdAt,
     })
     .from(schema.agents)

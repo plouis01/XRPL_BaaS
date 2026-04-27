@@ -26,8 +26,22 @@ const STATUS_COLORS: Record<string, { bg: string; text: string }> = {
   revoked: { bg: '#f1f5f9', text: '#475569' },
 };
 
-function StatusBadge({ status }: { status: string }) {
-  const c = STATUS_COLORS[status] ?? { bg: '#f1f5f9', text: '#475569' };
+function StatusBadge({
+  status,
+  pendingRevocation,
+}: {
+  status: string;
+  pendingRevocation?: boolean;
+}) {
+  // While the SignerListSet is in flight, the row's stored status is still
+  // 'active' but pending_revocation=true. Surface that as "revoking" so the
+  // user sees the in-flight state instead of a stale "active" badge.
+  const effective = pendingRevocation && status === 'active' ? 'revoking' : status;
+  const palette: Record<string, { bg: string; text: string }> = {
+    ...STATUS_COLORS,
+    revoking: { bg: '#ffedd5', text: '#9a3412' },
+  };
+  const c = palette[effective] ?? { bg: '#f1f5f9', text: '#475569' };
   return (
     <span
       style={{
@@ -40,7 +54,7 @@ function StatusBadge({ status }: { status: string }) {
         color: c.text,
       }}
     >
-      {status}
+      {effective}
     </span>
   );
 }
@@ -62,6 +76,10 @@ export function Agents({ network }: { network: Network }) {
     seed: string;
     agentId: string;
   } | null>(null);
+  // Revoked agents are kept in the system for audit but cluttering the
+  // active-management view doesn't help anyone. Hidden by default; the
+  // toggle exposes them when the user actually wants to inspect history.
+  const [showRevoked, setShowRevoked] = useState(false);
 
   const fetchAgents = useCallback(async () => {
     setLoading(true);
@@ -94,21 +112,40 @@ export function Agents({ network }: { network: Network }) {
         }}
       >
         <h1 style={{ margin: 0, fontSize: 24 }}>Agents</h1>
-        <button
-          type="button"
-          onClick={() => setShowCreate((v) => !v)}
-          style={{
-            padding: '6px 12px',
-            background: showCreate ? '#e2e8f0' : '#2563eb',
-            color: showCreate ? '#1e293b' : '#fff',
-            border: 'none',
-            borderRadius: 4,
-            cursor: 'pointer',
-            fontSize: 13,
-          }}
-        >
-          {showCreate ? 'Cancel' : '+ New agent'}
-        </button>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+          <label
+            style={{
+              fontSize: 12,
+              color: '#64748b',
+              display: 'flex',
+              alignItems: 'center',
+              gap: 4,
+              cursor: 'pointer',
+            }}
+          >
+            <input
+              type="checkbox"
+              checked={showRevoked}
+              onChange={(e) => setShowRevoked(e.target.checked)}
+            />
+            Show revoked
+          </label>
+          <button
+            type="button"
+            onClick={() => setShowCreate((v) => !v)}
+            style={{
+              padding: '6px 12px',
+              background: showCreate ? '#e2e8f0' : '#2563eb',
+              color: showCreate ? '#1e293b' : '#fff',
+              border: 'none',
+              borderRadius: 4,
+              cursor: 'pointer',
+              fontSize: 13,
+            }}
+          >
+            {showCreate ? 'Cancel' : '+ New agent'}
+          </button>
+        </div>
       </div>
 
       {showCreate && (
@@ -150,79 +187,101 @@ export function Agents({ network }: { network: Network }) {
         </div>
       )}
 
-      {loading ? (
-        <p style={{ color: '#64748b' }}>Loading...</p>
-      ) : agents.length === 0 ? (
-        <p style={{ color: '#64748b' }}>
-          No agents yet. Provision one with <code>POST /v1/agents</code> or the button above.
-        </p>
-      ) : (
-        <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-          <thead>
-            <tr style={{ borderBottom: '2px solid #e2e8f0', textAlign: 'left' }}>
-              <th style={{ padding: '8px 12px', width: 28 }} />
-              <th style={{ padding: '8px 12px' }}>Label</th>
-              <th style={{ padding: '8px 12px' }}>Preset</th>
-              <th style={{ padding: '8px 12px' }}>Parent</th>
-              <th style={{ padding: '8px 12px' }}>Agent</th>
-              <th style={{ padding: '8px 12px' }}>Status</th>
-              <th style={{ padding: '8px 12px' }}>Created</th>
-            </tr>
-          </thead>
-          <tbody>
-            {agents.map((a) => {
-              const isOpen = expanded === a.id;
-              return (
-                <Fragment key={a.id}>
-                  <tr
-                    style={{
-                      borderBottom: '1px solid #e2e8f0',
-                      cursor: 'pointer',
-                    }}
-                    onClick={() => setExpanded(isOpen ? null : a.id)}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter' || e.key === ' ') {
-                        e.preventDefault();
-                        setExpanded(isOpen ? null : a.id);
-                      }
-                    }}
-                  >
-                    <td style={{ padding: '8px 12px', color: '#64748b' }}>{isOpen ? '▾' : '▸'}</td>
-                    <td style={{ padding: '8px 12px', fontSize: 13 }}>
-                      {a.label ?? <span style={{ color: '#94a3b8' }}>—</span>}
-                    </td>
-                    <td style={{ padding: '8px 12px', fontSize: 13 }}>{a.preset}</td>
-                    <td style={{ padding: '8px 12px', fontSize: 12 }}>
-                      <code>{a.parent_address.slice(0, 10)}...</code>
-                    </td>
-                    <td style={{ padding: '8px 12px', fontSize: 12 }}>
-                      <code>{a.agent_address.slice(0, 10)}...</code>
-                    </td>
-                    <td style={{ padding: '8px 12px' }}>
-                      <StatusBadge status={a.status} />
-                    </td>
-                    <td style={{ padding: '8px 12px', fontSize: 13 }}>
-                      {a.created_at ? new Date(a.created_at).toLocaleDateString() : '—'}
-                    </td>
-                  </tr>
-                  {isOpen && (
-                    <tr
-                      style={{
-                        borderBottom: '1px solid #e2e8f0',
-                        background: '#f8fafc',
-                      }}
-                    >
-                      <td colSpan={7} style={{ padding: '16px 24px' }}>
-                        <AgentDetail agentId={a.id} onStatusFlip={() => void fetchAgents()} />
-                      </td>
-                    </tr>
-                  )}
-                </Fragment>
-              );
-            })}
-          </tbody>
-        </table>
-      )}
+      {(() => {
+        const visibleAgents = showRevoked ? agents : agents.filter((a) => a.status !== 'revoked');
+        const hiddenCount = agents.length - visibleAgents.length;
+        return loading ? (
+          <p style={{ color: '#64748b' }}>Loading...</p>
+        ) : agents.length === 0 ? (
+          <p style={{ color: '#64748b' }}>
+            No agents yet. Provision one with <code>POST /v1/agents</code> or the button above.
+          </p>
+        ) : visibleAgents.length === 0 ? (
+          <p style={{ color: '#64748b' }}>
+            All {agents.length} agent(s) are revoked. Toggle <em>Show revoked</em> to inspect.
+          </p>
+        ) : (
+          <>
+            {hiddenCount > 0 && (
+              <div style={{ fontSize: 12, color: '#94a3b8', marginBottom: 8 }}>
+                {hiddenCount} revoked agent(s) hidden
+              </div>
+            )}
+            <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+              <thead>
+                <tr
+                  style={{
+                    borderBottom: '2px solid #e2e8f0',
+                    textAlign: 'left',
+                  }}
+                >
+                  <th style={{ padding: '8px 12px', width: 28 }} />
+                  <th style={{ padding: '8px 12px' }}>Label</th>
+                  <th style={{ padding: '8px 12px' }}>Preset</th>
+                  <th style={{ padding: '8px 12px' }}>Parent</th>
+                  <th style={{ padding: '8px 12px' }}>Agent</th>
+                  <th style={{ padding: '8px 12px' }}>Status</th>
+                  <th style={{ padding: '8px 12px' }}>Created</th>
+                </tr>
+              </thead>
+              <tbody>
+                {visibleAgents.map((a) => {
+                  const isOpen = expanded === a.id;
+                  return (
+                    <Fragment key={a.id}>
+                      <tr
+                        style={{
+                          borderBottom: '1px solid #e2e8f0',
+                          cursor: 'pointer',
+                        }}
+                        onClick={() => setExpanded(isOpen ? null : a.id)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter' || e.key === ' ') {
+                            e.preventDefault();
+                            setExpanded(isOpen ? null : a.id);
+                          }
+                        }}
+                      >
+                        <td style={{ padding: '8px 12px', color: '#64748b' }}>
+                          {isOpen ? '▾' : '▸'}
+                        </td>
+                        <td style={{ padding: '8px 12px', fontSize: 13 }}>
+                          {a.label ?? <span style={{ color: '#94a3b8' }}>—</span>}
+                        </td>
+                        <td style={{ padding: '8px 12px', fontSize: 13 }}>{a.preset}</td>
+                        <td style={{ padding: '8px 12px', fontSize: 12 }}>
+                          <code>{a.parent_address.slice(0, 10)}...</code>
+                        </td>
+                        <td style={{ padding: '8px 12px', fontSize: 12 }}>
+                          <code>{a.agent_address.slice(0, 10)}...</code>
+                        </td>
+                        <td style={{ padding: '8px 12px' }}>
+                          <StatusBadge status={a.status} pendingRevocation={a.pending_revocation} />
+                        </td>
+                        <td style={{ padding: '8px 12px', fontSize: 13 }}>
+                          {a.created_at ? new Date(a.created_at).toLocaleDateString() : '—'}
+                        </td>
+                      </tr>
+                      {isOpen && (
+                        <tr
+                          style={{
+                            borderBottom: '1px solid #e2e8f0',
+                            background: '#f8fafc',
+                          }}
+                        >
+                          <td colSpan={7} style={{ padding: '16px 24px' }}>
+                            <AgentDetail agentId={a.id} onStatusFlip={() => void fetchAgents()} />
+                          </td>
+                        </tr>
+                      )}
+                    </Fragment>
+                  );
+                })}
+              </tbody>
+            </table>
+          </>
+        );
+      })()}
     </div>
   );
 }
@@ -240,8 +299,14 @@ function AgentDetail({
 
   // Tracks the last status we surfaced to the parent — when the agent flips
   // pending → active mid-poll, we trigger a single list refresh so the
-  // table badge updates without a full page reload.
+  // table badge updates without a full page reload. Same fires for the
+  // active → revoked terminal flip after a DELETE /v1/agents/:id.
   const [lastStatus, setLastStatus] = useState<string | null>(null);
+
+  // Revocation flow state.
+  const [confirmingRevoke, setConfirmingRevoke] = useState(false);
+  const [revoking, setRevoking] = useState(false);
+  const [revokeError, setRevokeError] = useState<string | null>(null);
 
   const fetchDetail = useCallback(async () => {
     try {
@@ -263,16 +328,43 @@ function AgentDetail({
     void fetchDetail();
   }, [fetchDetail]);
 
-  // Light poll while the agent is pending — caller is waiting for the
-  // SignerListSet validation to flip status to 'active' or 'failed'. Stop
-  // polling once we've reached a terminal status.
+  // Light poll while the agent has an in-flight on-ledger transition:
+  //   - status='pending' → SignerListSet for grant is validating
+  //   - pending_revocation=true → SignerListSet for revoke is validating
+  // Stop polling once both reach a terminal state.
   useEffect(() => {
-    if (!agent || (agent.status !== 'pending' && agent.status !== 'submitting')) return;
+    if (!agent) return;
+    const inFlight =
+      agent.status === 'pending' ||
+      agent.status === 'submitting' ||
+      agent.pending_revocation === true;
+    if (!inFlight) return;
     const t = setInterval(() => {
       void fetchDetail();
     }, 4000);
     return () => clearInterval(t);
   }, [agent, fetchDetail]);
+
+  const handleRevoke = async () => {
+    if (!agent) return;
+    setRevoking(true);
+    setRevokeError(null);
+    try {
+      await api<{ tx_id: string; status: string }>(`/v1/agents/${agent.id}`, {
+        method: 'DELETE',
+      });
+      setConfirmingRevoke(false);
+      // Refresh detail so pending_revocation flips immediately and the
+      // poll effect above kicks in for the on-ledger flip. Also nudge
+      // the parent list so the badge updates without waiting.
+      await fetchDetail();
+      onStatusFlip();
+    } catch (err) {
+      setRevokeError(errorMessage(err));
+    } finally {
+      setRevoking(false);
+    }
+  };
 
   if (loading) return <span style={{ fontSize: 13, color: '#64748b' }}>Loading...</span>;
   if (error) return <span style={{ fontSize: 13, color: '#991b1b' }}>{error}</span>;
@@ -325,6 +417,103 @@ function AgentDetail({
           </ul>
         )}
       </div>
+
+      {/* Revoke action — only meaningful while status='active' and no
+          revocation is already in flight. The server enforces these same
+          conditions; the gate here keeps the UI clean. */}
+      {agent.status === 'active' && (
+        <div
+          style={{
+            borderTop: '1px solid #e2e8f0',
+            paddingTop: 12,
+            marginTop: 4,
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 8,
+          }}
+        >
+          {agent.pending_revocation ? (
+            <div style={{ fontSize: 12, color: '#9a3412' }}>
+              Revocation queued — waiting for on-ledger SignerListSet to validate. The status badge
+              will flip to <code>revoked</code> once it does.
+            </div>
+          ) : !confirmingRevoke ? (
+            <div>
+              <button
+                type="button"
+                onClick={() => setConfirmingRevoke(true)}
+                style={{
+                  padding: '6px 12px',
+                  background: '#fee2e2',
+                  color: '#991b1b',
+                  border: '1px solid #fca5a5',
+                  borderRadius: 4,
+                  cursor: 'pointer',
+                  fontSize: 12,
+                }}
+              >
+                Revoke agent
+              </button>
+            </div>
+          ) : (
+            <div
+              style={{
+                padding: 12,
+                background: '#fef2f2',
+                border: '1px solid #fca5a5',
+                borderRadius: 6,
+                display: 'flex',
+                flexDirection: 'column',
+                gap: 8,
+              }}
+            >
+              <div style={{ fontSize: 13, color: '#991b1b' }}>
+                Revoke this agent? RailForge will queue a SignerListSet that strips the delegate's
+                signing authority on the parent account. The agent will be permanently revoked once
+                the tx validates.
+              </div>
+              {revokeError && <div style={{ fontSize: 12, color: '#991b1b' }}>{revokeError}</div>}
+              <div style={{ display: 'flex', gap: 8 }}>
+                <button
+                  type="button"
+                  onClick={() => void handleRevoke()}
+                  disabled={revoking}
+                  style={{
+                    padding: '6px 12px',
+                    background: revoking ? '#cbd5e1' : '#dc2626',
+                    color: '#fff',
+                    border: 'none',
+                    borderRadius: 4,
+                    cursor: revoking ? 'not-allowed' : 'pointer',
+                    fontSize: 12,
+                  }}
+                >
+                  {revoking ? 'Revoking…' : 'Yes, revoke'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setConfirmingRevoke(false);
+                    setRevokeError(null);
+                  }}
+                  disabled={revoking}
+                  style={{
+                    padding: '6px 12px',
+                    background: 'transparent',
+                    color: '#475569',
+                    border: '1px solid #cbd5e1',
+                    borderRadius: 4,
+                    cursor: 'pointer',
+                    fontSize: 12,
+                  }}
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }

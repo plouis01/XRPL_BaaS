@@ -28,6 +28,8 @@ export interface Agent {
   agent_address: string;
   label: string | null;
   status: 'pending' | 'active' | 'failed' | 'revoked' | string;
+  /** True between DELETE /v1/agents/:id and the txConfirmer flip. */
+  pending_revocation?: boolean;
   allowlist?: AgentAllowlistEntry[];
   spend_policy?: {
     max_xrp_per_tx_drops: string | null;
@@ -44,6 +46,7 @@ export interface AgentSummary {
   agent_address: string;
   label: string | null;
   status: string;
+  pending_revocation?: boolean;
   created_at: string | null;
 }
 

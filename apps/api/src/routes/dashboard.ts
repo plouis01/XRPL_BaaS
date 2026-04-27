@@ -357,6 +357,7 @@ dashboard.get('/agents', async (c) => {
       agentAddress: schema.agents.agentAddress,
       label: schema.agents.label,
       status: schema.agents.status,
+      pendingRevocation: schema.agents.pendingRevocation,
       createdAt: schema.agents.createdAt,
     })
     .from(schema.agents)
@@ -373,6 +374,11 @@ dashboard.get('/agents', async (c) => {
       agent_address: r.agentAddress,
       label: r.label,
       status: r.status,
+      // pending_revocation: true while a DELETE /v1/agents/:id has queued
+      // a SignerListSet that hasn't yet validated. UI surfaces this as
+      // "Revoking…" until the txConfirmer flips status to 'revoked' (or
+      // clears the flag on failure, leaving status='active').
+      pending_revocation: r.pendingRevocation,
       created_at: r.createdAt,
       // agent_seed deliberately absent; allowlist + spend_policy are
       // available via the public GET /v1/agents/:id endpoint when the
