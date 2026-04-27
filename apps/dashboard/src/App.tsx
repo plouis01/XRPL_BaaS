@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { BrowserRouter, NavLink, Navigate, Route, Routes } from 'react-router-dom';
 import { ApiError, api, logout as apiLogout } from './api.ts';
+import { Agents } from './pages/Agents.tsx';
 import { ApiKeys } from './pages/ApiKeys.tsx';
 import { Credentials } from './pages/Credentials.tsx';
 import { Domains } from './pages/Domains.tsx';
@@ -160,7 +161,7 @@ export function App() {
                 Credentials
               </NavLink>
             </li>
-            <li>
+            <li style={{ marginBottom: 8 }}>
               <NavLink
                 to="/domains"
                 style={({ isActive }) => ({
@@ -170,6 +171,18 @@ export function App() {
                 })}
               >
                 Domains
+              </NavLink>
+            </li>
+            <li>
+              <NavLink
+                to="/agents"
+                style={({ isActive }) => ({
+                  textDecoration: 'none',
+                  color: isActive ? '#2563eb' : '#334155',
+                  fontWeight: isActive ? 600 : 400,
+                })}
+              >
+                Agents
               </NavLink>
             </li>
           </ul>
@@ -199,6 +212,7 @@ export function App() {
             <Route path="/tokens" element={<Tokens network={network} />} />
             <Route path="/credentials" element={<Credentials network={network} />} />
             <Route path="/domains" element={<Domains network={network} />} />
+            <Route path="/agents" element={<Agents network={network} />} />
             <Route path="*" element={<Navigate to="/keys" replace />} />
           </Routes>
         </main>

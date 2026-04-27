@@ -7,6 +7,44 @@ export interface ApiKey {
   is_active: boolean;
   created_at: string;
   revoked_at: string | null;
+  /** When set, this key is bound to an agent (sub-account delegate). */
+  agent_id: string | null;
+}
+
+export interface AgentAllowlistEntry {
+  entry_type: 'destination' | 'token' | 'domain';
+  entry_value: string;
+}
+
+/**
+ * Agent (semi-custodial sub-account delegate). The provisioning POST
+ * returns an `agent_seed` field exactly once — read endpoints (list/get)
+ * never include it.
+ */
+export interface Agent {
+  id: string;
+  preset: 'payment-agent' | 'treasury-agent' | string;
+  parent_address: string;
+  agent_address: string;
+  label: string | null;
+  status: 'pending' | 'active' | 'failed' | 'revoked' | string;
+  allowlist?: AgentAllowlistEntry[];
+  spend_policy?: {
+    max_xrp_per_tx_drops: string | null;
+    daily_xrp_limit_drops: string | null;
+  };
+  created_at: string | null;
+}
+
+/** Lightweight row shape returned by GET /v1/dashboard/agents. */
+export interface AgentSummary {
+  id: string;
+  preset: string;
+  parent_address: string;
+  agent_address: string;
+  label: string | null;
+  status: string;
+  created_at: string | null;
 }
 
 export interface Transaction {
