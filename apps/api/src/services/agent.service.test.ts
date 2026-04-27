@@ -22,6 +22,16 @@ const dbInsertResults: Record<string, unknown[]> = {
   agent_allowlists: [],
   spend_policies: [],
 };
+// Side-channel: tests can set an error here to make the next insert/upsert
+// for a given table throw (used to exercise the non-fatal spend-policy
+// upsert branch in provisionAgent).
+const dbInsertErrors: Record<string, Error> = {};
+// FIFO queue for agent_allowlists results — `authorizeAgentPayment` calls
+// `isAllowlisted` twice (destination, then token) through the SAME query
+// chain. The queue lets a test return different rows per call, exercising
+// the split case (destination hit, token miss) that a static row pool
+// can't distinguish.
+const dbAgentAllowlistsQueue: unknown[][] = [];
 const dbSelectResults: Record<string, unknown[]> = {};
 const dbUpdateCalls: unknown[] = [];
 
@@ -31,10 +41,12 @@ vi.mock('@railforge/db', () => {
       const terminal = {
         returning: vi.fn(async () => {
           dbInsertCalls.push({ table: table.__name, values: v });
+          if (dbInsertErrors[table.__name]) throw dbInsertErrors[table.__name];
           return dbInsertResults[table.__name] ?? [];
         }),
         onConflictDoUpdate: vi.fn(async () => {
           dbInsertCalls.push({ table: table.__name, values: v });
+          if (dbInsertErrors[table.__name]) throw dbInsertErrors[table.__name];
           return dbInsertResults[table.__name] ?? [];
         }),
       };
@@ -50,7 +62,10 @@ vi.mock('@railforge/db', () => {
   const select = vi.fn(() => ({
     from: vi.fn((table: { __name?: string } = {}) => {
       const tableName = table.__name ?? '';
-      const data = dbSelectResults[tableName] ?? [];
+      const data =
+        tableName === 'agent_allowlists' && dbAgentAllowlistsQueue.length > 0
+          ? (dbAgentAllowlistsQueue.shift() ?? [])
+          : (dbSelectResults[tableName] ?? []);
       // biome-ignore lint/suspicious/noExplicitAny: self-referencing fluent mock
       const awaitable: any = Object.assign(Promise.resolve(data), {
         where: vi.fn(() => awaitable),
@@ -153,6 +168,8 @@ beforeEach(() => {
   dbInsertCalls.length = 0;
   dbUpdateCalls.length = 0;
   for (const key of Object.keys(dbSelectResults)) delete dbSelectResults[key];
+  for (const key of Object.keys(dbInsertErrors)) delete dbInsertErrors[key];
+  dbAgentAllowlistsQueue.length = 0;
   grantPermissionMock.mockReset();
   grantPermissionMock.mockResolvedValue({
     id: 'delegation-1',
@@ -344,6 +361,36 @@ describe('provisionAgent — happy path', () => {
     expect(result.spend_policy.max_xrp_per_tx_drops).toBeNull();
     expect(result.spend_policy.daily_xrp_limit_drops).toBe('50000000');
   });
+
+  // agent.service.ts:379-387 — the spend-policy upsert is wrapped in try/catch
+  // and explicitly non-fatal: by the time we reach it, the agent row + signer
+  // list are already in flight, so a failed policy upsert degrades to "no
+  // daily cap" rather than orphaning the agent. This test pins that behavior.
+  it('non-fatal: when spend-policy upsert throws, provisioning still completes', async () => {
+    seedFundedParent();
+    dbInsertErrors.spend_policies = new Error('connection reset by peer');
+
+    const result = await provisionAgent({
+      clientId: CLIENT_ID,
+      preset: 'payment-agent',
+      parentAddress: PARENT_ADDRESS,
+      allowlist: [{ entry_type: 'destination', entry_value: OTHER_DESTINATION }],
+    });
+
+    expect(result.id).toBe('agent-1');
+    expect(result.status).toBe('pending');
+    expect(result.grant_tx_id).toBe('grant-tx-1');
+
+    // Response surfaces the resolved policy values even though the row didn't
+    // persist — better than hiding intent; ops alerts on the warn log are the
+    // recovery channel.
+    expect(result.spend_policy.max_xrp_per_tx_drops).toBe('10000000');
+    expect(result.spend_policy.daily_xrp_limit_drops).toBe('100000000');
+
+    // The upsert *was* attempted (so the failure is from the right call site,
+    // not a missed branch above it).
+    expect(dbInsertCalls.some((c) => c.table === 'spend_policies')).toBe(true);
+  });
 });
 
 // ── authorizeAgentPayment ───────────────────────────────────────────────────
@@ -480,10 +527,24 @@ describe('authorizeAgentPayment', () => {
     ).resolves.toBeUndefined();
   });
 
-  // NOTE: the split-allowlist case (destination allowed, token blocked) would
-  // require per-query result routing in the mock. Both queries go through the
-  // same `select().from(agent_allowlists).where()` chain, so teasing them
-  // apart needs either a call-counter mock or a predicate-aware stub. Skipped
-  // here — the symmetric positive case above already exercises the second
-  // allowlist check, and the token-block path is covered by symmetry.
+  // Split-allowlist case: destination passes, token query returns empty.
+  // The two `isAllowlisted` calls share the same query chain, so the
+  // `dbAgentAllowlistsQueue` FIFO returns hit-then-miss to drive the path.
+  it('rejects when destination is allowlisted but token is not', async () => {
+    seedActiveAgent();
+    dbAgentAllowlistsQueue.push([{ id: 'allow-dest' }], []);
+
+    await expect(
+      authorizeAgentPayment({
+        clientId: CLIENT_ID,
+        agentId: AGENT_ID,
+        sourceAddress: PARENT_ADDRESS,
+        destinationAddress: OTHER_DESTINATION,
+        assetKey: 'a'.repeat(48),
+      }),
+    ).rejects.toMatchObject({
+      name: 'AgentServiceError',
+      code: 'token_not_allowlisted',
+    });
+  });
 });
