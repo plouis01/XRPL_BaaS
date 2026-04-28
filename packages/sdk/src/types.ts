@@ -5,29 +5,32 @@
 // Common
 // ---------------------------------------------------------------------------
 
-export type Network = 'mainnet' | 'testnet';
+export type Network = "mainnet" | "testnet";
 
-export type TxStatus = 'queued' | 'submitted' | 'validated' | 'failed';
+export type TxStatus = "queued" | "submitted" | "validated" | "failed";
 
-export type CustodyMode = 'semi' | 'non_custodial';
+export type CustodyMode = "semi" | "non_custodial";
 
-export type TokenType = 'mpt' | 'trustline';
+export type TokenType = "mpt" | "trustline";
 
 export type WebhookEventType =
-  | 'transaction.validated'
-  | 'transaction.failed'
-  | 'credential.issued'
-  | 'credential.accepted'
-  | 'credential.revoked'
-  | 'credential.expiring'
-  | 'domain.created'
-  | 'domain.updated'
-  | 'domain.deleted';
+  | "transaction.validated"
+  | "transaction.failed"
+  | "credential.issued"
+  | "credential.accepted"
+  | "credential.revoked"
+  | "credential.expiring"
+  | "domain.created"
+  | "domain.updated"
+  | "domain.deleted"
+  | "agent.activated"
+  | "agent.failed"
+  | "agent.revoked";
 
 /** Returned by every async operation (202 Accepted). */
 export interface QueuedTx {
   tx_id: string;
-  status: 'queued';
+  status: "queued";
 }
 
 /** Standard error body. */
@@ -377,17 +380,17 @@ export interface AmmWithdrawParams {
 // ---------------------------------------------------------------------------
 
 export type PermissionValue =
-  | 'Payment'
-  | 'TrustSet'
-  | 'OfferCreate'
-  | 'OfferCancel'
-  | 'AccountSet'
-  | 'EscrowCreate'
-  | 'EscrowFinish'
-  | 'EscrowCancel'
-  | 'CredentialCreate'
-  | 'CredentialAccept'
-  | 'CredentialDelete';
+  | "Payment"
+  | "TrustSet"
+  | "OfferCreate"
+  | "OfferCancel"
+  | "AccountSet"
+  | "EscrowCreate"
+  | "EscrowFinish"
+  | "EscrowCancel"
+  | "CredentialCreate"
+  | "CredentialAccept"
+  | "CredentialDelete";
 
 export interface GrantPermissionParams {
   delegator_address: string;
@@ -421,4 +424,63 @@ export interface AuditEntry {
   status_code: number;
   ip: string | null;
   created_at: string | null;
+}
+
+// ---------------------------------------------------------------------------
+// Agents (VISION.md — agent launcher)
+// ---------------------------------------------------------------------------
+
+export type AgentPresetName = "payment-agent" | "treasury-agent";
+
+export type AgentAllowlistEntryType = "destination" | "token" | "domain";
+
+export interface AgentAllowlistEntry {
+  entry_type: AgentAllowlistEntryType;
+  entry_value: string;
+}
+
+export interface AgentSpendPolicyOverride {
+  max_xrp_per_tx_drops?: string | null;
+  daily_xrp_limit_drops?: string | null;
+}
+
+export interface ProvisionAgentParams {
+  preset: AgentPresetName;
+  parent_address: string;
+  label?: string;
+  spend_policy?: AgentSpendPolicyOverride;
+  allowlist?: AgentAllowlistEntry[];
+  quorum?: number;
+}
+
+export interface AgentSpendPolicy {
+  max_xrp_per_tx_drops: string | null;
+  daily_xrp_limit_drops: string | null;
+}
+
+export interface Agent {
+  id: string;
+  preset: string;
+  parent_address: string;
+  agent_address: string;
+  label: string | null;
+  status: string;
+  pending_revocation?: boolean;
+  allowlist: AgentAllowlistEntry[];
+  spend_policy: AgentSpendPolicy;
+  created_at: string | null;
+}
+
+export interface ProvisionedAgent extends Agent {
+  /** Delegate seed — returned exactly once. Persist before the response is discarded. */
+  agent_seed: string;
+  /** ID of the SignerListSet tx that grants on-ledger authority. */
+  grant_tx_id: string;
+}
+
+export interface RevokeAgentResult {
+  agent_id: string;
+  status: "revoking";
+  /** ID of the SignerListSet tx that strips the delegate. */
+  tx_id: string;
 }
