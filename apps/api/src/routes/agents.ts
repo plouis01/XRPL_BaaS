@@ -69,6 +69,20 @@ function agentErrorResponse(err: AgentServiceError): {
 agents.post('/', zValidator('json', provisionAgentSchema), async (c) => {
   const clientId = c.get('clientId');
   const body = c.req.valid('json');
+  // REVIEW B1: the 201 response body carries the delegate seed in
+  // `agent_seed`. The idempotency middleware would otherwise persist
+  // the response in Redis for 24 h, turning the cache into a credential
+  // store and breaking the "seed returned exactly once" contract
+  // documented in agent.service.ts. Opt out of body caching while
+  // keeping the lock + 409 dedup semantics. Concurrent duplicates with
+  // the same Idempotency-Key still get one winner; a serial replay
+  // re-runs the handler. Re-running is safe enough because (a) the
+  // underlying SignerListSet insert is constrained by
+  // UNIQUE(client_id, idempotency_key) on the transactions table, so
+  // double-submits to rippled are blocked at the DB layer, and (b) on
+  // a 23505 collision provisionAgent surfaces 'db_conflict' (409)
+  // rather than minting a second agent.
+  c.set('skipIdempotencyCache', true);
   try {
     const result = await provisionAgent({
       clientId,

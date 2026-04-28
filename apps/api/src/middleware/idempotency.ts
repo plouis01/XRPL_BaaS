@@ -236,7 +236,13 @@ export const idempotency: MiddlewareHandler<AppEnv> = async (c, next) => {
   // to do with the handler's logic, so caching them served no correctness
   // purpose. 5xx were already excluded (transient server errors).
   const status = c.res.status;
-  const shouldCache = status >= 200 && status < 300;
+  // REVIEW B1: routes whose response carries credentials (e.g. POST
+  // /v1/agents returns the delegate seed exactly once) opt out of body
+  // caching by setting `c.set('skipIdempotencyCache', true)` in the
+  // handler. The lock + 409-on-concurrent-duplicate behavior still
+  // applies; only the 24 h Redis copy of the response body is suppressed.
+  const skipCache = c.get('skipIdempotencyCache') === true;
+  const shouldCache = status >= 200 && status < 300 && !skipCache;
   if (shouldCache) {
     try {
       // Clone the response so we can read its body without consuming it

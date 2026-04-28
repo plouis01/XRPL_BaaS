@@ -17,6 +17,21 @@ export type AppVariables = {
    * NULL / absent for regular client-scoped keys.
    */
   agentId?: string | null;
+  /**
+   * REVIEW B1 opt-out: when set true by a route handler, the idempotency
+   * middleware will keep the lock + 409 semantics on duplicate requests
+   * but will SKIP writing the response body to Redis. Used by routes
+   * whose response carries credentials that must not sit in the cache
+   * (e.g. POST /v1/agents returns the delegate seed exactly once — a
+   * 24 h Redis copy would defeat that contract). Replays of the same
+   * idempotency key after the original response will run the handler
+   * fresh; if a handler is replay-unsafe in that mode it must also
+   * write idempotently to its own storage (the DB constraint on
+   * `transactions.idempotency_key` already does this for tx-emitting
+   * routes, and POST /v1/agents fits that pattern via the underlying
+   * SignerListSet insert).
+   */
+  skipIdempotencyCache?: boolean;
 };
 
 export type AppEnv = {

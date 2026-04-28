@@ -305,6 +305,94 @@ describe('idempotency middleware', () => {
     expect(r2.headers.get('x-idempotent-replay')).toBeNull();
   });
 
+  it('REVIEW B1: skipIdempotencyCache=true keeps lock + 409 but does NOT cache the 2xx body', async () => {
+    // The agent provisioning route opts out of body caching because the
+    // 201 response carries the delegate seed. The lock + 409-on-concurrent
+    // must still work; only the 24 h Redis copy is suppressed.
+    const calls = vi.fn();
+    const app = new Hono<AppEnv>();
+    app.use('*', async (c, next) => {
+      c.set('clientId', 'c1');
+      c.set('apiKeyId', 'k');
+      c.set('rateLimit', 100);
+      c.set('environment', 'testnet');
+      await next();
+    });
+    app.use('*', idempotency);
+    app.post('/v1/agents', (c) => {
+      calls();
+      // The route sets the opt-out flag.
+      c.set('skipIdempotencyCache', true);
+      return c.json({ id: 'a-1', agent_seed: 'sEdSEEDREDACTEDIN_LOG_ONLY' }, 201);
+    });
+
+    // First request: 201 with the seed in the body.
+    const r1 = await app.request('/v1/agents', {
+      method: 'POST',
+      headers: { 'idempotency-key': 'k1' },
+    });
+    expect(r1.status).toBe(201);
+    expect(r1.headers.get('x-idempotent-replay')).toBeNull();
+
+    // Critical: nothing was written to the response cache for this route.
+    const cacheKey = 'railforge:idemp:c1:POST:/v1/agents:k1';
+    expect(await mockRedis.get(cacheKey)).toBeNull();
+
+    // Second request with the same key — handler runs again because
+    // there's no cache to replay from. Redis cache MUST stay empty.
+    const r2 = await app.request('/v1/agents', {
+      method: 'POST',
+      headers: { 'idempotency-key': 'k1' },
+    });
+    expect(r2.status).toBe(201);
+    expect(r2.headers.get('x-idempotent-replay')).toBeNull();
+    expect(calls).toHaveBeenCalledTimes(2);
+    expect(await mockRedis.get(cacheKey)).toBeNull();
+  });
+
+  it('REVIEW B1: skipIdempotencyCache still acquires the lock (concurrent dup → 409)', async () => {
+    // The opt-out only suppresses the body cache; the lock-based
+    // concurrency dedup must still fire so two concurrent provision
+    // calls with the same key cannot both run.
+    let release = () => {};
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const calls = vi.fn();
+    const app = new Hono<AppEnv>();
+    app.use('*', async (c, next) => {
+      c.set('clientId', 'c1');
+      c.set('apiKeyId', 'k');
+      c.set('rateLimit', 100);
+      c.set('environment', 'testnet');
+      await next();
+    });
+    app.use('*', idempotency);
+    app.post('/v1/agents', async (c) => {
+      calls();
+      c.set('skipIdempotencyCache', true);
+      await blocked;
+      return c.json({ id: 'a-1', agent_seed: 's...' }, 201);
+    });
+
+    const p1 = app.request('/v1/agents', {
+      method: 'POST',
+      headers: { 'idempotency-key': 'k1' },
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const r2 = await app.request('/v1/agents', {
+      method: 'POST',
+      headers: { 'idempotency-key': 'k1' },
+    });
+    expect(r2.status).toBe(409);
+    expect(calls).toHaveBeenCalledTimes(1);
+
+    release();
+    const r1 = await p1;
+    expect(r1.status).toBe(201);
+  });
+
   it('4xx responses are NOT cached (REVIEW.md MED-12)', async () => {
     // MED-12: previously we cached 4xx for 24h, which let an attacker
     // deliberately trigger a 401 once and poison the victim's replay
