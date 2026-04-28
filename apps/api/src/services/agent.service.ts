@@ -64,7 +64,14 @@ export class AgentServiceError extends Error {
       | 'token_not_allowlisted'
       // ── revocation codes ────────────────────────────────────────────────
       | 'agent_not_revocable'
-      | 'agent_already_revoking',
+      | 'agent_already_revoking'
+      // ── parent eligibility ──────────────────────────────────────────────
+      // The picked parent is itself an agent-mode account (has
+      // metadata.agent_of set). Agents aren't on-ledger funded accounts —
+      // their reserve sits on the real parent — so a SignerListSet from an
+      // agent address rejects with actNotFound at rippled. Block at the
+      // service layer; the dashboard /accounts list also filters them out.
+      | 'parent_is_agent',
     message: string,
   ) {
     super(message);
@@ -190,6 +197,7 @@ async function resolveOwnedFundedAccount(
       id: schema.accounts.id,
       address: schema.accounts.address,
       isFunded: schema.accounts.isFunded,
+      metadata: schema.accounts.metadata,
     })
     .from(schema.accounts)
     .where(
@@ -202,6 +210,20 @@ async function resolveOwnedFundedAccount(
     .limit(1);
   const row = rows[0];
   if (!row) return null;
+  // Reject agent-mode accounts as parents. Agent rows are inserted into
+  // accounts so the worker can load the delegate's signing key, but they
+  // aren't on-ledger funded — their reserve sits on the REAL parent. A
+  // SignerListSet from an agent address rejects with actNotFound at
+  // rippled (the source has no ledger entry), and the txSubmitter leaves
+  // the row stuck in 'submitting'. Refuse here so the user gets a clean
+  // 400 instead of a silent stuck tx.
+  const meta = (row.metadata ?? {}) as { agent_of?: unknown };
+  if (typeof meta.agent_of === 'string' && meta.agent_of.length > 0) {
+    throw new AgentServiceError(
+      'parent_is_agent',
+      'Parent address is itself an agent — pick a non-agent managed account as the parent',
+    );
+  }
   if (!row.isFunded) {
     throw new AgentServiceError(
       'parent_not_funded',

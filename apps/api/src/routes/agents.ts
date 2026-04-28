@@ -34,6 +34,7 @@ function agentErrorResponse(err: AgentServiceError): {
     case 'invalid_preset':
     case 'invalid_allowlist':
     case 'allowlist_required':
+    case 'parent_is_agent':
       return { error: err.message, status: 400 };
     case 'parent_not_found':
       return { error: 'Parent account not found', status: 404 };

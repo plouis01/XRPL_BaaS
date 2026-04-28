@@ -174,6 +174,7 @@ vi.mock('@railforge/db', () => ({
       label: {},
       custodyMode: {},
       isFunded: {},
+      metadata: {},
       createdAt: {},
     },
     agents: {
@@ -456,6 +457,44 @@ describe('GET /dashboard/accounts', () => {
         custody_mode: 'semi',
       }),
     );
+  });
+
+  // Discovered in browser-verify: agent-mode rows in `accounts` (those with
+  // metadata.agent_of set) used to show up in the parent dropdown and could
+  // be picked, leading to a stuck SignerListSet (rippled actNotFound).
+  // The list endpoint must filter them out.
+  it('filters out agent-mode rows (metadata.agent_of set)', async () => {
+    nextKeyCheckRows = [{ id: 'k1' }];
+    nextRows = [
+      {
+        id: 'acct-real-parent',
+        address: 'rRealParent',
+        label: 'parent',
+        custodyMode: 'semi',
+        isFunded: true,
+        metadata: {},
+        createdAt: new Date('2026-01-01'),
+      },
+      {
+        id: 'acct-agent-as-parent',
+        address: 'rAgentAddress',
+        label: 'invoice-bot (agent)',
+        custodyMode: 'semi',
+        isFunded: true,
+        metadata: { agent_of: 'rRealParent', preset: 'payment-agent' },
+        createdAt: new Date('2026-01-02'),
+      },
+    ];
+    const app = makeApp();
+    const res = await app.request('/dashboard/accounts?environment=testnet');
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      data: Array<{ id: string; address: string }>;
+    };
+    expect(body.data).toHaveLength(1);
+    expect(body.data[0]?.id).toBe('acct-real-parent');
+    // The agent row was filtered out — its address must NOT appear.
+    expect(body.data.find((r) => r.address === 'rAgentAddress')).toBeUndefined();
   });
 });
 

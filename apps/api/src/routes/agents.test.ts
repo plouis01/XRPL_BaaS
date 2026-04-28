@@ -241,6 +241,7 @@ describe('POST /agents — service-error mapping', () => {
     ['invalid_preset', 400],
     ['invalid_allowlist', 400],
     ['allowlist_required', 400],
+    ['parent_is_agent', 400],
     ['parent_not_found', 404],
     ['parent_not_funded', 409],
     ['enqueue_failed', 503],

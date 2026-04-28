@@ -176,6 +176,22 @@ function seedMissingParent() {
   dbSelectResults.accounts = [];
 }
 
+function seedAgentModeParent() {
+  // Mirrors the metadata shape provisionAgent itself writes (line 296):
+  //   metadata: { agent_of: parent.address, preset: input.preset }
+  // Picking such a row as a parent must be rejected — the address is
+  // not a funded ledger account on its own, and a SignerListSet from
+  // it would fail at rippled with actNotFound.
+  dbSelectResults.accounts = [
+    {
+      id: 'agent-as-parent-acct',
+      address: PARENT_ADDRESS,
+      isFunded: true,
+      metadata: { agent_of: 'rOtherParentAddr', preset: 'payment-agent' },
+    },
+  ];
+}
+
 beforeEach(() => {
   dbInsertCalls.length = 0;
   dbUpdateCalls.length = 0;
@@ -312,6 +328,31 @@ describe('provisionAgent — parent-account resolution', () => {
       name: 'AgentServiceError',
       code: 'parent_not_funded',
     });
+  });
+
+  // Discovered in browser-verify after the revoke flow: an agent row in
+  // accounts (custody_mode='semi', metadata.agent_of=<parent>) used to
+  // appear in the parent dropdown and could be picked as a parent. Submit
+  // then stuck at 'submitting' on rippled (actNotFound — agent address has
+  // no on-ledger entry of its own). Service must reject before queuing.
+  it('rejects when the picked parent is itself an agent (metadata.agent_of set)', async () => {
+    seedAgentModeParent();
+    await expect(
+      provisionAgent({
+        clientId: CLIENT_ID,
+        preset: 'payment-agent',
+        parentAddress: PARENT_ADDRESS,
+        allowlist: [{ entry_type: 'destination', entry_value: OTHER_DESTINATION }],
+      }),
+    ).rejects.toMatchObject({
+      name: 'AgentServiceError',
+      code: 'parent_is_agent',
+    });
+    // Critical: nothing was inserted into accounts/agents and grantPermission
+    // never ran — no on-ledger artifacts on the failure path.
+    expect(grantPermissionMock).not.toHaveBeenCalled();
+    expect(dbInsertCalls.find((c) => c.table === 'accounts')).toBeUndefined();
+    expect(dbInsertCalls.find((c) => c.table === 'agents')).toBeUndefined();
   });
 });
 

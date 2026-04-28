@@ -304,6 +304,14 @@ dashboard.get('/accounts', async (c) => {
     return c.json({ data: [] });
   }
 
+  // Filter out agent-mode accounts: agents are stored as `accounts` rows so
+  // the worker can load their signing key, but they're NOT on-ledger funded
+  // accounts — their reserve sits on the real parent. Surfacing them in
+  // dropdowns that pick a "parent" or "issuer" leads users to provision
+  // agents on top of agents (rejected by `resolveOwnedFundedAccount` in
+  // agent.service, but the UX is bad). Detect them via `metadata.agent_of`,
+  // which is set at agent-creation time. We pull metadata and filter in JS
+  // because Drizzle's jsonb operators are awkward to use cross-version.
   const rows = await db
     .select({
       id: schema.accounts.id,
@@ -311,6 +319,7 @@ dashboard.get('/accounts', async (c) => {
       label: schema.accounts.label,
       custodyMode: schema.accounts.custodyMode,
       isFunded: schema.accounts.isFunded,
+      metadata: schema.accounts.metadata,
       createdAt: schema.accounts.createdAt,
     })
     .from(schema.accounts)
@@ -318,15 +327,23 @@ dashboard.get('/accounts', async (c) => {
     .orderBy(desc(schema.accounts.createdAt))
     .limit(200);
 
+  const isAgentMode = (m: unknown): boolean => {
+    if (!m || typeof m !== 'object') return false;
+    const v = (m as { agent_of?: unknown }).agent_of;
+    return typeof v === 'string' && v.length > 0;
+  };
+
   return c.json({
-    data: rows.map((r) => ({
-      id: r.id,
-      address: r.address,
-      label: r.label,
-      custody_mode: r.custodyMode,
-      is_funded: r.isFunded ?? false,
-      created_at: r.createdAt,
-    })),
+    data: rows
+      .filter((r) => !isAgentMode(r.metadata))
+      .map((r) => ({
+        id: r.id,
+        address: r.address,
+        label: r.label,
+        custody_mode: r.custodyMode,
+        is_funded: r.isFunded ?? false,
+        created_at: r.createdAt,
+      })),
   });
 });
 
