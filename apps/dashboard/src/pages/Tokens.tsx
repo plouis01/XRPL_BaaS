@@ -278,16 +278,16 @@ function TokenDetail({ token }: { token: Token }) {
       return unauthorizeFlag ? 'Unauthorized ✓' : 'Authorized ✓';
     }
     if (status === 'timeout') {
-      return 'Still pending — check Transactions tab for the outcome.';
+      return 'Still pending, check Transactions tab for the outcome.';
     }
     if (resultCode === 'tecDUPLICATE') {
       return 'Already authorized (on-chain MPToken object exists for this holder).';
     }
     if (resultCode === 'tecNO_PERMISSION') {
-      return 'tecNO_PERMISSION — issuer cannot opt-in to its own MPT, or the issuance requires pre-authorization.';
+      return 'tecNO_PERMISSION, issuer cannot opt-in to its own MPT, or the issuance requires pre-authorization.';
     }
     if (resultCode === 'tecHAS_OBLIGATIONS') {
-      return 'tecHAS_OBLIGATIONS — the holder still owns a non-zero balance. Transfer it back to the issuer (or clawback if enabled) before unauthorizing.';
+      return 'tecHAS_OBLIGATIONS, the holder still owns a non-zero balance. Transfer it back to the issuer (or clawback if enabled) before unauthorizing.';
     }
     return `Failed: ${resultCode ?? 'unknown'}`;
   };

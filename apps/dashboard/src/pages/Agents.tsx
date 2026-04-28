@@ -434,7 +434,7 @@ function AgentDetail({
         >
           {agent.pending_revocation ? (
             <div style={{ fontSize: 12, color: '#9a3412' }}>
-              Revocation queued — waiting for on-ledger SignerListSet to validate. The status badge
+              Revocation queued, waiting for on-ledger SignerListSet to validate. The status badge
               will flip to <code>revoked</code> once it does.
             </div>
           ) : !confirmingRevoke ? (
@@ -577,11 +577,11 @@ function SeedOnceBanner({
       }}
     >
       <div style={{ fontWeight: 600, marginBottom: 8, color: '#92400e' }}>
-        Agent provisioned — copy the seed now (shown only once)
+        Agent provisioned, copy the seed now (shown only once)
       </div>
       <div style={{ fontSize: 12, color: '#92400e', marginBottom: 8 }}>
         Agent <code>{agentId}</code>. Save the seed in your agent runtime or password manager.
-        RailForge will not return it again on any GET.
+        RailForge can't display it again.
       </div>
       <div
         style={{

@@ -124,7 +124,7 @@ export function ApiKeys({ network }: { network: Network }) {
               minWidth: 220,
             }}
           >
-            <option value="">— none (regular client key) —</option>
+            <option value=""> none (regular client key) </option>
             {agents.map((a) => (
               <option key={a.id} value={a.id}>
                 {a.label ?? a.id.slice(0, 8)} · {a.preset}
@@ -176,7 +176,7 @@ export function ApiKeys({ network }: { network: Network }) {
             marginBottom: 16,
           }}
         >
-          <strong>New API Key (copy now — shown only once):</strong>
+          <strong>New API Key (copy now, shown only once):</strong>
           <code style={{ display: 'block', marginTop: 8, wordBreak: 'break-all' }}>
             {newKeySecret}
           </code>
