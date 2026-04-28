@@ -128,6 +128,67 @@ GET /v1/agents/:id
 
 Single-agent read. Use this to poll `pending → active` after `provision`. Returns 404 (not 403) for agent IDs owned by another tenant — cross-tenant lookups are indistinguishable from non-existent IDs by design.
 
+## Update allowlist
+
+```http
+PUT /v1/agents/:id/allowlist
+```
+
+Replaces the agent's allowlist atomically. Pure DB operation — no on-ledger work, since the underlying `SignerListSet` doesn't reference individual destinations or tokens. The agent's preset is immutable post-provision and continues to dictate which `entry_type` values are valid (e.g. `payment-agent` still rejects `domain`).
+
+**Replace semantics.** The body's `allowlist` is the new full list. To "add an entry": fetch via `GET /v1/agents/:id`, append, then `PUT`. To "remove": fetch, filter, then `PUT`.
+
+### Request body
+
+| Field       | Type  | Description                                                                                    |
+| ----------- | ----- | ---------------------------------------------------------------------------------------------- |
+| `allowlist` | array | 0–100 entries. Same shape as the provision-time `allowlist` (see [above](#allowlist-entries)). |
+
+### Status gate
+
+Only agents in `status='active'` accept updates. Any of the following return **409**:
+
+- `status='pending'` — grant tx hasn't validated yet. Wait for activation, then PUT.
+- `pending_revocation=true` — a revoke is in flight. Don't race the revoke; either complete it or wait for it to clear.
+- `status='revoked'`, `'failed'`, `'revoking'` — terminal or in-flight; cannot mutate.
+
+### Response `200 OK`
+
+The updated agent view (same shape as `GET /v1/agents/:id`):
+
+```json
+{
+  "id": "agt_8c1b...",
+  "preset": "payment-agent",
+  "parent_address": "rParent...",
+  "agent_address": "rAgent...",
+  "label": "supplier-payouts",
+  "status": "active",
+  "pending_revocation": false,
+  "allowlist": [
+    { "entry_type": "destination", "entry_value": "rSupplierA..." },
+    { "entry_type": "destination", "entry_value": "rSupplierB..." }
+  ],
+  "spend_policy": {
+    "max_xrp_per_tx_drops": "10000000",
+    "daily_xrp_limit_drops": "100000000"
+  },
+  "created_at": "2026-04-28T11:00:00.000Z"
+}
+```
+
+### Error codes
+
+| HTTP | `error` shape                             | Cause                                                                                |
+| ---- | ----------------------------------------- | ------------------------------------------------------------------------------------ |
+| 400  | `invalid_allowlist`                       | An entry's shape is wrong for the agent's preset (e.g. `domain` on `payment-agent`). |
+| 400  | `allowlist_required`                      | Preset (`payment-agent`) requires at least one entry; `[]` was submitted.            |
+| 404  | `Agent not found`                         | No row matches client + agent (cross-tenant lookups also surface as 404).            |
+| 409  | `agent_not_updatable` (status / revoking) | See the status gate above.                                                           |
+| 409  | `Conflict — please retry`                 | Transient transaction failure. Pure DB op, so retry is safe.                         |
+
+> Spend-policy caps are not modified by this endpoint. Use the dashboard / spend-policy endpoint to adjust those independently.
+
 ## Revoke an agent
 
 ```http

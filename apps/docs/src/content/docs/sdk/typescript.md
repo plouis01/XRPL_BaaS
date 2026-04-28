@@ -288,6 +288,20 @@ while (view.status === "pending") {
 // List agents for the active client.
 const { data } = await rf.agents.list();
 
+// Add a destination to a live agent's allowlist (replace semantics —
+// fetch, append, then PUT the full list).
+const view = await rf.agents.get(agent.id);
+await rf.agents.updateAllowlist(agent.id, [
+  ...view.allowlist,
+  { entry_type: "destination", entry_value: "rNewSupplier..." },
+]);
+
+// Remove an entry the same way: fetch, filter, PUT.
+await rf.agents.updateAllowlist(
+  agent.id,
+  view.allowlist.filter((e) => e.entry_value !== "rOldSupplier..."),
+);
+
 // Stage revocation. The agent enters 'revoking' immediately and flips to
 // 'revoked' once the SignerListSet validates (or back to 'active' if the
 // tx fails). Subscribe to the 'agent.revoked' webhook for the terminal flip.
