@@ -46,6 +46,11 @@ export const REDACT_PATHS = [
   '*.tx_blob',
   '*.signing_key',
   '*.hsm_response',
+  // Agent-launcher delegate seed — returned exactly once on POST /v1/agents.
+  // The XRPL_SEED_PATTERN scrub is a backstop for raw seed strings inside
+  // err.message/err.stack; this path covers structured `{ result }` logs
+  // that pass the AgentView verbatim.
+  '*.agent_seed',
 
   // camelCase (xrpl.js Wallet + future code)
   '*.privateKey',
@@ -55,6 +60,7 @@ export const REDACT_PATHS = [
   '*.hsmResponse',
   '*.masterKey',
   '*.masterKeyRef',
+  '*.agentSeed',
 
   // HTTP headers
   'req.headers.authorization',
