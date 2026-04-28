@@ -106,6 +106,12 @@ v1.use('/permissions/*', requireNotAgent);
 v1.use('/domains/*', requireNotAgent);
 v1.use('/dex/*', requireNotAgent);
 v1.use('/webhooks/*', requireNotAgent);
+// /dashboard/* is agent-blocked too: POST /dashboard/keys mints a fresh
+// API key, and without this guard an agent-bound caller could mint a
+// non-bound key (omit body.agent_id) and escalate to full-tenant. The
+// read-only GETs are blocked too — an agent has no business enumerating
+// the tenant's transactions, credentials, or other agents.
+v1.use('/dashboard/*', requireNotAgent);
 
 v1.route('/accounts', accountsRoute);
 v1.route('/agents', agentsRoute);

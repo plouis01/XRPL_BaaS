@@ -462,6 +462,16 @@ dashboard.post('/keys', async (c) => {
   const clientId = c.get('clientId');
   const callerEnv = c.get('environment');
 
+  // Defense-in-depth (REVIEW A1): the global v1.use('/dashboard/*',
+  // requireNotAgent) gate already refuses agent-bound callers before this
+  // handler runs. The inline check is a second lock against a future
+  // refactor that re-mounts dashboard outside /v1 or accidentally drops
+  // the global guard — a regression here would re-open the privilege-
+  // escalation path (mint a non-bound key, escape agent scope).
+  if (c.get('agentId')) {
+    return c.json({ error: 'Forbidden' }, 403);
+  }
+
   let body: {
     environment: 'testnet' | 'mainnet';
     label?: string;
@@ -572,6 +582,13 @@ dashboard.post('/keys', async (c) => {
 dashboard.post('/keys/:id/revoke', async (c) => {
   const clientId = c.get('clientId');
   const id = c.req.param('id');
+
+  // Defense-in-depth (REVIEW A1) — see POST /keys for full rationale. An
+  // agent-bound caller reaching this handler would be a tenant-wide DoS
+  // (revoke any of the tenant's keys including the operator key).
+  if (c.get('agentId')) {
+    return c.json({ error: 'Forbidden' }, 403);
+  }
 
   const updated = await db
     .update(schema.apiKeys)

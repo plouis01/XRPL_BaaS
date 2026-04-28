@@ -775,6 +775,35 @@ describe('POST /dashboard/keys', () => {
     expect(res.status).toBe(400);
     expect(insertCalls.find((c) => c.table === 'api_keys')).toBeUndefined();
   });
+
+  // REVIEW A1: defense-in-depth inline guard. The global
+  // v1.use('/dashboard/*', requireNotAgent) refuses agent-bound callers
+  // before this handler runs in production; this test mounts the router
+  // directly to verify the in-handler check still fires if the global
+  // guard is ever dropped or the router is re-mounted outside /v1.
+  it('REVIEW A1: 403 when caller is agent-bound (inline guard)', async () => {
+    const app = new Hono<AppEnv>();
+    app.use('*', async (c, next) => {
+      c.set('clientId', 'client-1');
+      c.set('apiKeyId', 'key-1');
+      c.set('rateLimit', 100);
+      c.set('environment', 'testnet');
+      c.set('agentId', '11111111-2222-4333-8444-555555555555');
+      await next();
+    });
+    app.route('/dashboard', dashboardRoute);
+    const res = await app.request('/dashboard/keys', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ environment: 'testnet' }),
+    });
+    expect(res.status).toBe(403);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toBe('Forbidden');
+    // Crucially — no insert happened, so an agent-bound caller cannot
+    // mint a fresh non-bound key (the privilege escalation path).
+    expect(insertCalls.find((c) => c.table === 'api_keys')).toBeUndefined();
+  });
 });
 
 describe('POST /dashboard/keys/:id/revoke', () => {
@@ -796,5 +825,27 @@ describe('POST /dashboard/keys/:id/revoke', () => {
       method: 'POST',
     });
     expect(res.status).toBe(404);
+  });
+
+  // REVIEW A1: same defense-in-depth pattern as POST /keys. Without this,
+  // an agent-bound caller reaching this handler would be a tenant-wide
+  // DoS — revoke any of the tenant's keys including the operator key.
+  it('REVIEW A1: 403 when caller is agent-bound (inline guard)', async () => {
+    const app = new Hono<AppEnv>();
+    app.use('*', async (c, next) => {
+      c.set('clientId', 'client-1');
+      c.set('apiKeyId', 'key-1');
+      c.set('rateLimit', 100);
+      c.set('environment', 'testnet');
+      c.set('agentId', '11111111-2222-4333-8444-555555555555');
+      await next();
+    });
+    app.route('/dashboard', dashboardRoute);
+    const res = await app.request('/dashboard/keys/k-1/revoke', {
+      method: 'POST',
+    });
+    expect(res.status).toBe(403);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toBe('Forbidden');
   });
 });
