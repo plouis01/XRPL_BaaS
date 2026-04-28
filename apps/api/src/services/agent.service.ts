@@ -405,8 +405,15 @@ export async function provisionAgent(input: ProvisionAgentInput): Promise<AgentV
   // This enqueues a SignerListSet (XLS-75 V1.1 fallback). The txConfirmer
   // will flip agents.status 'pending' → 'active' on tesSUCCESS (new hook
   // alongside the existing delegation confirmation — wired separately).
+  //
+  // REVIEW D3: pass `agentId` so grantPermission writes
+  // agents.delegation_id INSIDE its own DB transaction. The previous flow
+  // ran a separate post-call UPDATE which could fail transiently and
+  // strand the agents row with delegation_id=NULL — breaking
+  // applyDelegationRevocationOutcome's join (status would stay 'active'
+  // forever even after a successful revoke stripped on-ledger authority).
+  // Atomic linkage closes that hole.
   let grantTxId: string;
-  let delegationId: string;
   try {
     const grant = await grantPermission({
       clientId: input.clientId,
@@ -416,9 +423,9 @@ export async function provisionAgent(input: ProvisionAgentInput): Promise<AgentV
       weight: 1,
       quorum: input.quorum ?? 1,
       idempotencyKey: input.idempotencyKey,
+      agentId,
     });
     grantTxId = grant.tx_id;
-    delegationId = grant.id;
   } catch (err) {
     if (err instanceof PermissionServiceError) {
       log.error({ err: err.message, code: err.code }, 'permission grant failed during provision');
@@ -429,11 +436,6 @@ export async function provisionAgent(input: ProvisionAgentInput): Promise<AgentV
     }
     throw err;
   }
-
-  // 6. Back-fill delegation_id on the agents row ------------------------------
-  // The spend-policy upsert was hoisted into the agents transaction above
-  // (was step 7) so it can no longer leave the agent without a daily cap.
-  await db.update(schema.agents).set({ delegationId }).where(eq(schema.agents.id, agentId));
 
   log.info({ agentId, parent: parent.address, grantTxId }, 'agent provisioned');
 

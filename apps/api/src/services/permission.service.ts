@@ -139,6 +139,21 @@ export interface GrantPermissionInput {
    */
   quorum?: number;
   idempotencyKey?: string;
+  /**
+   * REVIEW D3: when set, the freshly-inserted delegation's id is written
+   * back to `agents.delegation_id` for this agent UUID inside the SAME
+   * transaction that inserts the delegation row. Without this, the caller
+   * had to issue a separate UPDATE after `grantPermission` returned — and
+   * if that bare UPDATE failed, the agents row was orphaned with
+   * delegation_id=NULL. The downstream effect was that
+   * `applyDelegationRevocationOutcome` (which matches agents by
+   * delegation_id) could never finalize the row, so a revoke would strip
+   * on-ledger authority while leaving status='active' in the API forever.
+   * The agents table is in `apps/api/src/services` orbit but the schema
+   * is shared, so it's safe to write here. Only `provisionAgent` passes
+   * this; standalone permission grants leave it undefined.
+   */
+  agentId?: string;
 }
 
 export async function grantPermission(
@@ -239,6 +254,31 @@ export async function grantPermission(
       const delegRow = delegInserted[0];
       if (!delegRow) {
         throw new PermissionServiceError('db_conflict', 'delegations insert returned no row');
+      }
+
+      // REVIEW D3: atomic agents.delegation_id back-fill. The agents row
+      // is scoped by clientId so this UPDATE can never link an agent
+      // owned by another tenant. WHERE id=agentId AND clientId=clientId
+      // matches at most one row; an empty result rolls the whole tx back
+      // via the throw below so the delegations row is never committed
+      // without its agents linkage. Replaces the bare post-tx UPDATE
+      // that previously ran in agent.service.ts:provisionAgent — that
+      // path could leave agents.delegation_id NULL on transient DB
+      // failure, breaking applyDelegationRevocationOutcome's join.
+      if (input.agentId) {
+        const linked = await tx
+          .update(schema.agents)
+          .set({ delegationId: delegRow.id })
+          .where(
+            and(eq(schema.agents.id, input.agentId), eq(schema.agents.clientId, input.clientId)),
+          )
+          .returning({ id: schema.agents.id });
+        if (linked.length === 0) {
+          throw new PermissionServiceError(
+            'db_conflict',
+            'Failed to link delegation to agent (agent missing or cross-tenant)',
+          );
+        }
       }
 
       return { delegationId: delegRow.id, txId: txRow.id };

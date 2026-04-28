@@ -406,6 +406,13 @@ describe('provisionAgent — happy path', () => {
     expect(grantArg).toBeDefined();
     expect(grantArg.permissions).toEqual(['Payment']);
     expect(grantArg.delegatorAddress).toBe(PARENT_ADDRESS);
+    // REVIEW D3: provisionAgent must hand grantPermission its agentId so
+    // the delegation_id back-fill happens INSIDE grantPermission's
+    // transaction. The previous bare post-call UPDATE could leave the
+    // agents row stranded with delegation_id=NULL on a transient failure.
+    // The mock returns 'agent-1' as the inserted agents.id; assert it
+    // gets threaded through to the grant call.
+    expect(grantArg.agentId).toBe('agent-1');
 
     // DB effects: accounts + agents + agent_allowlists + spend_policies touched
     const touchedTables = dbInsertCalls.map((c) => c.table);
@@ -413,11 +420,6 @@ describe('provisionAgent — happy path', () => {
     expect(touchedTables).toContain('agents');
     expect(touchedTables).toContain('agent_allowlists');
     expect(touchedTables).toContain('spend_policies');
-
-    // delegation_id backfill
-    expect(
-      dbUpdateCalls.some((u) => (u as { delegationId?: string }).delegationId === 'delegation-1'),
-    ).toBe(true);
   });
 
   it('honors caller spend_policy overrides (including null to disable a default cap)', async () => {

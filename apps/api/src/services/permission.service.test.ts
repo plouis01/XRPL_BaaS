@@ -17,6 +17,13 @@ const dbSelectResults: {
 const dbUpdateCalls: Array<unknown> = [];
 const likeSpy = vi.fn();
 
+// REVIEW D3: when grantPermission is called with `agentId`, it issues
+// `UPDATE agents SET delegation_id = ... WHERE ... RETURNING { id }`
+// inside the same tx. The mock controls what that returning clause
+// resolves to: a non-empty list means "row matched and was linked"; an
+// empty list triggers the cross-tenant guard which rolls the tx back.
+let agentLinkReturning: Array<{ id: string }> = [{ id: 'agent-1' }];
+
 vi.mock('@railforge/db', () => {
   const insert = vi.fn((table: { __name: string }) => ({
     values: vi.fn((v: unknown) => ({
@@ -55,11 +62,21 @@ vi.mock('@railforge/db', () => {
     })),
   }));
 
+  // The where(...) leaf supports two shapes:
+  //   1. `await update().set().where()`               → resolves to []
+  //   2. `await update().set().where().returning()`   → resolves to
+  //      `agentLinkReturning` (REVIEW D3)
+  // Pre-fix tests (revokePermission staging UPDATE) use shape (1); the new
+  // grantPermission(agentId) path uses shape (2). One thenable that also
+  // exposes .returning() satisfies both.
   const update = vi.fn(() => ({
     set: vi.fn((vals: unknown) => ({
-      where: vi.fn(async () => {
+      where: vi.fn(() => {
         dbUpdateCalls.push(vals);
-        return [];
+        const p = Promise.resolve([]);
+        return Object.assign(p, {
+          returning: vi.fn(async () => agentLinkReturning),
+        });
       }),
     })),
   }));
@@ -75,6 +92,11 @@ vi.mock('@railforge/db', () => {
       transactions: { __name: 'transactions' },
       delegations: { __name: 'delegations' },
       auditLog: { __name: 'audit_log' },
+      // REVIEW D3: grantPermission(agentId) issues an UPDATE on agents
+      // inside its tx. The mock only needs the table marker + the columns
+      // referenced in the WHERE/RETURNING clauses; the eq/and helpers are
+      // already vi.fn stubs.
+      agents: { __name: 'agents', id: {}, clientId: {} },
     },
     eq: vi.fn(),
     and: vi.fn(),
@@ -103,6 +125,10 @@ describe('PermissionService', () => {
   beforeEach(() => {
     dbInsertCalls.length = 0;
     dbUpdateCalls.length = 0;
+    // REVIEW D3: default the agents-link UPDATE returning to a single row
+    // (the happy path). Tests that exercise the cross-tenant / missing-
+    // agent rollback override this to [].
+    agentLinkReturning = [{ id: 'agent-1' }];
     dbSelectResults.accounts = [{ id: 'acct-1', address: 'rDelegator' }];
     dbSelectResults.delegations = [];
     dbSelectResults.auditLog = [];
@@ -176,6 +202,60 @@ describe('PermissionService', () => {
           weight: 1,
         }),
       ).rejects.toThrow(/already exists/);
+    });
+
+    // REVIEW D3: agentId is the linkage knob the agent launcher uses.
+    // Without these, the `delegation_id` back-fill on agents could end
+    // up running outside the grant transaction (the bug we just closed)
+    // or could silently link a cross-tenant agent.
+
+    it('REVIEW D3: writes agents.delegation_id inside the grant transaction when agentId is provided', async () => {
+      const result = await grantPermission({
+        clientId: 'client-1',
+        delegatorAddress: 'rDelegator',
+        delegateAddress: 'rDelegate',
+        permissions: ['Payment'],
+        weight: 1,
+        agentId: 'agent-1',
+      });
+      expect(result.id).toBe('deleg-uuid-1');
+      // The UPDATE was issued as part of the grant tx — the mock pushes
+      // every set() vals into dbUpdateCalls. Find the agents-link write.
+      const agentLink = dbUpdateCalls.find(
+        (u) => (u as { delegationId?: string }).delegationId === 'deleg-uuid-1',
+      );
+      expect(agentLink).toBeDefined();
+    });
+
+    it('REVIEW D3: standalone grant (no agentId) does NOT touch agents', async () => {
+      await grantPermission({
+        clientId: 'client-1',
+        delegatorAddress: 'rDelegator',
+        delegateAddress: 'rDelegate',
+        permissions: ['Payment'],
+        weight: 1,
+      });
+      // No update at all is the strongest assertion — non-agent grants
+      // must never read or write the agents table.
+      expect(dbUpdateCalls).toHaveLength(0);
+    });
+
+    it('REVIEW D3: rolls the grant back when the agent UUID is missing or cross-tenant', async () => {
+      // Force the agents-link UPDATE to match zero rows (simulates an
+      // agent UUID that doesn't exist for this clientId — the cross-tenant
+      // guard in permission.service.ts must surface as db_conflict and
+      // roll the whole tx back so no orphan delegation is committed.
+      agentLinkReturning = [];
+      await expect(
+        grantPermission({
+          clientId: 'client-1',
+          delegatorAddress: 'rDelegator',
+          delegateAddress: 'rDelegate',
+          permissions: ['Payment'],
+          weight: 1,
+          agentId: 'agent-bogus',
+        }),
+      ).rejects.toThrow(/Failed to link delegation to agent/);
     });
   });
 
