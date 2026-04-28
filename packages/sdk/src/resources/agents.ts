@@ -1,6 +1,7 @@
 import type { HttpClient } from "../http.ts";
 import type {
   Agent,
+  AgentAllowlistEntry,
   ProvisionAgentParams,
   ProvisionedAgent,
   RequestOptions,
@@ -47,6 +48,28 @@ export class Agents {
   /** Fetch a single agent. Use this to poll the `pending → active` transition. */
   async get(agentId: string): Promise<Agent> {
     return this.http.get<Agent>(`/v1/agents/${agentId}`);
+  }
+
+  /**
+   * Replace the allowlist on a live agent. Pure DB op — no on-ledger work,
+   * since the underlying signer-list grant doesn't reference individual
+   * destinations or tokens. Body shape mirrors the provision-time `allowlist`
+   * field; the agent's preset (immutable post-provision) dictates which
+   * `entry_type` values are valid.
+   *
+   * Replace semantics: pass the FULL new list. To add an entry, fetch via
+   * `get(id)`, append, then call this. To remove, fetch, filter, then call.
+   *
+   * Status gate: only `'active'` agents accept updates. `'pending'` /
+   * `'revoking'` / `'revoked'` / `'failed'` return 409.
+   */
+  async updateAllowlist(
+    agentId: string,
+    allowlist: AgentAllowlistEntry[],
+  ): Promise<Agent> {
+    return this.http.put<Agent>(`/v1/agents/${agentId}/allowlist`, {
+      allowlist,
+    });
   }
 
   /**

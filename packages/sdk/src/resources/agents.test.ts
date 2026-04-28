@@ -67,4 +67,22 @@ describe("Agents resource", () => {
       "rev-1",
     );
   });
+
+  it("updateAllowlist calls PUT /v1/agents/:id/allowlist with the wrapped body", async () => {
+    const allowlist = [
+      { entry_type: "destination" as const, entry_value: "rDest1..." },
+      { entry_type: "destination" as const, entry_value: "rDest2..." },
+    ];
+    await agents.updateAllowlist("agent-uuid-1", allowlist);
+    expect(http.put).toHaveBeenCalledWith("/v1/agents/agent-uuid-1/allowlist", {
+      allowlist,
+    });
+  });
+
+  it("updateAllowlist accepts an empty array (treasury-agent / refresh)", async () => {
+    await agents.updateAllowlist("agent-uuid-1", []);
+    expect(http.put).toHaveBeenCalledWith("/v1/agents/agent-uuid-1/allowlist", {
+      allowlist: [],
+    });
+  });
 });
