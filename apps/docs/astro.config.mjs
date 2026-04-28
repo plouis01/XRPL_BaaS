@@ -25,6 +25,7 @@ export default defineConfig({
           label: 'API Reference',
           items: [
             { label: 'Accounts', slug: 'api/accounts' },
+            { label: 'Agents', slug: 'api/agents' },
             { label: 'Tokens', slug: 'api/tokens' },
             { label: 'Payments', slug: 'api/payments' },
             { label: 'Credentials', slug: 'api/credentials' },

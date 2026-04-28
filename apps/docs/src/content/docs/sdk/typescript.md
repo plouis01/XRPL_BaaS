@@ -1,6 +1,6 @@
 ---
 title: TypeScript SDK
-description: Install and use the @railforge/sdk package — 8 resource clients, auto-idempotency, typed errors.
+description: Install and use the @railforge/sdk package — 9 resource clients, auto-idempotency, typed errors.
 ---
 
 ## Installation
@@ -49,7 +49,7 @@ await rf.payments.send(
 
 ## Resource clients
 
-The `RailForge` class exposes eight resource clients: `accounts`, `tokens`, `payments`, `credentials`, `domains`, `permissions`, `dex`, `webhooks`.
+The `RailForge` class exposes nine resource clients: `accounts`, `agents`, `tokens`, `payments`, `credentials`, `domains`, `permissions`, `dex`, `webhooks`.
 
 ### `rf.accounts`
 
@@ -255,6 +255,46 @@ await rf.permissions.revoke("rDelegator...", "rDelegate...", {
 // Audit log
 const audit = await rf.permissions.audit("rDelegator...");
 ```
+
+### `rf.agents`
+
+```typescript
+// Provision a payment agent — generates the delegate keypair, queues the
+// SignerListSet, installs the spend policy, and writes the allowlist in one call.
+const agent = await rf.agents.provision({
+  preset: "payment-agent",
+  parent_address: "rParent...",
+  label: "supplier-payouts",
+  allowlist: [
+    { entry_type: "destination", entry_value: "rSupplierA..." },
+    { entry_type: "destination", entry_value: "rSupplierB..." },
+  ],
+  // Optional override; preset defaults to 10 XRP per tx, 100 XRP per day.
+  spend_policy: { max_xrp_per_tx_drops: "5000000" },
+});
+
+// CRITICAL: persist agent.agent_seed before this scope exits — it's the
+// only copy the SDK ever sees, redacted at every log boundary, and never
+// returned by subsequent reads.
+saveSeedSomewhereSafe(agent.agent_seed);
+
+// Poll until the grant tx validates.
+let view = await rf.agents.get(agent.id);
+while (view.status === "pending") {
+  await new Promise((r) => setTimeout(r, 1000));
+  view = await rf.agents.get(agent.id);
+}
+
+// List agents for the active client.
+const { data } = await rf.agents.list();
+
+// Stage revocation. The agent enters 'revoking' immediately and flips to
+// 'revoked' once the SignerListSet validates (or back to 'active' if the
+// tx fails). Subscribe to the 'agent.revoked' webhook for the terminal flip.
+await rf.agents.revoke(agent.id);
+```
+
+To bind an API key to this agent so its calls are gated automatically, mint it from the dashboard with `agent_id` set, or via `POST /v1/dashboard/keys`. Once bound, `rf.payments.send` calls from that key are restricted to allowlisted destinations and tokens — off-allowlist returns 400 before any tx is enqueued. See the [Agents API reference](/api/agents/) for the enforcement details.
 
 ### `rf.dex`
 
