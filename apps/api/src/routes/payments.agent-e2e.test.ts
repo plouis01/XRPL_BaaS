@@ -23,17 +23,9 @@
 //   - payment service not calling authorizeAgentPayment when agentId is set
 //   - allowlist row read with the wrong entry_type / entry_value shape
 
-import { Hono } from "hono";
-import {
-  afterEach,
-  beforeAll,
-  beforeEach,
-  describe,
-  expect,
-  it,
-  vi,
-} from "vitest";
-import type { AppEnv } from "../types.ts";
+import { Hono } from 'hono';
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { AppEnv } from '../types.ts';
 
 // ── DB mock (per-table dispatch + agent_allowlists FIFO) ───────────────────
 //
@@ -54,7 +46,7 @@ const dbSelectResults: Record<string, unknown[]> = {};
 const dbAgentAllowlistsQueue: unknown[][] = [];
 const enqueueCalls: unknown[] = [];
 
-vi.mock("@railforge/db", () => {
+vi.mock('@railforge/db', () => {
   const insert = vi.fn((table: { __name: string }) => ({
     values: vi.fn((v: unknown) => ({
       returning: vi.fn(async () => {
@@ -66,9 +58,9 @@ vi.mock("@railforge/db", () => {
 
   const select = vi.fn(() => ({
     from: vi.fn((table: { __name?: string } = {}) => {
-      const tableName = table.__name ?? "";
+      const tableName = table.__name ?? '';
       const data =
-        tableName === "agent_allowlists" && dbAgentAllowlistsQueue.length > 0
+        tableName === 'agent_allowlists' && dbAgentAllowlistsQueue.length > 0
           ? (dbAgentAllowlistsQueue.shift() ?? [])
           : (dbSelectResults[tableName] ?? []);
       // biome-ignore lint/suspicious/noExplicitAny: self-referencing fluent mock
@@ -82,13 +74,10 @@ vi.mock("@railforge/db", () => {
         innerJoin: vi.fn(() => {
           const joinedData = dbSelectResults.agents_joined ?? [];
           // biome-ignore lint/suspicious/noExplicitAny: mock reshape
-          const joinedAwaitable: any = Object.assign(
-            Promise.resolve(joinedData),
-            {
-              where: vi.fn(() => joinedAwaitable),
-              limit: vi.fn(() => joinedAwaitable),
-            },
-          );
+          const joinedAwaitable: any = Object.assign(Promise.resolve(joinedData), {
+            where: vi.fn(() => joinedAwaitable),
+            limit: vi.fn(() => joinedAwaitable),
+          });
           return joinedAwaitable;
         }),
       });
@@ -100,41 +89,41 @@ vi.mock("@railforge/db", () => {
     db: { insert, select },
     schema: {
       apiKeys: {
-        __name: "api_keys",
-        id: "id",
-        clientId: "clientId",
-        environment: "environment",
-        rateLimit: "rateLimit",
-        agentId: "agentId",
-        keyHash: "keyHash",
-        isActive: "isActive",
-        revokedAt: "revokedAt",
+        __name: 'api_keys',
+        id: 'id',
+        clientId: 'clientId',
+        environment: 'environment',
+        rateLimit: 'rateLimit',
+        agentId: 'agentId',
+        keyHash: 'keyHash',
+        isActive: 'isActive',
+        revokedAt: 'revokedAt',
       },
       accounts: {
-        __name: "accounts",
-        id: "id",
-        clientId: "clientId",
-        address: "address",
-        isFunded: "isFunded",
-        deletedAt: "deletedAt",
+        __name: 'accounts',
+        id: 'id',
+        clientId: 'clientId',
+        address: 'address',
+        isFunded: 'isFunded',
+        deletedAt: 'deletedAt',
       },
       agents: {
-        __name: "agents",
-        id: "id",
-        clientId: "clientId",
-        status: "status",
-        parentAccountId: "parentAccountId",
+        __name: 'agents',
+        id: 'id',
+        clientId: 'clientId',
+        status: 'status',
+        parentAccountId: 'parentAccountId',
       },
       agentAllowlists: {
-        __name: "agent_allowlists",
-        id: "id",
-        agentId: "agentId",
-        entryType: "entryType",
-        entryValue: "entryValue",
+        __name: 'agent_allowlists',
+        id: 'id',
+        agentId: 'agentId',
+        entryType: 'entryType',
+        entryValue: 'entryValue',
       },
       transactions: {
-        __name: "transactions",
-        id: "id",
+        __name: 'transactions',
+        id: 'id',
       },
     },
     eq: vi.fn((col: unknown, val: unknown) => ({ eq: [col, val] })),
@@ -144,20 +133,20 @@ vi.mock("@railforge/db", () => {
 });
 
 // Jobs mock — enqueue no-op so authorize-success doesn't try to talk to Redis.
-vi.mock("@railforge/jobs", () => ({
+vi.mock('@railforge/jobs', () => ({
   enqueueTxSubmit: vi.fn(async (data: unknown) => {
     enqueueCalls.push(data);
   }),
 }));
 
 // SpendPolicy mock — XRP/token caps aren't part of the agent wiring under test.
-vi.mock("../services/spendPolicy.service.ts", () => ({
+vi.mock('../services/spendPolicy.service.ts', () => ({
   enforceSpendPolicy: vi.fn(async () => {}),
   enforceTokenOpCount: vi.fn(async () => {}),
 }));
 
 // Logger — silence child loggers across all three layers.
-vi.mock("../logger.ts", () => ({
+vi.mock('../logger.ts', () => ({
   logger: {
     child: () => ({
       info: vi.fn(),
@@ -175,29 +164,29 @@ vi.mock("../logger.ts", () => ({
 // API_KEY_SALT must be set BEFORE importing auth.ts — hashApiKey reads it
 // at call time but a missing salt at module load would still surface as a
 // boot-time failure in any code that calls hashApiKey() at import time.
-process.env.API_KEY_SALT = "test-salt-do-not-use-in-production";
+process.env.API_KEY_SALT = 'test-salt-do-not-use-in-production';
 
 // Imports AFTER mocks + env are in place.
-const { auth, hashApiKey } = await import("../middleware/auth.ts");
-const { default: paymentsRoute } = await import("./payments.ts");
+const { auth, hashApiKey } = await import('../middleware/auth.ts');
+const { default: paymentsRoute } = await import('./payments.ts');
 
 // ── Fixtures ───────────────────────────────────────────────────────────────
 
-const RAW_AGENT_KEY = "rf_test_agent_e2e_raw_key_value_xxxxxxxxxx";
+const RAW_AGENT_KEY = 'rf_test_agent_e2e_raw_key_value_xxxxxxxxxx';
 // Real-looking base58 XRPL addresses — the validator schema rejects '0',
 // 'O', 'I', 'l' (not in base58). Reusing the addresses other route tests
 // use for source/destination keeps Zod validation out of the test lens.
-const PARENT_ADDRESS = "rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh";
-const ALLOWLISTED_DST = "rPT1Sjq2YGrBMTttX4GZHjKu9dyfzbpAYe";
-const FORBIDDEN_DST = "rEAasdLBpUNBBXXfSk1NbggQjuv2qSyTJZ";
-const CLIENT_ID = "client-1";
-const AGENT_ID = "agent-1";
-const PARENT_ACCT_ID = "acct-1";
+const PARENT_ADDRESS = 'rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh';
+const ALLOWLISTED_DST = 'rPT1Sjq2YGrBMTttX4GZHjKu9dyfzbpAYe';
+const FORBIDDEN_DST = 'rEAasdLBpUNBBXXfSk1NbggQjuv2qSyTJZ';
+const CLIENT_ID = 'client-1';
+const AGENT_ID = 'agent-1';
+const PARENT_ACCT_ID = 'acct-1';
 
 function makeApp(): Hono<AppEnv> {
   const app = new Hono<AppEnv>();
-  app.use("*", auth);
-  app.route("/payments", paymentsRoute);
+  app.use('*', auth);
+  app.route('/payments', paymentsRoute);
   return app;
 }
 
@@ -207,25 +196,23 @@ function makeApp(): Hono<AppEnv> {
 function seedHappyPath(): void {
   dbSelectResults.api_keys = [
     {
-      id: "key-1",
+      id: 'key-1',
       clientId: CLIENT_ID,
-      environment: "testnet",
+      environment: 'testnet',
       rateLimit: 100,
       agentId: AGENT_ID,
     },
   ];
-  dbSelectResults.accounts = [
-    { id: PARENT_ACCT_ID, address: PARENT_ADDRESS, isFunded: true },
-  ];
+  dbSelectResults.accounts = [{ id: PARENT_ACCT_ID, address: PARENT_ADDRESS, isFunded: true }];
   dbSelectResults.agents_joined = [
     {
       id: AGENT_ID,
-      status: "active",
+      status: 'active',
       parentAccountId: PARENT_ACCT_ID,
       parentAddress: PARENT_ADDRESS,
     },
   ];
-  dbInsertResults.transactions = [{ id: "tx-e2e-1" }];
+  dbInsertResults.transactions = [{ id: 'tx-e2e-1' }];
 }
 
 function resetState(): void {
@@ -238,10 +225,10 @@ function resetState(): void {
 
 // ── Tests ──────────────────────────────────────────────────────────────────
 
-describe("agent payment — end-to-end wiring (auth → route → service → gate)", () => {
+describe('agent payment — end-to-end wiring (auth → route → service → gate)', () => {
   beforeAll(() => {
     if (!process.env.API_KEY_SALT) {
-      throw new Error("test setup error: API_KEY_SALT not set");
+      throw new Error('test setup error: API_KEY_SALT not set');
     }
   });
 
@@ -254,55 +241,55 @@ describe("agent payment — end-to-end wiring (auth → route → service → ga
     vi.clearAllMocks();
   });
 
-  it("202 when destination is on the agent allowlist", async () => {
+  it('202 when destination is on the agent allowlist', async () => {
     // Allowlist hit: destination check returns one row.
-    dbAgentAllowlistsQueue.push([{ id: "al-1" }]);
+    dbAgentAllowlistsQueue.push([{ id: 'al-1' }]);
 
     const app = makeApp();
-    const res = await app.request("/payments", {
-      method: "POST",
+    const res = await app.request('/payments', {
+      method: 'POST',
       headers: {
-        "Content-Type": "application/json",
-        "X-API-Key": RAW_AGENT_KEY,
-        "Idempotency-Key": "idem-1",
+        'Content-Type': 'application/json',
+        'X-API-Key': RAW_AGENT_KEY,
+        'Idempotency-Key': 'idem-1',
       },
       body: JSON.stringify({
         source: PARENT_ADDRESS,
         destination: ALLOWLISTED_DST,
-        amount_drops: "1000000",
+        amount_drops: '1000000',
       }),
     });
 
     expect(res.status).toBe(202);
     const body = (await res.json()) as { tx_id: string; status: string };
-    expect(body.tx_id).toBe("tx-e2e-1");
-    expect(body.status).toBe("queued");
+    expect(body.tx_id).toBe('tx-e2e-1');
+    expect(body.status).toBe('queued');
 
     // Wiring assertions — these are what catch regressions across the chain:
     //   - the auth lookup ran with our exact key hash (auth wired up)
     //   - the transaction insert fired (service ran past the gate)
     //   - the worker enqueue fired (post-gate path completed)
-    const txInsert = dbInsertCalls.find((c) => c.table === "transactions");
+    const txInsert = dbInsertCalls.find((c) => c.table === 'transactions');
     expect(txInsert).toBeDefined();
     expect(enqueueCalls).toHaveLength(1);
   });
 
-  it("400 when destination is NOT on the agent allowlist (no insert, no enqueue)", async () => {
+  it('400 when destination is NOT on the agent allowlist (no insert, no enqueue)', async () => {
     // Allowlist miss: destination check returns zero rows.
     dbAgentAllowlistsQueue.push([]);
 
     const app = makeApp();
-    const res = await app.request("/payments", {
-      method: "POST",
+    const res = await app.request('/payments', {
+      method: 'POST',
       headers: {
-        "Content-Type": "application/json",
-        "X-API-Key": RAW_AGENT_KEY,
-        "Idempotency-Key": "idem-2",
+        'Content-Type': 'application/json',
+        'X-API-Key': RAW_AGENT_KEY,
+        'Idempotency-Key': 'idem-2',
       },
       body: JSON.stringify({
         source: PARENT_ADDRESS,
         destination: FORBIDDEN_DST,
-        amount_drops: "1000000",
+        amount_drops: '1000000',
       }),
     });
 
@@ -317,27 +304,25 @@ describe("agent payment — end-to-end wiring (auth → route → service → ga
     expect(body.error).toMatch(/allowlist/i);
 
     // The gate ran BEFORE the tx insert + enqueue — neither side effect fires.
-    expect(
-      dbInsertCalls.find((c) => c.table === "transactions"),
-    ).toBeUndefined();
+    expect(dbInsertCalls.find((c) => c.table === 'transactions')).toBeUndefined();
     expect(enqueueCalls).toHaveLength(0);
   });
 
-  it("401 when the X-API-Key header is missing (auth wiring sanity check)", async () => {
+  it('401 when the X-API-Key header is missing (auth wiring sanity check)', async () => {
     const app = makeApp();
-    const res = await app.request("/payments", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
+    const res = await app.request('/payments', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         source: PARENT_ADDRESS,
         destination: ALLOWLISTED_DST,
-        amount_drops: "1000000",
+        amount_drops: '1000000',
       }),
     });
     expect(res.status).toBe(401);
   });
 
-  it("demonstrates auth produced the same key hash the seed expects", () => {
+  it('demonstrates auth produced the same key hash the seed expects', () => {
     // Pure sanity check — if hashApiKey ever changes (different algo, salt
     // not read, encoding shift), the e2e tests above would silently 401 on
     // every request. Asserting the hash explicitly here makes that mode

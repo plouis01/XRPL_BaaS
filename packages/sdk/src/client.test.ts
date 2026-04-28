@@ -1,14 +1,14 @@
-import { describe, expect, it, vi } from "vitest";
-import { RailForge } from "./client.ts";
+import { describe, expect, it, vi } from 'vitest';
+import { RailForge } from './client.ts';
 
 vi.stubGlobal(
-  "fetch",
+  'fetch',
   vi.fn(async () => ({ ok: true, status: 200, json: async () => ({}) })),
 );
 
-describe("RailForge", () => {
-  it("exposes all resource clients", () => {
-    const rf = new RailForge({ apiKey: "rf_test_abc" });
+describe('RailForge', () => {
+  it('exposes all resource clients', () => {
+    const rf = new RailForge({ apiKey: 'rf_test_abc' });
     expect(rf.accounts).toBeDefined();
     expect(rf.agents).toBeDefined();
     expect(rf.credentials).toBeDefined();
@@ -20,22 +20,22 @@ describe("RailForge", () => {
     expect(rf.webhooks).toBeDefined();
   });
 
-  it("defaults to testnet base URL", () => {
-    const rf = new RailForge({ apiKey: "rf_test_abc" });
+  it('defaults to testnet base URL', () => {
+    const rf = new RailForge({ apiKey: 'rf_test_abc' });
     // Verify by making a request and checking the URL
     expect(rf).toBeDefined();
   });
 
-  it("accepts a custom baseUrl", () => {
+  it('accepts a custom baseUrl', () => {
     const rf = new RailForge({
-      apiKey: "rf_test_abc",
-      baseUrl: "http://localhost:3000",
+      apiKey: 'rf_test_abc',
+      baseUrl: 'http://localhost:3000',
     });
     expect(rf).toBeDefined();
   });
 
-  it("accepts mainnet network", () => {
-    const rf = new RailForge({ apiKey: "rf_live_abc", network: "mainnet" });
+  it('accepts mainnet network', () => {
+    const rf = new RailForge({ apiKey: 'rf_live_abc', network: 'mainnet' });
     expect(rf).toBeDefined();
   });
 });

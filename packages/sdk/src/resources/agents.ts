@@ -1,4 +1,4 @@
-import type { HttpClient } from "../http.ts";
+import type { HttpClient } from '../http.ts';
 import type {
   Agent,
   AgentAllowlistEntry,
@@ -6,7 +6,7 @@ import type {
   ProvisionedAgent,
   RequestOptions,
   RevokeAgentResult,
-} from "../types.ts";
+} from '../types.ts';
 
 /**
  * Agent launcher — VISION.md "agent launcher" (POST /v1/agents).
@@ -29,20 +29,13 @@ export class Agents {
    * before the promise resolves out of scope. `status` will be `'pending'`
    * until the grant tx validates; poll `get(id)` for the flip to `'active'`.
    */
-  async provision(
-    params: ProvisionAgentParams,
-    opts?: RequestOptions,
-  ): Promise<ProvisionedAgent> {
-    return this.http.post<ProvisionedAgent>(
-      "/v1/agents",
-      params,
-      opts?.idempotencyKey,
-    );
+  async provision(params: ProvisionAgentParams, opts?: RequestOptions): Promise<ProvisionedAgent> {
+    return this.http.post<ProvisionedAgent>('/v1/agents', params, opts?.idempotencyKey);
   }
 
   /** List all agents owned by the authenticated client. */
   async list(): Promise<{ data: Agent[] }> {
-    return this.http.get<{ data: Agent[] }>("/v1/agents");
+    return this.http.get<{ data: Agent[] }>('/v1/agents');
   }
 
   /** Fetch a single agent. Use this to poll the `pending → active` transition. */
@@ -63,10 +56,7 @@ export class Agents {
    * Status gate: only `'active'` agents accept updates. `'pending'` /
    * `'revoking'` / `'revoked'` / `'failed'` return 409.
    */
-  async updateAllowlist(
-    agentId: string,
-    allowlist: AgentAllowlistEntry[],
-  ): Promise<Agent> {
+  async updateAllowlist(agentId: string, allowlist: AgentAllowlistEntry[]): Promise<Agent> {
     return this.http.put<Agent>(`/v1/agents/${agentId}/allowlist`, {
       allowlist,
     });
@@ -77,10 +67,7 @@ export class Agents {
    * the agent transitions to `'revoking'` immediately and to `'revoked'`
    * once the tx validates (or back to `'active'` on tx failure).
    */
-  async revoke(
-    agentId: string,
-    opts?: RequestOptions,
-  ): Promise<RevokeAgentResult> {
+  async revoke(agentId: string, opts?: RequestOptions): Promise<RevokeAgentResult> {
     return this.http.delete<RevokeAgentResult>(
       `/v1/agents/${agentId}`,
       undefined,

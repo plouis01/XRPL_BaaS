@@ -5,32 +5,32 @@
 // Common
 // ---------------------------------------------------------------------------
 
-export type Network = "mainnet" | "testnet";
+export type Network = 'mainnet' | 'testnet';
 
-export type TxStatus = "queued" | "submitted" | "validated" | "failed";
+export type TxStatus = 'queued' | 'submitted' | 'validated' | 'failed';
 
-export type CustodyMode = "semi" | "non_custodial";
+export type CustodyMode = 'semi' | 'non_custodial';
 
-export type TokenType = "mpt" | "trustline";
+export type TokenType = 'mpt' | 'trustline';
 
 export type WebhookEventType =
-  | "transaction.validated"
-  | "transaction.failed"
-  | "credential.issued"
-  | "credential.accepted"
-  | "credential.revoked"
-  | "credential.expiring"
-  | "domain.created"
-  | "domain.updated"
-  | "domain.deleted"
-  | "agent.activated"
-  | "agent.failed"
-  | "agent.revoked";
+  | 'transaction.validated'
+  | 'transaction.failed'
+  | 'credential.issued'
+  | 'credential.accepted'
+  | 'credential.revoked'
+  | 'credential.expiring'
+  | 'domain.created'
+  | 'domain.updated'
+  | 'domain.deleted'
+  | 'agent.activated'
+  | 'agent.failed'
+  | 'agent.revoked';
 
 /** Returned by every async operation (202 Accepted). */
 export interface QueuedTx {
   tx_id: string;
-  status: "queued";
+  status: 'queued';
 }
 
 /** Standard error body. */
@@ -380,17 +380,17 @@ export interface AmmWithdrawParams {
 // ---------------------------------------------------------------------------
 
 export type PermissionValue =
-  | "Payment"
-  | "TrustSet"
-  | "OfferCreate"
-  | "OfferCancel"
-  | "AccountSet"
-  | "EscrowCreate"
-  | "EscrowFinish"
-  | "EscrowCancel"
-  | "CredentialCreate"
-  | "CredentialAccept"
-  | "CredentialDelete";
+  | 'Payment'
+  | 'TrustSet'
+  | 'OfferCreate'
+  | 'OfferCancel'
+  | 'AccountSet'
+  | 'EscrowCreate'
+  | 'EscrowFinish'
+  | 'EscrowCancel'
+  | 'CredentialCreate'
+  | 'CredentialAccept'
+  | 'CredentialDelete';
 
 export interface GrantPermissionParams {
   delegator_address: string;
@@ -430,9 +430,9 @@ export interface AuditEntry {
 // Agents (VISION.md — agent launcher)
 // ---------------------------------------------------------------------------
 
-export type AgentPresetName = "payment-agent" | "treasury-agent";
+export type AgentPresetName = 'payment-agent' | 'treasury-agent';
 
-export type AgentAllowlistEntryType = "destination" | "token" | "domain";
+export type AgentAllowlistEntryType = 'destination' | 'token' | 'domain';
 
 export interface AgentAllowlistEntry {
   entry_type: AgentAllowlistEntryType;
@@ -480,7 +480,7 @@ export interface ProvisionedAgent extends Agent {
 
 export interface RevokeAgentResult {
   agent_id: string;
-  status: "revoking";
+  status: 'revoking';
   /** ID of the SignerListSet tx that strips the delegate. */
   tx_id: string;
 }
