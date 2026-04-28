@@ -81,25 +81,59 @@ export function Agents({ network }: { network: Network }) {
   // toggle exposes them when the user actually wants to inspect history.
   const [showRevoked, setShowRevoked] = useState(false);
 
-  const fetchAgents = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const data = await api<{ data: AgentSummary[] }>(
-        `/v1/dashboard/agents?environment=${network}`,
-      );
-      setAgents(data.data);
-    } catch (err) {
-      setAgents([]);
-      setError(errorMessage(err));
-    } finally {
-      setLoading(false);
-    }
-  }, [network]);
+  // `silent` is the background-poll branch: don't flip the spinner and
+  // don't wipe the table on a transient error. The user-initiated path
+  // (mount, network change, post-create) keeps the loud behavior so they
+  // get visible feedback that the page is loading.
+  const fetchAgents = useCallback(
+    async ({ silent = false }: { silent?: boolean } = {}) => {
+      if (!silent) {
+        setLoading(true);
+        setError(null);
+      }
+      try {
+        const data = await api<{ data: AgentSummary[] }>(
+          `/v1/dashboard/agents?environment=${network}`,
+        );
+        setAgents(data.data);
+        if (silent) setError(null);
+      } catch (err) {
+        if (!silent) {
+          setAgents([]);
+          setError(errorMessage(err));
+        }
+        // Silent path swallows the error — the next tick of the background
+        // poll will retry, and a transient blip shouldn't blank the table
+        // the user is looking at.
+      } finally {
+        if (!silent) setLoading(false);
+      }
+    },
+    [network],
+  );
 
   useEffect(() => {
     void fetchAgents();
   }, [fetchAgents]);
+
+  // List-level background poll. The per-row AgentDetail polls /v1/agents/:id
+  // and triggers a list refresh on a status flip — but it only mounts when
+  // the user expands a row. Fresh agents land in the table collapsed, so
+  // without this hook the badge sits at "pending" until manual refresh.
+  // Poll the list every 3 s while any row is in flight (pending grant or
+  // pending revocation) and stop once everything has reached a terminal
+  // state. 3 s mirrors xrpld ledger close cadence — faster wastes round
+  // trips, slower makes the UX feel broken.
+  const anyInFlight = agents.some(
+    (a) => a.status === 'pending' || a.status === 'submitting' || a.pending_revocation === true,
+  );
+  useEffect(() => {
+    if (!anyInFlight) return;
+    const interval = setInterval(() => {
+      void fetchAgents({ silent: true });
+    }, 3_000);
+    return () => clearInterval(interval);
+  }, [anyInFlight, fetchAgents]);
 
   return (
     <div>
