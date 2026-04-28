@@ -35,47 +35,56 @@
 // the caller can configure their agent runtime; after that it lives only in
 // `accounts.master_key_ref` (same redaction path as parent-account seeds).
 
-import { and, db, eq, isNull, schema } from '@railforge/db';
-import { Wallet } from 'xrpl';
-import { logger } from '../logger.ts';
+import { and, db, eq, isNull, schema } from "@railforge/db";
+import { Wallet } from "xrpl";
+import { logger } from "../logger.ts";
 import {
   AGENT_PRESETS,
   type AgentAllowlistEntryType,
   type AgentPresetName,
   getPreset,
-} from '../presets/agent-presets.ts';
-import { PermissionServiceError, grantPermission, revokePermission } from './permission.service.ts';
+} from "../presets/agent-presets.ts";
+import {
+  PermissionServiceError,
+  grantPermission,
+  revokePermission,
+} from "./permission.service.ts";
 
 export class AgentServiceError extends Error {
   constructor(
     public readonly code:
-      | 'invalid_preset'
-      | 'parent_not_found'
-      | 'parent_not_funded'
-      | 'invalid_allowlist'
-      | 'allowlist_required'
-      | 'enqueue_failed'
-      | 'db_conflict'
+      | "invalid_preset"
+      | "parent_not_found"
+      | "parent_not_funded"
+      | "invalid_allowlist"
+      | "allowlist_required"
+      | "enqueue_failed"
+      | "db_conflict"
       // ── authorization failure codes (service-layer gating) ──────────────
-      | 'agent_not_found'
-      | 'agent_not_active'
-      | 'source_not_parent'
-      | 'destination_not_allowlisted'
-      | 'token_not_allowlisted'
+      | "agent_not_found"
+      | "agent_not_active"
+      | "source_not_parent"
+      | "destination_not_allowlisted"
+      | "token_not_allowlisted"
       // ── revocation codes ────────────────────────────────────────────────
-      | 'agent_not_revocable'
-      | 'agent_already_revoking'
+      | "agent_not_revocable"
+      | "agent_already_revoking"
+      // ── allowlist update gate ───────────────────────────────────────────
+      // Status gate for PUT /v1/agents/:id/allowlist — agent must be
+      // 'active' and not pending_revocation. Distinct from the revocation
+      // gate because the 409 reason and caller remediation differ.
+      | "agent_not_updatable"
       // ── parent eligibility ──────────────────────────────────────────────
       // The picked parent is itself an agent-mode account (has
       // metadata.agent_of set). Agents aren't on-ledger funded accounts —
       // their reserve sits on the real parent — so a SignerListSet from an
       // agent address rejects with actNotFound at rippled. Block at the
       // service layer; the dashboard /accounts list also filters them out.
-      | 'parent_is_agent',
+      | "parent_is_agent",
     message: string,
   ) {
     super(message);
-    this.name = 'AgentServiceError';
+    this.name = "AgentServiceError";
   }
 }
 
@@ -155,30 +164,31 @@ function validateAllowlistEntry(
     return `preset '${preset}' does not allow entry_type '${entry.entry_type}'`;
   }
   switch (entry.entry_type) {
-    case 'destination':
+    case "destination":
       if (!R_ADDRESS.test(entry.entry_value)) {
         return `destination '${entry.entry_value}' is not a valid XRPL address`;
       }
       return null;
-    case 'token':
+    case "token":
       // Either MPT issuance ID (48 hex) OR `<currency>:<issuer>` where
       // currency is 3 chars or 40-hex and issuer is an r-address.
       if (HEX_192.test(entry.entry_value)) return null;
       {
-        const parts = entry.entry_value.split(':');
+        const parts = entry.entry_value.split(":");
         if (parts.length !== 2) {
           return `token '${entry.entry_value}' must be an MPT issuance ID or '<currency>:<issuer>'`;
         }
         const [currency, issuer] = parts;
         const currencyOk =
-          !!currency && (currency.length === 3 || /^[0-9a-fA-F]{40}$/.test(currency));
+          !!currency &&
+          (currency.length === 3 || /^[0-9a-fA-F]{40}$/.test(currency));
         const issuerOk = !!issuer && R_ADDRESS.test(issuer);
         if (!currencyOk || !issuerOk) {
           return `token '${entry.entry_value}' has an invalid currency or issuer`;
         }
       }
       return null;
-    case 'domain':
+    case "domain":
       if (!HEX_256.test(entry.entry_value)) {
         return `domain '${entry.entry_value}' must be a 64-char hex DomainID`;
       }
@@ -218,16 +228,16 @@ async function resolveOwnedFundedAccount(
   // the row stuck in 'submitting'. Refuse here so the user gets a clean
   // 400 instead of a silent stuck tx.
   const meta = (row.metadata ?? {}) as { agent_of?: unknown };
-  if (typeof meta.agent_of === 'string' && meta.agent_of.length > 0) {
+  if (typeof meta.agent_of === "string" && meta.agent_of.length > 0) {
     throw new AgentServiceError(
-      'parent_is_agent',
-      'Parent address is itself an agent — pick a non-agent managed account as the parent',
+      "parent_is_agent",
+      "Parent address is itself an agent — pick a non-agent managed account as the parent",
     );
   }
   if (!row.isFunded) {
     throw new AgentServiceError(
-      'parent_not_funded',
-      'Parent account is not yet funded — wait for the funding payment to validate before provisioning an agent',
+      "parent_not_funded",
+      "Parent account is not yet funded — wait for the funding payment to validate before provisioning an agent",
     );
   }
   return { id: row.id, address: row.address };
@@ -235,10 +245,12 @@ async function resolveOwnedFundedAccount(
 
 // ── Main provisioning flow ──────────────────────────────────────────────────
 
-export async function provisionAgent(input: ProvisionAgentInput): Promise<AgentView> {
+export async function provisionAgent(
+  input: ProvisionAgentInput,
+): Promise<AgentView> {
   const log = logger.child({
-    service: 'agent',
-    op: 'provision',
+    service: "agent",
+    op: "provision",
     clientId: input.clientId,
     preset: input.preset,
   });
@@ -246,24 +258,30 @@ export async function provisionAgent(input: ProvisionAgentInput): Promise<AgentV
   // 1. Preset + allowlist validation ------------------------------------------
   const preset = getPreset(input.preset);
   if (!preset) {
-    throw new AgentServiceError('invalid_preset', `Unknown preset '${input.preset}'`);
+    throw new AgentServiceError(
+      "invalid_preset",
+      `Unknown preset '${input.preset}'`,
+    );
   }
 
   if (preset.requireAllowlist && input.allowlist.length === 0) {
     throw new AgentServiceError(
-      'allowlist_required',
+      "allowlist_required",
       `preset '${preset.name}' requires at least one allowlist entry`,
     );
   }
   for (const entry of input.allowlist) {
     const err = validateAllowlistEntry(input.preset, entry);
-    if (err) throw new AgentServiceError('invalid_allowlist', err);
+    if (err) throw new AgentServiceError("invalid_allowlist", err);
   }
 
   // 2. Parent account resolution (cross-tenant safe) --------------------------
-  const parent = await resolveOwnedFundedAccount(input.clientId, input.parentAddress);
+  const parent = await resolveOwnedFundedAccount(
+    input.clientId,
+    input.parentAddress,
+  );
   if (!parent) {
-    throw new AgentServiceError('parent_not_found', 'Parent account not found');
+    throw new AgentServiceError("parent_not_found", "Parent account not found");
   }
 
   // 3. Delegate keypair generation --------------------------------------------
@@ -274,7 +292,7 @@ export async function provisionAgent(input: ProvisionAgentInput): Promise<AgentV
   // RailForge retains a reference copy for signing.
   const delegateWallet = Wallet.generate();
   if (!delegateWallet.seed) {
-    throw new Error('Wallet.generate() returned no seed — should never happen');
+    throw new Error("Wallet.generate() returned no seed — should never happen");
   }
   const agentAddress = delegateWallet.classicAddress;
   const agentSeed = delegateWallet.seed;
@@ -311,15 +329,20 @@ export async function provisionAgent(input: ProvisionAgentInput): Promise<AgentV
           address: agentAddress,
           masterKeyRef: agentSeed,
           regularKey: null,
-          custodyMode: 'semi',
-          label: input.label ? `${input.label} (agent)` : `agent of ${parent.address}`,
+          custodyMode: "semi",
+          label: input.label
+            ? `${input.label} (agent)`
+            : `agent of ${parent.address}`,
           isFunded: true, // delegate doesn't need its own reserve; it signs for the parent
-          reserveBalance: '0',
+          reserveBalance: "0",
           metadata: { agent_of: parent.address, preset: input.preset },
         })
         .returning({ id: schema.accounts.id });
       if (!acctInserted[0]) {
-        throw new AgentServiceError('db_conflict', 'accounts insert returned no row');
+        throw new AgentServiceError(
+          "db_conflict",
+          "accounts insert returned no row",
+        );
       }
 
       const agentInserted = await tx
@@ -331,12 +354,15 @@ export async function provisionAgent(input: ProvisionAgentInput): Promise<AgentV
           delegationId: null,
           preset: input.preset,
           label: input.label ?? null,
-          status: 'pending',
+          status: "pending",
         })
         .returning({ id: schema.agents.id });
       const agentRow = agentInserted[0];
       if (!agentRow) {
-        throw new AgentServiceError('db_conflict', 'agents insert returned no row');
+        throw new AgentServiceError(
+          "db_conflict",
+          "agents insert returned no row",
+        );
       }
 
       if (input.allowlist.length > 0) {
@@ -383,17 +409,23 @@ export async function provisionAgent(input: ProvisionAgentInput): Promise<AgentV
     if (err instanceof AgentServiceError) throw err;
     if (
       err &&
-      typeof err === 'object' &&
-      'code' in err &&
-      (err as { code: string }).code === '23505'
+      typeof err === "object" &&
+      "code" in err &&
+      (err as { code: string }).code === "23505"
     ) {
-      throw new AgentServiceError('db_conflict', 'Agent address collision (retry)');
+      throw new AgentServiceError(
+        "db_conflict",
+        "Agent address collision (retry)",
+      );
     }
     log.error(
       { err: err instanceof Error ? err.message : String(err) },
-      'agent provisioning transaction failed (rolled back, no on-ledger work)',
+      "agent provisioning transaction failed (rolled back, no on-ledger work)",
     );
-    throw new AgentServiceError('db_conflict', 'Failed to persist agent state — please retry');
+    throw new AgentServiceError(
+      "db_conflict",
+      "Failed to persist agent state — please retry",
+    );
   }
 
   // 5. Grant the delegate on-ledger authority via permission.service ----------
@@ -416,9 +448,12 @@ export async function provisionAgent(input: ProvisionAgentInput): Promise<AgentV
     delegationId = grant.id;
   } catch (err) {
     if (err instanceof PermissionServiceError) {
-      log.error({ err: err.message, code: err.code }, 'permission grant failed during provision');
+      log.error(
+        { err: err.message, code: err.code },
+        "permission grant failed during provision",
+      );
       throw new AgentServiceError(
-        err.code === 'enqueue_failed' ? 'enqueue_failed' : 'db_conflict',
+        err.code === "enqueue_failed" ? "enqueue_failed" : "db_conflict",
         `Failed to grant delegate authority: ${err.message}`,
       );
     }
@@ -428,9 +463,12 @@ export async function provisionAgent(input: ProvisionAgentInput): Promise<AgentV
   // 6. Back-fill delegation_id on the agents row ------------------------------
   // The spend-policy upsert was hoisted into the agents transaction above
   // (was step 7) so it can no longer leave the agent without a daily cap.
-  await db.update(schema.agents).set({ delegationId }).where(eq(schema.agents.id, agentId));
+  await db
+    .update(schema.agents)
+    .set({ delegationId })
+    .where(eq(schema.agents.id, agentId));
 
-  log.info({ agentId, parent: parent.address, grantTxId }, 'agent provisioned');
+  log.info({ agentId, parent: parent.address, grantTxId }, "agent provisioned");
 
   return {
     id: agentId,
@@ -438,7 +476,7 @@ export async function provisionAgent(input: ProvisionAgentInput): Promise<AgentV
     parent_address: parent.address,
     agent_address: agentAddress,
     label: input.label ?? null,
-    status: 'pending',
+    status: "pending",
     allowlist: input.allowlist,
     spend_policy: {
       max_xrp_per_tx_drops: maxPerTx,
@@ -504,8 +542,13 @@ async function loadAgentForAuth(
       parentAddress: schema.accounts.address,
     })
     .from(schema.agents)
-    .innerJoin(schema.accounts, eq(schema.accounts.id, schema.agents.parentAccountId))
-    .where(and(eq(schema.agents.id, agentId), eq(schema.agents.clientId, clientId)))
+    .innerJoin(
+      schema.accounts,
+      eq(schema.accounts.id, schema.agents.parentAccountId),
+    )
+    .where(
+      and(eq(schema.agents.id, agentId), eq(schema.agents.clientId, clientId)),
+    )
     .limit(1);
   return rows[0] ?? null;
 }
@@ -529,10 +572,12 @@ async function isAllowlisted(
   return rows.length > 0;
 }
 
-export async function authorizeAgentPayment(input: AuthorizePaymentInput): Promise<void> {
+export async function authorizeAgentPayment(
+  input: AuthorizePaymentInput,
+): Promise<void> {
   const log = logger.child({
-    service: 'agent',
-    op: 'authorizePayment',
+    service: "agent",
+    op: "authorizePayment",
     clientId: input.clientId,
     agentId: input.agentId,
   });
@@ -540,33 +585,46 @@ export async function authorizeAgentPayment(input: AuthorizePaymentInput): Promi
   const agent = await loadAgentForAuth(input.clientId, input.agentId);
   if (!agent) {
     // 404-style: no row OR wrong tenant — indistinguishable, on purpose.
-    throw new AgentServiceError('agent_not_found', 'Agent not found');
+    throw new AgentServiceError("agent_not_found", "Agent not found");
   }
-  if (agent.status !== 'active') {
-    throw new AgentServiceError('agent_not_active', `Agent is not active (status=${agent.status})`);
+  if (agent.status !== "active") {
+    throw new AgentServiceError(
+      "agent_not_active",
+      `Agent is not active (status=${agent.status})`,
+    );
   }
   if (agent.parentAddress !== input.sourceAddress) {
     // An agent key can sign for its parent account only. Anything else
     // is either a config error (agent bound to the wrong parent) or an
     // attempt to route a payment through a different managed account.
-    throw new AgentServiceError('source_not_parent', 'Agent may only send from its parent account');
+    throw new AgentServiceError(
+      "source_not_parent",
+      "Agent may only send from its parent account",
+    );
   }
 
-  const destOk = await isAllowlisted(input.agentId, 'destination', input.destinationAddress);
+  const destOk = await isAllowlisted(
+    input.agentId,
+    "destination",
+    input.destinationAddress,
+  );
   if (!destOk) {
-    log.warn({ destination: input.destinationAddress }, 'destination not in agent allowlist');
+    log.warn(
+      { destination: input.destinationAddress },
+      "destination not in agent allowlist",
+    );
     throw new AgentServiceError(
-      'destination_not_allowlisted',
+      "destination_not_allowlisted",
       `Destination ${input.destinationAddress} is not on the agent's allowlist`,
     );
   }
 
   if (input.assetKey) {
-    const tokenOk = await isAllowlisted(input.agentId, 'token', input.assetKey);
+    const tokenOk = await isAllowlisted(input.agentId, "token", input.assetKey);
     if (!tokenOk) {
-      log.warn({ assetKey: input.assetKey }, 'token not in agent allowlist');
+      log.warn({ assetKey: input.assetKey }, "token not in agent allowlist");
       throw new AgentServiceError(
-        'token_not_allowlisted',
+        "token_not_allowlisted",
         `Token ${input.assetKey} is not on the agent's allowlist`,
       );
     }
@@ -660,7 +718,10 @@ function rowToView(
   };
 }
 
-export async function getAgent(clientId: string, agentId: string): Promise<AgentView | null> {
+export async function getAgent(
+  clientId: string,
+  agentId: string,
+): Promise<AgentView | null> {
   const rows = await db
     .select({
       id: schema.agents.id,
@@ -673,8 +734,13 @@ export async function getAgent(clientId: string, agentId: string): Promise<Agent
       createdAt: schema.agents.createdAt,
     })
     .from(schema.agents)
-    .innerJoin(schema.accounts, eq(schema.agents.parentAccountId, schema.accounts.id))
-    .where(and(eq(schema.agents.clientId, clientId), eq(schema.agents.id, agentId)))
+    .innerJoin(
+      schema.accounts,
+      eq(schema.agents.parentAccountId, schema.accounts.id),
+    )
+    .where(
+      and(eq(schema.agents.clientId, clientId), eq(schema.agents.id, agentId)),
+    )
     .limit(1);
   const row = rows[0];
   if (!row) return null;
@@ -698,7 +764,10 @@ export async function listAgents(clientId: string): Promise<AgentView[]> {
       createdAt: schema.agents.createdAt,
     })
     .from(schema.agents)
-    .innerJoin(schema.accounts, eq(schema.agents.parentAccountId, schema.accounts.id))
+    .innerJoin(
+      schema.accounts,
+      eq(schema.agents.parentAccountId, schema.accounts.id),
+    )
     .where(eq(schema.agents.clientId, clientId))
     .limit(200);
   // Spend policy is currently shared across all agents of a client, so one
@@ -728,6 +797,150 @@ export async function listAgents(clientId: string): Promise<AgentView[]> {
 // Cross-tenant scope: the agent + clientId predicate refuses agents owned
 // by other tenants. Indistinguishable from "not found" by design.
 
+// ── Allowlist update ─────────────────────────────────────────────────────────
+// PUT /v1/agents/:id/allowlist — replace the agent's allowlist in one shot
+// without touching on-ledger state. The grant SignerListSet doesn't reference
+// individual destinations or tokens; the allowlist is a service-layer gate
+// (see authorizeAgentPayment), so adding/removing entries is pure DB work.
+//
+// Replace semantics: the request body's `allowlist` is the new full list.
+// "Add an entry" = fetch + append + PUT; "remove" = fetch + filter + PUT.
+// Mirrors PUT /v1/domains/:id (accepted_credentials list replacement).
+//
+// Status gating: allowed on 'active' only. 'pending' agents haven't been
+// granted on-ledger authority yet — refusing here keeps the rule simple
+// (poll for activation, then update). 'revoking' / 'revoked' / 'failed'
+// are explicitly rejected — there's no business case for changing a
+// revocation-bound agent's allowlist, and once revoked it's terminal.
+//
+// Atomicity: delete + insert run inside a single Drizzle transaction so a
+// transient failure can't leave the agent with no allowlist (which would
+// fail-closed every payment until the next successful PUT). Empty arrays
+// are allowed for presets where requireAllowlist is false (treasury-agent);
+// payment-agent rejects an empty list to mirror the provision-time rule.
+
+export interface UpdateAgentAllowlistInput {
+  clientId: string;
+  agentId: string;
+  allowlist: AgentAllowlistInput[];
+}
+
+export async function updateAgentAllowlist(
+  input: UpdateAgentAllowlistInput,
+): Promise<AgentView> {
+  const log = logger.child({
+    service: "agent",
+    op: "updateAllowlist",
+    clientId: input.clientId,
+    agentId: input.agentId,
+  });
+
+  // 1. Load the agent (cross-tenant scoped). Same shape as getAgent so we
+  //    can reuse rowToView for the response and avoid a second round trip.
+  const rows = await db
+    .select({
+      id: schema.agents.id,
+      preset: schema.agents.preset,
+      parentAddress: schema.accounts.address,
+      agentAddress: schema.agents.agentAddress,
+      label: schema.agents.label,
+      status: schema.agents.status,
+      pendingRevocation: schema.agents.pendingRevocation,
+      createdAt: schema.agents.createdAt,
+    })
+    .from(schema.agents)
+    .innerJoin(
+      schema.accounts,
+      eq(schema.agents.parentAccountId, schema.accounts.id),
+    )
+    .where(
+      and(
+        eq(schema.agents.clientId, input.clientId),
+        eq(schema.agents.id, input.agentId),
+      ),
+    )
+    .limit(1);
+  const agentRow = rows[0];
+  if (!agentRow) {
+    throw new AgentServiceError("agent_not_found", "Agent not found");
+  }
+
+  // 2. Status gate — 'active' only, and reject if a revocation is in flight.
+  //    A revoke that fires mid-update would race with our delete/insert; the
+  //    pendingRevocation check is the cheaper of the two ways to avoid that.
+  if (agentRow.status !== "active" || agentRow.pendingRevocation) {
+    throw new AgentServiceError(
+      "agent_not_updatable",
+      `Agent allowlist can only be updated while status='active' (current: ${agentRow.status}${
+        agentRow.pendingRevocation ? ", pending_revocation=true" : ""
+      })`,
+    );
+  }
+
+  // 3. Re-validate the new entries against the same preset rules
+  //    provisionAgent uses. The preset is immutable post-provision, so a
+  //    'token' entry in a payment-agent stays valid forever (no migration
+  //    risk), but the entry-shape regex still has to run on every PUT.
+  const preset = getPreset(agentRow.preset);
+  if (!preset) {
+    // Defensive: a row with an unknown preset means the registry was
+    // pruned without a migration. Fail fast rather than silently allow
+    // entries that no provision flow could produce.
+    throw new AgentServiceError(
+      "invalid_preset",
+      `Agent's preset '${agentRow.preset}' is no longer registered`,
+    );
+  }
+  if (preset.requireAllowlist && input.allowlist.length === 0) {
+    throw new AgentServiceError(
+      "allowlist_required",
+      `preset '${preset.name}' requires at least one allowlist entry`,
+    );
+  }
+  for (const entry of input.allowlist) {
+    const err = validateAllowlistEntry(
+      agentRow.preset as AgentPresetName,
+      entry,
+    );
+    if (err) throw new AgentServiceError("invalid_allowlist", err);
+  }
+
+  // 4. Atomic replace — delete-then-insert inside a transaction so a
+  //    failure can't leave the agent without an allowlist. Drizzle's
+  //    transaction wrapper rolls back on throw.
+  try {
+    await db.transaction(async (tx) => {
+      await tx
+        .delete(schema.agentAllowlists)
+        .where(eq(schema.agentAllowlists.agentId, agentRow.id));
+      if (input.allowlist.length > 0) {
+        await tx.insert(schema.agentAllowlists).values(
+          input.allowlist.map((e) => ({
+            agentId: agentRow.id,
+            entryType: e.entry_type,
+            entryValue: e.entry_value,
+          })),
+        );
+      }
+    });
+  } catch (err) {
+    log.error(
+      { err: err instanceof Error ? err.message : String(err) },
+      "agent allowlist update transaction failed",
+    );
+    throw new AgentServiceError(
+      "db_conflict",
+      "Failed to persist allowlist update — please retry",
+    );
+  }
+
+  // 5. Return the fresh view. spend_policy is unchanged; refetch to keep
+  //    the response shape consistent with getAgent (no caller has to know
+  //    that the policy didn't change).
+  const spendPolicy = await loadSpendPolicy(input.clientId);
+  return rowToView(agentRow, input.allowlist, spendPolicy);
+}
+
 export interface RevokeAgentInput {
   clientId: string;
   agentId: string;
@@ -736,15 +949,17 @@ export interface RevokeAgentInput {
 
 export interface RevokeAgentResult {
   agent_id: string;
-  status: 'revoking';
+  status: "revoking";
   /** ID of the SignerListSet tx that strips the delegate. */
   tx_id: string;
 }
 
-export async function revokeAgent(input: RevokeAgentInput): Promise<RevokeAgentResult> {
+export async function revokeAgent(
+  input: RevokeAgentInput,
+): Promise<RevokeAgentResult> {
   const log = logger.child({
-    service: 'agent',
-    op: 'revoke',
+    service: "agent",
+    op: "revoke",
     clientId: input.clientId,
     agentId: input.agentId,
   });
@@ -761,26 +976,34 @@ export async function revokeAgent(input: RevokeAgentInput): Promise<RevokeAgentR
       parentAddress: schema.accounts.address,
     })
     .from(schema.agents)
-    .innerJoin(schema.accounts, eq(schema.agents.parentAccountId, schema.accounts.id))
-    .where(and(eq(schema.agents.id, input.agentId), eq(schema.agents.clientId, input.clientId)))
+    .innerJoin(
+      schema.accounts,
+      eq(schema.agents.parentAccountId, schema.accounts.id),
+    )
+    .where(
+      and(
+        eq(schema.agents.id, input.agentId),
+        eq(schema.agents.clientId, input.clientId),
+      ),
+    )
     .limit(1);
   const agent = rows[0];
   if (!agent) {
-    throw new AgentServiceError('agent_not_found', 'Agent not found');
+    throw new AgentServiceError("agent_not_found", "Agent not found");
   }
-  if (agent.status !== 'active') {
+  if (agent.status !== "active") {
     // 'pending' would mean the grant SignerListSet hasn't validated yet —
     // refusing here keeps the revocation flow simple. Callers can wait
     // for the activation, then revoke. 'revoked' / 'failed' are terminal.
     throw new AgentServiceError(
-      'agent_not_revocable',
+      "agent_not_revocable",
       `Agent must be in status='active' to revoke (current: ${agent.status})`,
     );
   }
   if (agent.pendingRevocation) {
     throw new AgentServiceError(
-      'agent_already_revoking',
-      'Agent has a pending revocation — wait for on-chain confirmation',
+      "agent_already_revoking",
+      "Agent has a pending revocation — wait for on-chain confirmation",
     );
   }
 
@@ -801,22 +1024,22 @@ export async function revokeAgent(input: RevokeAgentInput): Promise<RevokeAgentR
     if (err instanceof PermissionServiceError) {
       log.error(
         { err: err.message, code: err.code },
-        'permission.revokePermission failed during agent revoke',
+        "permission.revokePermission failed during agent revoke",
       );
       // Map onto our error codes. 'not_found' from permission.service
       // means the delegation has already been revoked — surface as
       // not-revocable rather than 404 to avoid client confusion.
-      if (err.code === 'not_found') {
+      if (err.code === "not_found") {
         throw new AgentServiceError(
-          'agent_not_revocable',
-          'No active delegation found — agent may already be revoked',
+          "agent_not_revocable",
+          "No active delegation found — agent may already be revoked",
         );
       }
-      if (err.code === 'invalid_input') {
-        throw new AgentServiceError('agent_already_revoking', err.message);
+      if (err.code === "invalid_input") {
+        throw new AgentServiceError("agent_already_revoking", err.message);
       }
       throw new AgentServiceError(
-        err.code === 'enqueue_failed' ? 'enqueue_failed' : 'db_conflict',
+        err.code === "enqueue_failed" ? "enqueue_failed" : "db_conflict",
         `Failed to enqueue revocation: ${err.message}`,
       );
     }
@@ -832,16 +1055,19 @@ export async function revokeAgent(input: RevokeAgentInput): Promise<RevokeAgentR
     .where(
       and(
         eq(schema.agents.id, agent.id),
-        eq(schema.agents.status, 'active'),
+        eq(schema.agents.status, "active"),
         eq(schema.agents.pendingRevocation, false),
       ),
     );
 
-  log.info({ revokeTxId, agentAddress: agent.agentAddress }, 'agent revocation staged');
+  log.info(
+    { revokeTxId, agentAddress: agent.agentAddress },
+    "agent revocation staged",
+  );
 
   return {
     agent_id: agent.id,
-    status: 'revoking',
+    status: "revoking",
     tx_id: revokeTxId,
   };
 }

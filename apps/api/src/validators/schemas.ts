@@ -1,5 +1,5 @@
-import { z } from 'zod';
-import { AGENT_PRESET_NAMES } from '../presets/agent-presets.ts';
+import { z } from "zod";
+import { AGENT_PRESET_NAMES } from "../presets/agent-presets.ts";
 
 // Zod schemas — single source of truth for request/response shapes.
 // Each route imports its schemas from here. Keep them grouped by resource.
@@ -21,12 +21,12 @@ const boundedMetadataSchema = z
 // Re-used XRPL r-address shape (24-34 base58 chars after 'r').
 const xrplAddressSchema = z
   .string()
-  .regex(/^r[1-9A-HJ-NP-Za-km-z]{24,34}$/, 'invalid XRPL address');
+  .regex(/^r[1-9A-HJ-NP-Za-km-z]{24,34}$/, "invalid XRPL address");
 
 export const createAccountSchema = z.object({
   label: z.string().optional(),
-  custody_mode: z.enum(['semi', 'non_custodial']).default('semi'),
-  fund_amount: z.string().default('10'),
+  custody_mode: z.enum(["semi", "non_custodial"]).default("semi"),
+  fund_amount: z.string().default("10"),
   multisign: z
     .object({
       quorum: z.number().int().min(1),
@@ -76,13 +76,15 @@ export const deleteAccountSchema = z.object({
 // ── Tokens ───────────────────────────────────────────────────────────────────
 export const createTokenSchema = z.object({
   /** Managed issuer account address. Must belong to the authenticated client. */
-  issuer: z.string().regex(/^r[1-9A-HJ-NP-Za-km-z]{24,34}$/, 'invalid XRPL address'),
+  issuer: z
+    .string()
+    .regex(/^r[1-9A-HJ-NP-Za-km-z]{24,34}$/, "invalid XRPL address"),
   /**
    * Token model. Defaults to MPT per CLAUDE.md ("MPT is the default token
    * model, trust lines are opt-in"). Callers must pass 'trustline'
    * explicitly to get the legacy issued-currency flow.
    */
-  type: z.enum(['mpt', 'trustline']).default('mpt'),
+  type: z.enum(["mpt", "trustline"]).default("mpt"),
   /**
    * Currency code. For MPTs this is free-form metadata (persisted in the
    * tokens table). For trustlines it's the standard 3-char ISO code or
@@ -147,27 +149,29 @@ export const clawbackTokenSchema = z.object({
 // only `transaction.validated` is wired, in apps/worker/src/jobs/txConfirmer).
 // Letting clients subscribe to events that nothing emits is just confusing.
 export const WEBHOOK_EVENT_TYPES = [
-  'transaction.validated',
-  'transaction.failed',
-  'credential.issued',
-  'credential.accepted',
-  'credential.revoked',
-  'credential.expiring',
-  'domain.created',
-  'domain.updated',
-  'domain.deleted',
+  "transaction.validated",
+  "transaction.failed",
+  "credential.issued",
+  "credential.accepted",
+  "credential.revoked",
+  "credential.expiring",
+  "domain.created",
+  "domain.updated",
+  "domain.deleted",
   // VISION.md agent launcher: txConfirmer's applyAgentGrantOutcome hook
   // fans these out so clients don't have to poll GET /v1/agents/:id for
   // the pending → active flip. Source-of-truth literals live in
   // @railforge/jobs AGENT_OUTCOME_EVENT_TYPES (drift-proof by import).
-  'agent.activated',
-  'agent.failed',
-  'agent.revoked',
+  "agent.activated",
+  "agent.failed",
+  "agent.revoked",
 ] as const;
 
 export const createWebhookEndpointSchema = z.object({
-  url: z.string().url('webhook url must be a valid URL'),
-  events: z.array(z.enum(WEBHOOK_EVENT_TYPES)).min(1, 'subscribe to at least one event'),
+  url: z.string().url("webhook url must be a valid URL"),
+  events: z
+    .array(z.enum(WEBHOOK_EVENT_TYPES))
+    .min(1, "subscribe to at least one event"),
 });
 
 // ── Payments ────────────────────────────────────────────────────────────────
@@ -209,7 +213,7 @@ export const sendPaymentSchema = z
     },
     {
       message:
-        'Provide exactly one of: amount_drops (XRP), mpt_issuance_id+value (MPT), or currency+issuer+value (issued currency)',
+        "Provide exactly one of: amount_drops (XRP), mpt_issuance_id+value (MPT), or currency+issuer+value (issued currency)",
     },
   );
 
@@ -218,11 +222,11 @@ export const sendPaymentSchema = z
 // on-chain batching: UNTIL_FAILURE (default) and INDEPENDENT. The two
 // atomic modes (ALL_OR_NOTHING, ONLY_ONE) cannot be faithfully emulated
 // pre-amendment, so the service rejects them with a 501 + clear message.
-export const BATCH_PAYMENT_MODES = ['UNTIL_FAILURE', 'INDEPENDENT'] as const;
+export const BATCH_PAYMENT_MODES = ["UNTIL_FAILURE", "INDEPENDENT"] as const;
 
 export const batchPaymentsSchema = z.object({
   /** Mode: UNTIL_FAILURE stops enqueueing on first item error; INDEPENDENT enqueues all. */
-  mode: z.enum(BATCH_PAYMENT_MODES).default('UNTIL_FAILURE'),
+  mode: z.enum(BATCH_PAYMENT_MODES).default("UNTIL_FAILURE"),
   /** 2–20 payments per batch. Each item has the same shape as POST /v1/payments. */
   payments: z.array(sendPaymentSchema).min(2).max(20),
 });
@@ -241,7 +245,7 @@ export const createEscrowSchema = z
     destination_tag: z.number().int().min(0).optional(),
   })
   .refine((d) => d.finish_after !== undefined || d.cancel_after !== undefined, {
-    message: 'At least one of finish_after or cancel_after is required',
+    message: "At least one of finish_after or cancel_after is required",
   });
 
 export const finishEscrowSchema = z.object({
@@ -268,7 +272,7 @@ const hexCredentialTypeSchema = z
   .string()
   .min(1)
   .max(128)
-  .regex(/^[0-9a-fA-F]+$/, 'credential_type must be hex-encoded');
+  .regex(/^[0-9a-fA-F]+$/, "credential_type must be hex-encoded");
 
 export const issueCredentialSchema = z.object({
   /** The managed account that will issue the credential (Account field). */
@@ -282,7 +286,7 @@ export const issueCredentialSchema = z.object({
   /** Hex-encoded URI (optional metadata pointer). */
   uri: z
     .string()
-    .regex(/^[0-9a-fA-F]*$/, 'uri must be hex-encoded')
+    .regex(/^[0-9a-fA-F]*$/, "uri must be hex-encoded")
     .optional(),
   /** Optional metadata (key/value JSON). */
   metadata: boundedMetadataSchema.optional(),
@@ -327,17 +331,17 @@ export const checkDomainMembershipSchema = z.object({
 
 /** XLS-75 permission values. Pre-V1.1 the service uses multi-sign roles. */
 export const PERMISSION_VALUES = [
-  'Payment',
-  'TrustSet',
-  'OfferCreate',
-  'OfferCancel',
-  'AccountSet',
-  'EscrowCreate',
-  'EscrowFinish',
-  'EscrowCancel',
-  'CredentialCreate',
-  'CredentialAccept',
-  'CredentialDelete',
+  "Payment",
+  "TrustSet",
+  "OfferCreate",
+  "OfferCancel",
+  "AccountSet",
+  "EscrowCreate",
+  "EscrowFinish",
+  "EscrowCancel",
+  "CredentialCreate",
+  "CredentialAccept",
+  "CredentialDelete",
 ] as const;
 
 export const grantPermissionSchema = z.object({
@@ -372,7 +376,7 @@ export const revokePermissionSchema = z.object({
 // for the preset registry.
 
 const agentAllowlistEntrySchema = z.object({
-  entry_type: z.enum(['destination', 'token', 'domain']),
+  entry_type: z.enum(["destination", "token", "domain"]),
   /**
    * Value shape depends on entry_type:
    *   destination → XRPL r-address (24-34 chars base58 after 'r')
@@ -422,6 +426,15 @@ export const provisionAgentSchema = z.object({
   quorum: z.number().int().min(1).max(65535).optional(),
 });
 
+/**
+ * PUT /v1/agents/:id/allowlist body — replace the agent's allowlist in one
+ * shot. Same per-entry shape as provisionAgentSchema; service layer enforces
+ * preset-specific rules (e.g. payment-agent rejects 'domain' entries).
+ */
+export const updateAgentAllowlistSchema = z.object({
+  allowlist: z.array(agentAllowlistEntrySchema).max(100),
+});
+
 // ── DEX ─────────────────────────────────────────────────────────────────
 
 /**
@@ -445,7 +458,7 @@ const assetAmountSchema = z
     },
     {
       message:
-        'Provide exactly one of: drops (XRP), currency+issuer+value (issued), or mpt_issuance_id+value (MPT)',
+        "Provide exactly one of: drops (XRP), currency+issuer+value (issued), or mpt_issuance_id+value (MPT)",
     },
   );
 
@@ -465,7 +478,8 @@ const assetCurrencySchema = z
       return [isXrp, isIssued, isMpt].filter(Boolean).length === 1;
     },
     {
-      message: 'Provide exactly one of: drops (XRP), currency+issuer, or mpt_issuance_id',
+      message:
+        "Provide exactly one of: drops (XRP), currency+issuer, or mpt_issuance_id",
     },
   );
 
@@ -484,7 +498,7 @@ export const createOfferSchema = z.object({
     .min(0)
     .refine((v) => (v & ~(65536 | 131072 | 262144 | 524288)) === 0, {
       message:
-        'flags must be a combination of tfPassive(65536), tfImmediateOrCancel(131072), tfFillOrKill(262144), tfSell(524288)',
+        "flags must be a combination of tfPassive(65536), tfImmediateOrCancel(131072), tfFillOrKill(262144), tfSell(524288)",
     })
     .optional(),
   /** Permissioned DEX domain ID (XLS-81). */
@@ -518,6 +532,8 @@ export const ammWithdrawSchema = z.object({
   amount: assetAmountSchema.optional(),
   amount2: assetAmountSchema.optional(),
   e_price: assetAmountSchema.optional(),
-  lp_token_in: z.object({ currency: z.string(), issuer: z.string(), value: z.string() }).optional(),
+  lp_token_in: z
+    .object({ currency: z.string(), issuer: z.string(), value: z.string() })
+    .optional(),
   flags: z.number().int().min(0).optional(),
 });
