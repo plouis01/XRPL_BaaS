@@ -42,6 +42,8 @@ let nextKeyCheckRows: unknown[] = [];
 // check before the tx list query — separating the two knobs lets a test
 // queue "agent exists" + "no txs" or "agent missing" without conflict.
 let nextAgentOwnershipRows: unknown[] = [];
+// Per-test knob for the `spend_policies` lookup in /agents/:id/usage.
+let nextSpendPolicyRows: unknown[] = [];
 
 // Per-request counter for api_keys `.limit(1)` queries. The first call
 // in every request comes from revocationCheck middleware (REVIEW.md LOW-07);
@@ -84,6 +86,9 @@ function makeSelect(): Select {
               return Promise.resolve(
                 nextAgentOwnershipRows.length > 0 ? nextAgentOwnershipRows : nextRows,
               );
+            }
+            if (table.__tableName === 'spend_policies') {
+              return Promise.resolve(nextSpendPolicyRows);
             }
             return Promise.resolve(nextRows);
           },
@@ -213,7 +218,23 @@ vi.mock('@railforge/db', () => ({
       createdAt: {},
       updatedAt: {},
     },
+    spendPolicies: {
+      __tableName: 'spend_policies',
+      id: {},
+      clientId: {},
+      maxXrpPerTxDrops: {},
+      dailyXrpLimitDrops: {},
+      isActive: {},
+    },
   },
+}));
+
+// Spend-policy service is mocked because the live one boots a Redis client
+// at module load. The /agents/:id/usage handler only depends on
+// `getDailySpendUsage` from this module.
+let nextDailySpendUsage = '0';
+vi.mock('../services/spendPolicy.service.ts', () => ({
+  getDailySpendUsage: vi.fn(async () => nextDailySpendUsage),
 }));
 
 const { default: dashboardRoute } = await import('./dashboard.ts');
@@ -234,6 +255,8 @@ function makeApp(callerEnv: 'testnet' | 'mainnet' = 'testnet'): Hono<AppEnv> {
 beforeEach(() => {
   nextRows = [];
   nextKeyCheckRows = [];
+  nextSpendPolicyRows = [];
+  nextDailySpendUsage = '0';
   nextAgentOwnershipRows = [];
   nextInsertReturning = [];
   nextUpdateReturning = [];
@@ -616,6 +639,76 @@ describe('GET /dashboard/agents/:id/transactions', () => {
         amount_drops: '1000000',
       }),
     );
+  });
+});
+
+describe('GET /dashboard/agents/:id/usage', () => {
+  const validId = '11111111-1111-1111-1111-111111111111';
+
+  it('400 when agent id is malformed', async () => {
+    const app = makeApp();
+    const res = await app.request('/dashboard/agents/not-a-uuid/usage');
+    expect(res.status).toBe(400);
+  });
+
+  it('404 when agent does not belong to the caller', async () => {
+    nextAgentOwnershipRows = [];
+    const app = makeApp();
+    const res = await app.request(`/dashboard/agents/${validId}/usage`);
+    expect(res.status).toBe(404);
+  });
+
+  it('returns drops + caps when an active policy exists', async () => {
+    nextAgentOwnershipRows = [{ id: validId }];
+    nextSpendPolicyRows = [
+      {
+        maxXrpPerTxDrops: '10000000',
+        dailyXrpLimitDrops: '100000000',
+        isActive: true,
+      },
+    ];
+    nextDailySpendUsage = '42000000';
+    const app = makeApp();
+    const res = await app.request(`/dashboard/agents/${validId}/usage`);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      daily_used_drops: '42000000',
+      daily_limit_drops: '100000000',
+      max_per_tx_drops: '10000000',
+      scope: 'client',
+    });
+  });
+
+  it('reports null caps when no spend policy is configured', async () => {
+    nextAgentOwnershipRows = [{ id: validId }];
+    nextSpendPolicyRows = [];
+    nextDailySpendUsage = '0';
+    const app = makeApp();
+    const res = await app.request(`/dashboard/agents/${validId}/usage`);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      daily_used_drops: '0',
+      daily_limit_drops: null,
+      max_per_tx_drops: null,
+      scope: 'client',
+    });
+  });
+
+  it('treats inactive policy as no caps', async () => {
+    nextAgentOwnershipRows = [{ id: validId }];
+    nextSpendPolicyRows = [
+      {
+        maxXrpPerTxDrops: '10000000',
+        dailyXrpLimitDrops: '100000000',
+        isActive: false,
+      },
+    ];
+    const app = makeApp();
+    const res = await app.request(`/dashboard/agents/${validId}/usage`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.daily_limit_drops).toBeNull();
+    expect(body.max_per_tx_drops).toBeNull();
   });
 });
 

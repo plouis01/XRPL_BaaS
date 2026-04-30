@@ -30,6 +30,7 @@ import { and, db, desc, eq, schema } from '@railforge/db';
 import { Hono } from 'hono';
 import { z } from 'zod';
 import { hashApiKey } from '../middleware/auth.ts';
+import { getDailySpendUsage } from '../services/spendPolicy.service.ts';
 import type { AppEnv } from '../types.ts';
 
 const dashboard = new Hono<AppEnv>();
@@ -466,6 +467,54 @@ dashboard.get('/agents/:id/transactions', async (c) => {
       created_at: r.createdAt,
       confirmed_at: r.confirmedAt,
     })),
+  });
+});
+
+// GET /agents/:id/usage — current XRP spend vs caps. Caps live in
+// spend_policies (per-client today; VISION.md flags a future agent_id
+// column for true per-agent isolation). Used drops come from the Redis
+// counter that enforceSpendPolicy maintains. Returned as drop strings
+// to avoid JS-number precision loss; "0" means no XRP spend in the
+// current 24h window.
+dashboard.get('/agents/:id/usage', async (c) => {
+  const clientId = c.get('clientId');
+  const id = c.req.param('id');
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) {
+    return c.json({ error: 'invalid agent id' }, 400);
+  }
+
+  // Tenant-scoped ownership check before exposing anything — prevents a
+  // cross-tenant id from probing the existence of another client's agent.
+  const agentRows = await db
+    .select({ id: schema.agents.id })
+    .from(schema.agents)
+    .where(and(eq(schema.agents.id, id), eq(schema.agents.clientId, clientId)))
+    .limit(1);
+  if (agentRows.length === 0) {
+    return c.json({ error: 'Agent not found' }, 404);
+  }
+
+  const policyRows = await db
+    .select({
+      maxXrpPerTxDrops: schema.spendPolicies.maxXrpPerTxDrops,
+      dailyXrpLimitDrops: schema.spendPolicies.dailyXrpLimitDrops,
+      isActive: schema.spendPolicies.isActive,
+    })
+    .from(schema.spendPolicies)
+    .where(eq(schema.spendPolicies.clientId, clientId))
+    .limit(1);
+
+  const policy = policyRows[0];
+  const active = policy?.isActive ?? false;
+  const dailyUsedDrops = await getDailySpendUsage(clientId);
+
+  return c.json({
+    daily_used_drops: dailyUsedDrops,
+    daily_limit_drops: active ? (policy?.dailyXrpLimitDrops ?? null) : null,
+    max_per_tx_drops: active ? (policy?.maxXrpPerTxDrops ?? null) : null,
+    // Caps are currently per-client; flag this so the dashboard can
+    // surface that two agents under the same client share a budget.
+    scope: 'client',
   });
 });
 

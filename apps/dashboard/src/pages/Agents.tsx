@@ -11,7 +11,14 @@
 
 import { Fragment, useCallback, useEffect, useState } from 'react';
 import { ApiError, api } from '../api.ts';
-import type { Account, Agent, AgentSummary, AgentTransaction, Network } from '../types.ts';
+import type {
+  Account,
+  Agent,
+  AgentSummary,
+  AgentTransaction,
+  AgentUsage,
+  Network,
+} from '../types.ts';
 
 function errorMessage(err: unknown): string {
   if (err instanceof ApiError) return `API error ${err.status}: ${err.body.slice(0, 160)}`;
@@ -381,6 +388,31 @@ function AgentDetail({
     void fetchTxHistory();
   }, [fetchTxHistory]);
 
+  // Daily XRP spend usage vs caps. Polls slowly while the row is open so
+  // the meter updates after a payment validates without a full reload.
+  const [usage, setUsage] = useState<AgentUsage | null>(null);
+  const [usageError, setUsageError] = useState<string | null>(null);
+
+  const fetchUsage = useCallback(async () => {
+    try {
+      const data = await api<AgentUsage>(`/v1/dashboard/agents/${agentId}/usage`);
+      setUsage(data);
+      setUsageError(null);
+    } catch (err) {
+      setUsageError(errorMessage(err));
+    }
+  }, [agentId]);
+
+  useEffect(() => {
+    void fetchUsage();
+    // 10 s cadence: fast enough to feel live after a tx clears, slow enough
+    // not to hammer the Redis counter when the panel sits open idle.
+    const interval = setInterval(() => {
+      void fetchUsage();
+    }, 10_000);
+    return () => clearInterval(interval);
+  }, [fetchUsage]);
+
   const fetchDetail = useCallback(async () => {
     try {
       const data = await api<Agent>(`/v1/agents/${agentId}`);
@@ -499,14 +531,13 @@ function AgentDetail({
         value={agent.created_at ? new Date(agent.created_at).toLocaleString() : null}
         mono={false}
       />
-      <div>
-        <div style={{ fontSize: 12, color: '#64748b', marginBottom: 4 }}>Spend caps</div>
-        <div style={{ fontSize: 13 }}>
-          Per-tx: <strong>{formatDrops(agent.spend_policy?.max_xrp_per_tx_drops ?? null)}</strong>
-          {'  ·  '}
-          Daily: <strong>{formatDrops(agent.spend_policy?.daily_xrp_limit_drops ?? null)}</strong>
-        </div>
-      </div>
+      <SpendUsagePanel
+        usage={usage}
+        error={usageError}
+        // Fall back to the policy snapshot the agent detail returned so the
+        // panel renders immediately on open, even before /usage resolves.
+        fallbackPolicy={agent.spend_policy ?? null}
+      />
       <div>
         <div
           style={{
@@ -960,6 +991,84 @@ function AllowlistEditor({
           Cancel
         </button>
       </div>
+    </div>
+  );
+}
+
+function SpendUsagePanel({
+  usage,
+  error,
+  fallbackPolicy,
+}: {
+  usage: AgentUsage | null;
+  error: string | null;
+  fallbackPolicy: {
+    max_xrp_per_tx_drops: string | null;
+    daily_xrp_limit_drops: string | null;
+  } | null;
+}) {
+  // Prefer live usage payload; fall back to the agent's policy snapshot
+  // until /usage resolves so the caps don't flash empty on first render.
+  const dailyLimit = usage?.daily_limit_drops ?? fallbackPolicy?.daily_xrp_limit_drops ?? null;
+  const maxPerTx = usage?.max_per_tx_drops ?? fallbackPolicy?.max_xrp_per_tx_drops ?? null;
+  const usedDrops = usage?.daily_used_drops ?? null;
+
+  const usedNum = usedDrops ? Number(usedDrops) : 0;
+  const limitNum = dailyLimit ? Number(dailyLimit) : null;
+  const pct =
+    limitNum && limitNum > 0 ? Math.min(100, Math.round((usedNum / limitNum) * 100)) : null;
+  const barColor =
+    pct === null ? '#cbd5e1' : pct < 70 ? '#16a34a' : pct < 95 ? '#d97706' : '#dc2626';
+
+  return (
+    <div>
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          marginBottom: 4,
+        }}
+      >
+        <div style={{ fontSize: 12, color: '#64748b' }}>
+          Spend caps {usage?.scope === 'client' && '(per-client)'}
+        </div>
+        {usage?.scope === 'client' && (
+          <span style={{ fontSize: 10, color: '#94a3b8' }}>
+            shared by all agents on this client
+          </span>
+        )}
+      </div>
+      {error && <div style={{ fontSize: 11, color: '#991b1b', marginBottom: 4 }}>{error}</div>}
+      <div style={{ fontSize: 13, marginBottom: 6 }}>
+        Per-tx: <strong>{formatDrops(maxPerTx)}</strong>
+        {'  ·  '}
+        Daily limit: <strong>{formatDrops(dailyLimit)}</strong>
+      </div>
+      <div style={{ fontSize: 12, color: '#475569', marginBottom: 4 }}>
+        Used today:{' '}
+        <strong>{usedDrops ? `${(usedNum / 1_000_000).toLocaleString()} XRP` : '—'}</strong>
+        {pct !== null && <span style={{ marginLeft: 6 }}>({pct}%)</span>}
+      </div>
+      {pct !== null && (
+        <div
+          style={{
+            height: 6,
+            background: '#e2e8f0',
+            borderRadius: 9999,
+            overflow: 'hidden',
+          }}
+        >
+          <div
+            style={{
+              width: `${pct}%`,
+              height: '100%',
+              background: barColor,
+              transition: 'width 200ms ease',
+            }}
+          />
+        </div>
+      )}
     </div>
   );
 }

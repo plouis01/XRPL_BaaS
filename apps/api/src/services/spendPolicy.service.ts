@@ -112,6 +112,26 @@ function dailyCounterKey(clientId: string): string {
 }
 
 /**
+ * Read-only view of the client's current 24h XRP spend counter (in drops).
+ * Returns "0" when no counter has been initialized yet (no XRP spend in
+ * the window) and "0" on a Redis fault — callers that surface this to the
+ * UI should treat it as a best-effort metric, not a billing source.
+ */
+export async function getDailySpendUsage(clientId: string): Promise<string> {
+  try {
+    const redis = getRedis();
+    const raw = await redis.get(dailyCounterKey(clientId));
+    if (!raw) return '0';
+    const n = Number(raw);
+    if (!Number.isFinite(n) || n < 0) return '0';
+    return raw;
+  } catch (err) {
+    logger.warn({ err, clientId }, 'spend policy: failed to read daily counter, reporting 0');
+    return '0';
+  }
+}
+
+/**
  * Fetch the active spend policy for a client. Returns null if no policy
  * exists or the policy is inactive (both mean "unlimited").
  *

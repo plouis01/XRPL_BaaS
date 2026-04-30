@@ -71,6 +71,19 @@ export interface AgentTransaction extends Transaction {
   amount_drops: string | null;
 }
 
+/**
+ * GET /v1/dashboard/agents/:id/usage. `scope` flags whether the caps
+ * apply per-client (today) or per-agent (future, once spend_policies
+ * grows an agent_id column). All drop values are strings to avoid
+ * JS-number precision loss.
+ */
+export interface AgentUsage {
+  daily_used_drops: string;
+  daily_limit_drops: string | null;
+  max_per_tx_drops: string | null;
+  scope: 'client' | 'agent';
+}
+
 export interface Credential {
   id: string;
   issuer_address: string;
