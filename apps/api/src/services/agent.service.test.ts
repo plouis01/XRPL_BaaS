@@ -151,6 +151,14 @@ vi.mock('./permission.service.ts', () => ({
   },
 }));
 
+// agent.service imports invalidateSpendPolicyCache from spendPolicy.service.ts
+// which boots a Redis client at module load. Stub it out — the cache-clear
+// is best-effort and not load-bearing for the service-level tests.
+const invalidateSpendPolicyCacheMock = vi.fn();
+vi.mock('./spendPolicy.service.ts', () => ({
+  invalidateSpendPolicyCache: (...args: unknown[]) => invalidateSpendPolicyCacheMock(...args),
+}));
+
 // ── Logger mock ─────────────────────────────────────────────────────────────
 
 vi.mock('../logger.ts', () => ({
@@ -171,6 +179,7 @@ import {
   provisionAgent,
   revokeAgent,
   updateAgentAllowlist,
+  updateAgentSpendPolicy,
 } from './agent.service.ts';
 // Bring in the mocked PermissionServiceError class so revokeAgent's
 // `instanceof` check matches values constructed from the test side.
@@ -221,6 +230,7 @@ beforeEach(() => {
   dbAgentAllowlistsQueue.length = 0;
   grantPermissionMock.mockReset();
   revokePermissionMock.mockReset();
+  invalidateSpendPolicyCacheMock.mockReset();
   revokePermissionMock.mockResolvedValue({ tx_id: 'revoke-tx-1' });
   grantPermissionMock.mockResolvedValue({
     id: 'delegation-1',
@@ -1091,5 +1101,119 @@ describe('updateAgentAllowlist', () => {
       name: 'AgentServiceError',
       code: 'agent_not_found',
     });
+  });
+});
+
+// ── updateAgentSpendPolicy ──────────────────────────────────────────────────
+// PUT /v1/agents/:id/spend-policy upserts spend_policies for the client.
+// Tests cover: cross-tenant 404, status gating, partial updates that
+// preserve untouched fields, null clears the cap, and cache-invalidation
+// after a successful write.
+
+describe('updateAgentSpendPolicy', () => {
+  it('rejects with agent_not_found when no row matches client+agent', async () => {
+    dbSelectResults.agents_joined = [];
+    await expect(
+      updateAgentSpendPolicy({
+        clientId: CLIENT_ID,
+        agentId: 'agent-uuid-1',
+        maxXrpPerTxDrops: '10000000',
+      }),
+    ).rejects.toMatchObject({
+      name: 'AgentServiceError',
+      code: 'agent_not_found',
+    });
+    // No upsert when the agent doesn't resolve.
+    expect(dbInsertCalls.find((c) => c.table === 'spend_policies')).toBeUndefined();
+    expect(invalidateSpendPolicyCacheMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects with agent_not_updatable when status is not 'active'", async () => {
+    dbSelectResults.agents_joined = [{ ...ACTIVE_AGENT_ROW, status: 'revoked' }];
+    await expect(
+      updateAgentSpendPolicy({
+        clientId: CLIENT_ID,
+        agentId: 'agent-uuid-1',
+        maxXrpPerTxDrops: '10000000',
+      }),
+    ).rejects.toMatchObject({
+      name: 'AgentServiceError',
+      code: 'agent_not_updatable',
+    });
+    expect(dbInsertCalls.find((c) => c.table === 'spend_policies')).toBeUndefined();
+  });
+
+  it('rejects with agent_not_updatable when pendingRevocation=true', async () => {
+    dbSelectResults.agents_joined = [{ ...ACTIVE_AGENT_ROW, pendingRevocation: true }];
+    await expect(
+      updateAgentSpendPolicy({
+        clientId: CLIENT_ID,
+        agentId: 'agent-uuid-1',
+        dailyXrpLimitDrops: '100000000',
+      }),
+    ).rejects.toMatchObject({
+      name: 'AgentServiceError',
+      code: 'agent_not_updatable',
+    });
+  });
+
+  it('preserves the untouched cap when only one field is provided', async () => {
+    dbSelectResults.agents_joined = [ACTIVE_AGENT_ROW];
+    // existing spend_policies row has both caps; the update only sets
+    // max_xrp_per_tx_drops, so daily_xrp_limit_drops must be carried over.
+    dbSelectResults.spend_policies = [
+      {
+        maxXrpPerTxDrops: '5000000',
+        dailyXrpLimitDrops: '50000000',
+        isActive: true,
+      },
+    ];
+    await updateAgentSpendPolicy({
+      clientId: CLIENT_ID,
+      agentId: 'agent-uuid-1',
+      maxXrpPerTxDrops: '20000000',
+    });
+    const upsert = dbInsertCalls.find((c) => c.table === 'spend_policies');
+    expect(upsert).toBeDefined();
+    const vals = upsert?.values as Record<string, unknown>;
+    expect(vals.maxXrpPerTxDrops).toBe('20000000');
+    expect(vals.dailyXrpLimitDrops).toBe('50000000');
+    expect(vals.isActive).toBe(true);
+    expect(invalidateSpendPolicyCacheMock).toHaveBeenCalledWith(CLIENT_ID);
+  });
+
+  it('clears a cap when the field is explicitly null', async () => {
+    dbSelectResults.agents_joined = [ACTIVE_AGENT_ROW];
+    dbSelectResults.spend_policies = [
+      {
+        maxXrpPerTxDrops: '5000000',
+        dailyXrpLimitDrops: '50000000',
+        isActive: true,
+      },
+    ];
+    await updateAgentSpendPolicy({
+      clientId: CLIENT_ID,
+      agentId: 'agent-uuid-1',
+      dailyXrpLimitDrops: null,
+    });
+    const upsert = dbInsertCalls.find((c) => c.table === 'spend_policies');
+    const vals = upsert?.values as Record<string, unknown>;
+    expect(vals.dailyXrpLimitDrops).toBeNull();
+    // Untouched field still threaded.
+    expect(vals.maxXrpPerTxDrops).toBe('5000000');
+  });
+
+  it('seeds null caps when no spend_policies row exists yet', async () => {
+    dbSelectResults.agents_joined = [ACTIVE_AGENT_ROW];
+    dbSelectResults.spend_policies = [];
+    await updateAgentSpendPolicy({
+      clientId: CLIENT_ID,
+      agentId: 'agent-uuid-1',
+      maxXrpPerTxDrops: '10000000',
+    });
+    const upsert = dbInsertCalls.find((c) => c.table === 'spend_policies');
+    const vals = upsert?.values as Record<string, unknown>;
+    expect(vals.maxXrpPerTxDrops).toBe('10000000');
+    expect(vals.dailyXrpLimitDrops).toBeNull();
   });
 });

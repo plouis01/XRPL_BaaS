@@ -8,6 +8,7 @@
 // GET    /v1/agents/:id             — single agent. Used by callers polling for the
 //                                       'pending' → 'active' transition after POST.
 // PUT    /v1/agents/:id/allowlist   — replace the allowlist on a live agent (pure DB).
+// PUT    /v1/agents/:id/spend-policy — change per-tx / daily XRP caps (pure DB).
 // DELETE /v1/agents/:id             — stage a revocation (queues a SignerListSet).
 
 import { zValidator } from '@hono/zod-validator';
@@ -19,9 +20,14 @@ import {
   provisionAgent,
   revokeAgent,
   updateAgentAllowlist,
+  updateAgentSpendPolicy,
 } from '../services/agent.service.ts';
 import type { AppEnv } from '../types.ts';
-import { provisionAgentSchema, updateAgentAllowlistSchema } from '../validators/schemas.ts';
+import {
+  provisionAgentSchema,
+  updateAgentAllowlistSchema,
+  updateAgentSpendPolicySchema,
+} from '../validators/schemas.ts';
 
 const agents = new Hono<AppEnv>();
 
@@ -149,6 +155,35 @@ agents.put('/:id/allowlist', zValidator('json', updateAgentAllowlistSchema), asy
       clientId,
       agentId: id,
       allowlist: body.allowlist,
+    });
+    return c.json(result);
+  } catch (err) {
+    if (err instanceof AgentServiceError) {
+      const r = agentErrorResponse(err);
+      return c.json({ error: r.error }, r.status);
+    }
+    throw err;
+  }
+});
+
+// PUT /v1/agents/:id/spend-policy — change the XRP spend caps on a live
+// agent. Pure DB op (UPSERT into spend_policies). Caps are currently
+// per-client (VISION.md flags an agent_id column for true per-agent
+// isolation), so changes affect every agent under the same client.
+// Effects apply to the live counter immediately — see service docstring.
+agents.put('/:id/spend-policy', zValidator('json', updateAgentSpendPolicySchema), async (c) => {
+  const clientId = c.get('clientId');
+  const id = c.req.param('id');
+  if (!UUID_RE.test(id)) {
+    return c.json({ error: 'invalid agent id' }, 400);
+  }
+  const body = c.req.valid('json');
+  try {
+    const result = await updateAgentSpendPolicy({
+      clientId,
+      agentId: id,
+      maxXrpPerTxDrops: body.max_xrp_per_tx_drops,
+      dailyXrpLimitDrops: body.daily_xrp_limit_drops,
     });
     return c.json(result);
   } catch (err) {

@@ -431,6 +431,27 @@ export const updateAgentAllowlistSchema = z.object({
   allowlist: z.array(agentAllowlistEntrySchema).max(100),
 });
 
+/**
+ * PUT /v1/agents/:id/spend-policy body. Either field can be a non-negative
+ * drop-string (a cap), or `null` (no cap). Omitting a field leaves it
+ * unchanged. Empty body is rejected — there must be at least one field to
+ * change. Effects apply to the live counter immediately, so lowering the
+ * daily cap below today's already-spent amount will lock the client out
+ * until the 24h window rolls.
+ */
+const dropsAmountSchema = z
+  .string()
+  .regex(/^\d+$/, 'must be a non-negative integer in drops')
+  .nullable();
+export const updateAgentSpendPolicySchema = z
+  .object({
+    max_xrp_per_tx_drops: dropsAmountSchema.optional(),
+    daily_xrp_limit_drops: dropsAmountSchema.optional(),
+  })
+  .refine((v) => v.max_xrp_per_tx_drops !== undefined || v.daily_xrp_limit_drops !== undefined, {
+    message: 'at least one of max_xrp_per_tx_drops, daily_xrp_limit_drops is required',
+  });
+
 // ── DEX ─────────────────────────────────────────────────────────────────
 
 /**

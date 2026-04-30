@@ -112,6 +112,17 @@ function dailyCounterKey(clientId: string): string {
 }
 
 /**
+ * Drop the in-process policy cache for a single client. Called after a
+ * dashboard write to spend_policies so the next enforceSpendPolicy on this
+ * node re-reads the row instead of serving the stale cached caps for up to
+ * CACHE_TTL_MS. Other API nodes still serve the stale cap until their own
+ * TTL rolls — acceptable for a 60s window on an admin-set policy.
+ */
+export function invalidateSpendPolicyCache(clientId: string): void {
+  policyCache.delete(clientId);
+}
+
+/**
  * Read-only view of the client's current 24h XRP spend counter (in drops).
  * Returns "0" when no counter has been initialized yet (no XRP spend in
  * the window) and "0" on a Redis fault — callers that surface this to the

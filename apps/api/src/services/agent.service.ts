@@ -45,6 +45,7 @@ import {
   getPreset,
 } from '../presets/agent-presets.ts';
 import { PermissionServiceError, grantPermission, revokePermission } from './permission.service.ts';
+import { invalidateSpendPolicyCache } from './spendPolicy.service.ts';
 
 export class AgentServiceError extends Error {
   constructor(
@@ -861,6 +862,145 @@ export async function updateAgentAllowlist(input: UpdateAgentAllowlistInput): Pr
   //    that the policy didn't change).
   const spendPolicy = await loadSpendPolicy(input.clientId);
   return rowToView(agentRow, input.allowlist, spendPolicy);
+}
+
+export interface UpdateAgentSpendPolicyInput {
+  clientId: string;
+  agentId: string;
+  /**
+   * Either field may be:
+   *   - a non-negative drop-string  → cap installed
+   *   - `null`                       → cap removed (unlimited on that axis)
+   *   - `undefined`                  → leave existing value untouched
+   * The route validator rejects empty bodies, so at least one is set.
+   */
+  maxXrpPerTxDrops?: string | null;
+  dailyXrpLimitDrops?: string | null;
+}
+
+/**
+ * PUT /v1/agents/:id/spend-policy. Updates the spend_policies row for the
+ * agent's client. The table is currently keyed per-client (VISION.md flags
+ * a future agent_id column for true per-agent caps), so a write here
+ * affects every agent under the same client — same caveat that
+ * SpendUsagePanel surfaces with `scope: 'client'`.
+ *
+ * Effect timing: the change applies to the live counter immediately. The
+ * Redis Lua does `current + amount > limit` per-request, and we drop the
+ * in-process policy cache for this client so the next enforceSpendPolicy
+ * on this node re-reads. Other API nodes pick it up within CACHE_TTL_MS.
+ *
+ * Lowering the daily cap below today's already-used drops will lock the
+ * client out until the 24h window rolls — by design, that matches a
+ * "stop this now" intent.
+ */
+export async function updateAgentSpendPolicy(
+  input: UpdateAgentSpendPolicyInput,
+): Promise<AgentView> {
+  const log = logger.child({
+    service: 'agent',
+    op: 'updateSpendPolicy',
+    clientId: input.clientId,
+    agentId: input.agentId,
+  });
+
+  const rows = await db
+    .select({
+      id: schema.agents.id,
+      preset: schema.agents.preset,
+      parentAddress: schema.accounts.address,
+      agentAddress: schema.agents.agentAddress,
+      label: schema.agents.label,
+      status: schema.agents.status,
+      pendingRevocation: schema.agents.pendingRevocation,
+      createdAt: schema.agents.createdAt,
+    })
+    .from(schema.agents)
+    .innerJoin(schema.accounts, eq(schema.agents.parentAccountId, schema.accounts.id))
+    .where(and(eq(schema.agents.clientId, input.clientId), eq(schema.agents.id, input.agentId)))
+    .limit(1);
+  const agentRow = rows[0];
+  if (!agentRow) {
+    throw new AgentServiceError('agent_not_found', 'Agent not found');
+  }
+
+  // Same status gate as updateAgentAllowlist — refuse to mutate a
+  // revoked / pending-revocation agent. The semantic is identical: the
+  // policy still applies client-wide, but exposing the edit surface only
+  // for active agents keeps the UI consistent.
+  if (agentRow.status !== 'active' || agentRow.pendingRevocation) {
+    throw new AgentServiceError(
+      'agent_not_updatable',
+      `Agent spend policy can only be updated while status='active' (current: ${agentRow.status}${
+        agentRow.pendingRevocation ? ', pending_revocation=true' : ''
+      })`,
+    );
+  }
+
+  // Read the existing row so we can preserve untouched fields on UPSERT.
+  // Without this, an `INSERT … ON CONFLICT DO UPDATE SET maxXrpPerTxDrops=…`
+  // that omits dailyXrpLimitDrops would still need a value at insert-time
+  // for the brand-new-row case; pulling current values keeps both paths
+  // (insert vs update) producing the same final shape.
+  const existing = await db
+    .select({
+      maxXrpPerTxDrops: schema.spendPolicies.maxXrpPerTxDrops,
+      dailyXrpLimitDrops: schema.spendPolicies.dailyXrpLimitDrops,
+    })
+    .from(schema.spendPolicies)
+    .where(eq(schema.spendPolicies.clientId, input.clientId))
+    .limit(1);
+
+  const nextMaxPerTx =
+    input.maxXrpPerTxDrops === undefined
+      ? (existing[0]?.maxXrpPerTxDrops ?? null)
+      : input.maxXrpPerTxDrops;
+  const nextDaily =
+    input.dailyXrpLimitDrops === undefined
+      ? (existing[0]?.dailyXrpLimitDrops ?? null)
+      : input.dailyXrpLimitDrops;
+
+  try {
+    await db
+      .insert(schema.spendPolicies)
+      .values({
+        clientId: input.clientId,
+        maxXrpPerTxDrops: nextMaxPerTx,
+        dailyXrpLimitDrops: nextDaily,
+        isActive: true,
+      })
+      .onConflictDoUpdate({
+        target: schema.spendPolicies.clientId,
+        set: {
+          maxXrpPerTxDrops: nextMaxPerTx,
+          dailyXrpLimitDrops: nextDaily,
+          isActive: true,
+          updatedAt: new Date(),
+        },
+      });
+  } catch (err) {
+    log.error(
+      { err: err instanceof Error ? err.message : String(err) },
+      'agent spend-policy upsert failed',
+    );
+    throw new AgentServiceError(
+      'db_conflict',
+      'Failed to persist spend-policy update — please retry',
+    );
+  }
+
+  // Drop the in-process cache so the next enforceSpendPolicy on this node
+  // doesn't serve the stale cap. Other nodes pick up the change within
+  // CACHE_TTL_MS — acceptable for an admin-set policy.
+  invalidateSpendPolicyCache(input.clientId);
+
+  // Return the fresh agent view so the dashboard can swap state without
+  // a follow-up GET.
+  const [allowlist, spendPolicy] = await Promise.all([
+    loadAllowlist(agentRow.id),
+    loadSpendPolicy(input.clientId),
+  ]);
+  return rowToView(agentRow, allowlist, spendPolicy);
 }
 
 export interface RevokeAgentInput {

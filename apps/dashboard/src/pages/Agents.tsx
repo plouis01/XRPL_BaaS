@@ -532,11 +532,22 @@ function AgentDetail({
         mono={false}
       />
       <SpendUsagePanel
+        agentId={agent.id}
         usage={usage}
         error={usageError}
         // Fall back to the policy snapshot the agent detail returned so the
         // panel renders immediately on open, even before /usage resolves.
         fallbackPolicy={agent.spend_policy ?? null}
+        // Same gate as the allowlist editor — only meaningful while the
+        // agent can still spend. Revoked / pending-revocation rows are
+        // read-only.
+        canEdit={agent.status === 'active' && !agent.pending_revocation}
+        onSaved={() => {
+          // Refresh both the usage panel (new caps) and the agent detail
+          // (so spend_policy on the response shape stays consistent).
+          void fetchUsage();
+          void fetchDetail();
+        }}
       />
       <div>
         <div
@@ -996,16 +1007,22 @@ function AllowlistEditor({
 }
 
 function SpendUsagePanel({
+  agentId,
   usage,
   error,
   fallbackPolicy,
+  canEdit,
+  onSaved,
 }: {
+  agentId: string;
   usage: AgentUsage | null;
   error: string | null;
   fallbackPolicy: {
     max_xrp_per_tx_drops: string | null;
     daily_xrp_limit_drops: string | null;
   } | null;
+  canEdit: boolean;
+  onSaved: () => void;
 }) {
   // Prefer live usage payload; fall back to the agent's policy snapshot
   // until /usage resolves so the caps don't flash empty on first render.
@@ -1020,6 +1037,55 @@ function SpendUsagePanel({
   const barColor =
     pct === null ? '#cbd5e1' : pct < 70 ? '#16a34a' : pct < 95 ? '#d97706' : '#dc2626';
 
+  const [editing, setEditing] = useState(false);
+  // Inputs are XRP (whole units) — easier to type than drops. Empty → cap
+  // removed (null on the wire). The save handler converts to drops.
+  const [perTxXrp, setPerTxXrp] = useState('');
+  const [dailyXrp, setDailyXrp] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+
+  const startEditing = () => {
+    setPerTxXrp(maxPerTx ? String(Number(maxPerTx) / 1_000_000) : '');
+    setDailyXrp(dailyLimit ? String(Number(dailyLimit) / 1_000_000) : '');
+    setSaveError(null);
+    setEditing(true);
+  };
+
+  const save = async () => {
+    setSaving(true);
+    setSaveError(null);
+    try {
+      const body: Record<string, string | null> = {};
+      // Empty input → null (clear the cap). Numeric input → drops string.
+      // Trim before testing emptiness so a stray space doesn't quietly
+      // cancel a clear.
+      const perTxRaw = perTxXrp.trim();
+      const dailyRaw = dailyXrp.trim();
+      if (perTxRaw === '') {
+        body.max_xrp_per_tx_drops = null;
+      } else {
+        const drops = xrpToDrops(perTxRaw);
+        if (drops === null) throw new Error('Per-tx must be a non-negative number');
+        body.max_xrp_per_tx_drops = drops;
+      }
+      if (dailyRaw === '') {
+        body.daily_xrp_limit_drops = null;
+      } else {
+        const drops = xrpToDrops(dailyRaw);
+        if (drops === null) throw new Error('Daily must be a non-negative number');
+        body.daily_xrp_limit_drops = drops;
+      }
+      await api(`/v1/agents/${agentId}/spend-policy`, { method: 'PUT', body });
+      setEditing(false);
+      onSaved();
+    } catch (err) {
+      setSaveError(errorMessage(err));
+    } finally {
+      setSaving(false);
+    }
+  };
+
   return (
     <div>
       <div
@@ -1033,42 +1099,211 @@ function SpendUsagePanel({
         <div style={{ fontSize: 12, color: '#64748b' }}>
           Spend caps {usage?.scope === 'client' && '(per-client)'}
         </div>
-        {usage?.scope === 'client' && (
-          <span style={{ fontSize: 10, color: '#94a3b8' }}>
-            shared by all agents on this client
-          </span>
-        )}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          {usage?.scope === 'client' && (
+            <span style={{ fontSize: 10, color: '#94a3b8' }}>
+              shared by all agents on this client
+            </span>
+          )}
+          {!editing && canEdit && (
+            <button
+              type="button"
+              onClick={startEditing}
+              style={{
+                padding: '2px 10px',
+                background: 'transparent',
+                color: '#2563eb',
+                border: '1px solid #2563eb',
+                borderRadius: 4,
+                cursor: 'pointer',
+                fontSize: 11,
+              }}
+            >
+              Edit
+            </button>
+          )}
+        </div>
       </div>
       {error && <div style={{ fontSize: 11, color: '#991b1b', marginBottom: 4 }}>{error}</div>}
-      <div style={{ fontSize: 13, marginBottom: 6 }}>
-        Per-tx: <strong>{formatDrops(maxPerTx)}</strong>
-        {'  ·  '}
-        Daily limit: <strong>{formatDrops(dailyLimit)}</strong>
-      </div>
-      <div style={{ fontSize: 12, color: '#475569', marginBottom: 4 }}>
-        Used today:{' '}
-        <strong>{usedDrops ? `${(usedNum / 1_000_000).toLocaleString()} XRP` : '—'}</strong>
-        {pct !== null && <span style={{ marginLeft: 6 }}>({pct}%)</span>}
-      </div>
-      {pct !== null && (
-        <div
-          style={{
-            height: 6,
-            background: '#e2e8f0',
-            borderRadius: 9999,
-            overflow: 'hidden',
+
+      {editing ? (
+        <SpendCapEditor
+          perTxXrp={perTxXrp}
+          dailyXrp={dailyXrp}
+          onPerTxChange={setPerTxXrp}
+          onDailyChange={setDailyXrp}
+          saving={saving}
+          error={saveError}
+          onSave={() => void save()}
+          onCancel={() => {
+            setEditing(false);
+            setSaveError(null);
           }}
-        >
-          <div
-            style={{
-              width: `${pct}%`,
-              height: '100%',
-              background: barColor,
-              transition: 'width 200ms ease',
-            }}
+        />
+      ) : (
+        <>
+          <div style={{ fontSize: 13, marginBottom: 6 }}>
+            Per-tx: <strong>{formatDrops(maxPerTx)}</strong>
+            {'  ·  '}
+            Daily limit: <strong>{formatDrops(dailyLimit)}</strong>
+          </div>
+          <div style={{ fontSize: 12, color: '#475569', marginBottom: 4 }}>
+            Used today:{' '}
+            <strong>{usedDrops ? `${(usedNum / 1_000_000).toLocaleString()} XRP` : '—'}</strong>
+            {pct !== null && <span style={{ marginLeft: 6 }}>({pct}%)</span>}
+          </div>
+          {pct !== null && (
+            <div
+              style={{
+                height: 6,
+                background: '#e2e8f0',
+                borderRadius: 9999,
+                overflow: 'hidden',
+              }}
+            >
+              <div
+                style={{
+                  width: `${pct}%`,
+                  height: '100%',
+                  background: barColor,
+                  transition: 'width 200ms ease',
+                }}
+              />
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+// Convert a user-typed XRP string to a drops string. Returns null on
+// non-numeric / negative input. Uses string math (split + pad) instead of
+// Number * 1_000_000 to preserve precision past ~9 digits.
+function xrpToDrops(input: string): string | null {
+  if (!/^\d+(\.\d+)?$/.test(input)) return null;
+  const [whole, frac = ''] = input.split('.');
+  // Drops are 6-decimal — anything beyond that is silently dropped (the
+  // server would reject anyway since the schema requires an integer).
+  if (frac.length > 6) return null;
+  const padded = frac.padEnd(6, '0');
+  // Strip leading zeros but keep at least one digit.
+  const combined = `${whole}${padded}`.replace(/^0+(?=\d)/, '');
+  return combined;
+}
+
+function SpendCapEditor({
+  perTxXrp,
+  dailyXrp,
+  onPerTxChange,
+  onDailyChange,
+  saving,
+  error,
+  onSave,
+  onCancel,
+}: {
+  perTxXrp: string;
+  dailyXrp: string;
+  onPerTxChange: (v: string) => void;
+  onDailyChange: (v: string) => void;
+  saving: boolean;
+  error: string | null;
+  onSave: () => void;
+  onCancel: () => void;
+}) {
+  const inputStyle: React.CSSProperties = {
+    width: '100%',
+    padding: '6px 8px',
+    borderRadius: 4,
+    border: '1px solid #cbd5e1',
+    fontSize: 13,
+    boxSizing: 'border-box',
+  };
+  const labelStyle: React.CSSProperties = {
+    display: 'block',
+    fontSize: 11,
+    color: '#64748b',
+    marginBottom: 2,
+  };
+  return (
+    <div
+      style={{
+        border: '1px solid #cbd5e1',
+        borderRadius: 6,
+        padding: 12,
+        background: '#fff',
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 10,
+      }}
+    >
+      <div style={{ display: 'flex', gap: 12 }}>
+        <div style={{ flex: 1 }}>
+          <label style={labelStyle} htmlFor="sp-pertx">
+            Per-tx (XRP)
+          </label>
+          <input
+            id="sp-pertx"
+            type="text"
+            value={perTxXrp}
+            onChange={(e) => onPerTxChange(e.target.value)}
+            placeholder="e.g. 10  (blank to remove cap)"
+            style={inputStyle}
           />
         </div>
-      )}
+        <div style={{ flex: 1 }}>
+          <label style={labelStyle} htmlFor="sp-daily">
+            Daily limit (XRP)
+          </label>
+          <input
+            id="sp-daily"
+            type="text"
+            value={dailyXrp}
+            onChange={(e) => onDailyChange(e.target.value)}
+            placeholder="e.g. 100  (blank to remove cap)"
+            style={inputStyle}
+          />
+        </div>
+      </div>
+      <div style={{ fontSize: 11, color: '#94a3b8' }}>
+        Changes apply immediately. Lowering the daily cap below today's already-spent amount locks
+        the client out until the 24h window rolls over.
+      </div>
+      {error && <div style={{ fontSize: 12, color: '#991b1b' }}>{error}</div>}
+      <div style={{ display: 'flex', gap: 8 }}>
+        <button
+          type="button"
+          onClick={onSave}
+          disabled={saving}
+          style={{
+            padding: '6px 14px',
+            background: saving ? '#cbd5e1' : '#2563eb',
+            color: '#fff',
+            border: 'none',
+            borderRadius: 4,
+            cursor: saving ? 'not-allowed' : 'pointer',
+            fontSize: 12,
+          }}
+        >
+          {saving ? 'Saving…' : 'Save caps'}
+        </button>
+        <button
+          type="button"
+          onClick={onCancel}
+          disabled={saving}
+          style={{
+            padding: '6px 14px',
+            background: 'transparent',
+            color: '#475569',
+            border: '1px solid #cbd5e1',
+            borderRadius: 4,
+            cursor: saving ? 'not-allowed' : 'pointer',
+            fontSize: 12,
+          }}
+        >
+          Cancel
+        </button>
+      </div>
     </div>
   );
 }
