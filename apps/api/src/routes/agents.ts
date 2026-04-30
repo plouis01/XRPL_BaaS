@@ -98,8 +98,8 @@ agents.post('/', zValidator('json', provisionAgentSchema), async (c) => {
       allowlist: body.allowlist,
       spendPolicy: body.spend_policy
         ? {
-            maxXrpPerTxDrops: body.spend_policy.max_xrp_per_tx_drops,
-            dailyXrpLimitDrops: body.spend_policy.daily_xrp_limit_drops,
+            maxPerTxUsdCents: body.spend_policy.max_per_tx_usd_cents,
+            dailyLimitUsdCents: body.spend_policy.daily_limit_usd_cents,
           }
         : undefined,
       quorum: body.quorum,
@@ -182,8 +182,8 @@ agents.put('/:id/spend-policy', zValidator('json', updateAgentSpendPolicySchema)
     const result = await updateAgentSpendPolicy({
       clientId,
       agentId: id,
-      maxXrpPerTxDrops: body.max_xrp_per_tx_drops,
-      dailyXrpLimitDrops: body.daily_xrp_limit_drops,
+      maxPerTxUsdCents: body.max_per_tx_usd_cents,
+      dailyLimitUsdCents: body.daily_limit_usd_cents,
     });
     return c.json(result);
   } catch (err) {

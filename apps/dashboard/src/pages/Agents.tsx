@@ -66,13 +66,6 @@ function StatusBadge({
   );
 }
 
-function formatDrops(drops: string | null): string {
-  if (!drops) return 'no cap';
-  const n = Number(drops);
-  if (!Number.isFinite(n)) return drops;
-  return `${(n / 1_000_000).toLocaleString(undefined, { maximumFractionDigits: 6 })} XRP`;
-}
-
 function formatTxAmount(drops: string | null): string {
   if (!drops) return '— (non-XRP)';
   const n = Number(drops);
@@ -888,23 +881,26 @@ const PRESET_DEFAULTS: Record<
     description: string;
     requireAllowlist: boolean;
     allowedEntryTypes: Array<'destination' | 'token' | 'domain'>;
-    maxXrpPerTx: string;
-    dailyXrp: string;
+    /** Default per-tx cap shown in the new-agent form, in dollars. */
+    maxPerTxUsd: string;
+    /** Default daily cap shown in the new-agent form, in dollars. */
+    dailyUsd: string;
   }
 > = {
   'payment-agent': {
-    description: 'Pay allowlisted destinations. 10 XRP/tx, 100 XRP/day default.',
+    description: 'Pay allowlisted destinations. $10/tx, $100/day default.',
     requireAllowlist: true,
     allowedEntryTypes: ['destination', 'token'],
-    maxXrpPerTx: '10000000',
-    dailyXrp: '100000000',
+    maxPerTxUsd: '10',
+    dailyUsd: '100',
   },
   'treasury-agent': {
-    description: 'Disburse to destinations or XLS-80 domain members. 1000/10000 XRP defaults.',
+    description:
+      'Disburse to destinations or XLS-80 domain members. $1,000/tx, $10,000/day defaults.',
     requireAllowlist: false,
     allowedEntryTypes: ['destination', 'token', 'domain'],
-    maxXrpPerTx: '1000000000',
-    dailyXrp: '10000000000',
+    maxPerTxUsd: '1000',
+    dailyUsd: '10000',
   },
 };
 
@@ -1123,19 +1119,19 @@ function SpendUsagePanel({
   usage: AgentUsage | null;
   error: string | null;
   fallbackPolicy: {
-    max_xrp_per_tx_drops: string | null;
-    daily_xrp_limit_drops: string | null;
+    max_per_tx_usd_cents: string | null;
+    daily_limit_usd_cents: string | null;
   } | null;
   canEdit: boolean;
   onSaved: () => void;
 }) {
   // Prefer live usage payload; fall back to the agent's policy snapshot
   // until /usage resolves so the caps don't flash empty on first render.
-  const dailyLimit = usage?.daily_limit_drops ?? fallbackPolicy?.daily_xrp_limit_drops ?? null;
-  const maxPerTx = usage?.max_per_tx_drops ?? fallbackPolicy?.max_xrp_per_tx_drops ?? null;
-  const usedDrops = usage?.daily_used_drops ?? null;
+  const dailyLimit = usage?.daily_limit_usd_cents ?? fallbackPolicy?.daily_limit_usd_cents ?? null;
+  const maxPerTx = usage?.max_per_tx_usd_cents ?? fallbackPolicy?.max_per_tx_usd_cents ?? null;
+  const usedCents = usage?.daily_used_usd_cents ?? null;
 
-  const usedNum = usedDrops ? Number(usedDrops) : 0;
+  const usedNum = usedCents ? Number(usedCents) : 0;
   const limitNum = dailyLimit ? Number(dailyLimit) : null;
   const pct =
     limitNum && limitNum > 0 ? Math.min(100, Math.round((usedNum / limitNum) * 100)) : null;
@@ -1143,16 +1139,16 @@ function SpendUsagePanel({
     pct === null ? '#cbd5e1' : pct < 70 ? '#16a34a' : pct < 95 ? '#d97706' : '#dc2626';
 
   const [editing, setEditing] = useState(false);
-  // Inputs are XRP (whole units) — easier to type than drops. Empty → cap
-  // removed (null on the wire). The save handler converts to drops.
-  const [perTxXrp, setPerTxXrp] = useState('');
-  const [dailyXrp, setDailyXrp] = useState('');
+  // Inputs are USD (dollars). Empty → cap removed (null on the wire).
+  // The save handler converts dollars to cents.
+  const [perTxUsd, setPerTxUsd] = useState('');
+  const [dailyUsd, setDailyUsd] = useState('');
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
 
   const startEditing = () => {
-    setPerTxXrp(maxPerTx ? String(Number(maxPerTx) / 1_000_000) : '');
-    setDailyXrp(dailyLimit ? String(Number(dailyLimit) / 1_000_000) : '');
+    setPerTxUsd(maxPerTx ? centsToDollarString(maxPerTx) : '');
+    setDailyUsd(dailyLimit ? centsToDollarString(dailyLimit) : '');
     setSaveError(null);
     setEditing(true);
   };
@@ -1162,24 +1158,21 @@ function SpendUsagePanel({
     setSaveError(null);
     try {
       const body: Record<string, string | null> = {};
-      // Empty input → null (clear the cap). Numeric input → drops string.
-      // Trim before testing emptiness so a stray space doesn't quietly
-      // cancel a clear.
-      const perTxRaw = perTxXrp.trim();
-      const dailyRaw = dailyXrp.trim();
+      const perTxRaw = perTxUsd.trim();
+      const dailyRaw = dailyUsd.trim();
       if (perTxRaw === '') {
-        body.max_xrp_per_tx_drops = null;
+        body.max_per_tx_usd_cents = null;
       } else {
-        const drops = xrpToDrops(perTxRaw);
-        if (drops === null) throw new Error('Per-tx must be a non-negative number');
-        body.max_xrp_per_tx_drops = drops;
+        const cents = usdToCents(perTxRaw);
+        if (cents === null) throw new Error('Per-tx must be a non-negative dollar amount');
+        body.max_per_tx_usd_cents = cents;
       }
       if (dailyRaw === '') {
-        body.daily_xrp_limit_drops = null;
+        body.daily_limit_usd_cents = null;
       } else {
-        const drops = xrpToDrops(dailyRaw);
-        if (drops === null) throw new Error('Daily must be a non-negative number');
-        body.daily_xrp_limit_drops = drops;
+        const cents = usdToCents(dailyRaw);
+        if (cents === null) throw new Error('Daily must be a non-negative dollar amount');
+        body.daily_limit_usd_cents = cents;
       }
       await api(`/v1/agents/${agentId}/spend-policy`, { method: 'PUT', body });
       setEditing(false);
@@ -1202,13 +1195,12 @@ function SpendUsagePanel({
         }}
       >
         <div style={{ fontSize: 12, color: '#64748b' }}>
-          Spend caps {usage?.scope === 'client' && '(per-client)'}
+          Spend caps (USD)
+          {usage?.scope === 'client' && ' — inherited from tenant'}
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
           {usage?.scope === 'client' && (
-            <span style={{ fontSize: 10, color: '#94a3b8' }}>
-              shared by all agents on this client
-            </span>
+            <span style={{ fontSize: 10, color: '#94a3b8' }}>shared by all inheriting agents</span>
           )}
           {!editing && canEdit && (
             <button
@@ -1233,10 +1225,10 @@ function SpendUsagePanel({
 
       {editing ? (
         <SpendCapEditor
-          perTxXrp={perTxXrp}
-          dailyXrp={dailyXrp}
-          onPerTxChange={setPerTxXrp}
-          onDailyChange={setDailyXrp}
+          perTxUsd={perTxUsd}
+          dailyUsd={dailyUsd}
+          onPerTxChange={setPerTxUsd}
+          onDailyChange={setDailyUsd}
           saving={saving}
           error={saveError}
           onSave={() => void save()}
@@ -1248,13 +1240,12 @@ function SpendUsagePanel({
       ) : (
         <>
           <div style={{ fontSize: 13, marginBottom: 6 }}>
-            Per-tx: <strong>{formatDrops(maxPerTx)}</strong>
+            Per-tx: <strong>{formatCents(maxPerTx)}</strong>
             {'  ·  '}
-            Daily limit: <strong>{formatDrops(dailyLimit)}</strong>
+            Daily limit: <strong>{formatCents(dailyLimit)}</strong>
           </div>
           <div style={{ fontSize: 12, color: '#475569', marginBottom: 4 }}>
-            Used today:{' '}
-            <strong>{usedDrops ? `${(usedNum / 1_000_000).toLocaleString()} XRP` : '—'}</strong>
+            Used today: <strong>{usedCents ? formatCentsValue(usedCents) : '—'}</strong>
             {pct !== null && <span style={{ marginLeft: 6 }}>({pct}%)</span>}
           </div>
           {pct !== null && (
@@ -1276,30 +1267,66 @@ function SpendUsagePanel({
               />
             </div>
           )}
+          {usage?.xrp_usd_rate && (
+            <div style={{ fontSize: 11, color: '#94a3b8', marginTop: 4 }}>
+              XRP txs converted at {formatCentsValue(String(usage.xrp_usd_rate.cents))}/XRP
+              {' — '}
+              {usage.xrp_usd_rate.source === 'coingecko'
+                ? `CoinGecko, ${ageOf(usage.xrp_usd_rate.fetched_at)}`
+                : 'fallback rate (price feed unavailable)'}
+            </div>
+          )}
         </>
       )}
     </div>
   );
 }
 
-// Convert a user-typed XRP string to a drops string. Returns null on
-// non-numeric / negative input. Uses string math (split + pad) instead of
-// Number * 1_000_000 to preserve precision past ~9 digits.
-function xrpToDrops(input: string): string | null {
+// Convert a user-typed dollar string (e.g. "12.34") to integer cents.
+// Returns null on non-numeric / negative input. String-math preserves
+// precision for caps that would round badly through Number.
+function usdToCents(input: string): string | null {
   if (!/^\d+(\.\d+)?$/.test(input)) return null;
   const [whole, frac = ''] = input.split('.');
-  // Drops are 6-decimal — anything beyond that is silently dropped (the
-  // server would reject anyway since the schema requires an integer).
-  if (frac.length > 6) return null;
-  const padded = frac.padEnd(6, '0');
-  // Strip leading zeros but keep at least one digit.
+  // Truncate beyond 2 decimals — sub-cent precision isn't meaningful for
+  // caps, and storing it would just confuse the UI on re-edit.
+  const padded = `${frac}00`.slice(0, 2);
   const combined = `${whole}${padded}`.replace(/^0+(?=\d)/, '');
   return combined;
 }
 
+// Format an integer cents string as `$X.XX` (or `no cap` for null).
+function formatCents(cents: string | null): string {
+  if (!cents) return 'no cap';
+  return formatCentsValue(cents);
+}
+
+// Format an integer cents string as `$X.XX`. Used for both caps and
+// usage; `formatCents` adds the "no cap" sentinel for the null case.
+function centsToDollarString(cents: string): string {
+  const n = Number(cents);
+  if (!Number.isFinite(n)) return cents;
+  return (n / 100).toFixed(2);
+}
+
+function formatCentsValue(cents: string): string {
+  return `$${centsToDollarString(cents)}`;
+}
+
+// "5 minutes ago" / "just now" — short hint for the price feed age line.
+function ageOf(iso: string): string {
+  const t = Date.parse(iso);
+  if (!Number.isFinite(t)) return 'unknown age';
+  const sec = Math.max(0, Math.round((Date.now() - t) / 1000));
+  if (sec < 30) return 'just now';
+  if (sec < 90) return '~1 min ago';
+  if (sec < 3600) return `${Math.round(sec / 60)} min ago`;
+  return `${Math.round(sec / 3600)}h ago`;
+}
+
 function SpendCapEditor({
-  perTxXrp,
-  dailyXrp,
+  perTxUsd,
+  dailyUsd,
   onPerTxChange,
   onDailyChange,
   saving,
@@ -1307,8 +1334,8 @@ function SpendCapEditor({
   onSave,
   onCancel,
 }: {
-  perTxXrp: string;
-  dailyXrp: string;
+  perTxUsd: string;
+  dailyUsd: string;
   onPerTxChange: (v: string) => void;
   onDailyChange: (v: string) => void;
   saving: boolean;
@@ -1345,34 +1372,35 @@ function SpendCapEditor({
       <div style={{ display: 'flex', gap: 12 }}>
         <div style={{ flex: 1 }}>
           <label style={labelStyle} htmlFor="sp-pertx">
-            Per-tx (XRP)
+            Per-tx (USD)
           </label>
           <input
             id="sp-pertx"
             type="text"
-            value={perTxXrp}
+            value={perTxUsd}
             onChange={(e) => onPerTxChange(e.target.value)}
-            placeholder="e.g. 10  (blank to remove cap)"
+            placeholder="e.g. 50.00  (blank to remove cap)"
             style={inputStyle}
           />
         </div>
         <div style={{ flex: 1 }}>
           <label style={labelStyle} htmlFor="sp-daily">
-            Daily limit (XRP)
+            Daily limit (USD)
           </label>
           <input
             id="sp-daily"
             type="text"
-            value={dailyXrp}
+            value={dailyUsd}
             onChange={(e) => onDailyChange(e.target.value)}
-            placeholder="e.g. 100  (blank to remove cap)"
+            placeholder="e.g. 500.00  (blank to remove cap)"
             style={inputStyle}
           />
         </div>
       </div>
       <div style={{ fontSize: 11, color: '#94a3b8' }}>
-        Changes apply immediately. Lowering the daily cap below today's already-spent amount locks
-        the client out until the 24h window rolls over.
+        Caps are USD-denominated. XRP txs convert via the live CoinGecko rate (60s cache); RLUSD =
+        $1 (no oracle round-trip). Changes apply immediately — lowering the daily cap below today's
+        already- spent amount locks the client out until the 24h window rolls over.
       </div>
       {error && <div style={{ fontSize: 12, color: '#991b1b' }}>{error}</div>}
       <div style={{ display: 'flex', gap: 8 }}>
@@ -1622,8 +1650,19 @@ function NewAgentForm({
       };
       if (label.trim()) body.label = label.trim();
       const sp: Record<string, string | null> = {};
-      if (overrideMaxPerTx.trim()) sp.max_xrp_per_tx_drops = overrideMaxPerTx.trim();
-      if (overrideDaily.trim()) sp.daily_xrp_limit_drops = overrideDaily.trim();
+      // Inputs are USD (dollars). Convert to cents for the wire format
+      // the server uses. Reject malformed input early so the user gets a
+      // clear inline error instead of a 400 from the API.
+      if (overrideMaxPerTx.trim()) {
+        const cents = usdToCents(overrideMaxPerTx.trim());
+        if (cents === null) throw new Error('Per-tx must be a non-negative dollar amount');
+        sp.max_per_tx_usd_cents = cents;
+      }
+      if (overrideDaily.trim()) {
+        const cents = usdToCents(overrideDaily.trim());
+        if (cents === null) throw new Error('Daily must be a non-negative dollar amount');
+        sp.daily_limit_usd_cents = cents;
+      }
       if (Object.keys(sp).length > 0) body.spend_policy = sp;
 
       const result = await api<{ id: string; agent_seed: string }>('/v1/agents', {
@@ -1761,27 +1800,27 @@ function NewAgentForm({
       <div style={{ display: 'flex', gap: 16 }}>
         <div style={{ flex: 1 }}>
           <label style={labelStyle} htmlFor="naf-pertx">
-            Max per-tx (drops, optional)
+            Max per-tx (USD, optional)
           </label>
           <input
             id="naf-pertx"
             type="text"
             value={overrideMaxPerTx}
             onChange={(e) => setOverrideMaxPerTx(e.target.value)}
-            placeholder={`default ${presetCfg?.maxXrpPerTx}`}
+            placeholder={`default $${presetCfg?.maxPerTxUsd}`}
             style={inputStyle}
           />
         </div>
         <div style={{ flex: 1 }}>
           <label style={labelStyle} htmlFor="naf-daily">
-            Daily cap (drops, optional)
+            Daily cap (USD, optional)
           </label>
           <input
             id="naf-daily"
             type="text"
             value={overrideDaily}
             onChange={(e) => setOverrideDaily(e.target.value)}
-            placeholder={`default ${presetCfg?.dailyXrp}`}
+            placeholder={`default $${presetCfg?.dailyUsd}`}
             style={inputStyle}
           />
         </div>

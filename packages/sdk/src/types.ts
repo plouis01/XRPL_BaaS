@@ -440,8 +440,8 @@ export interface AgentAllowlistEntry {
 }
 
 export interface AgentSpendPolicyOverride {
-  max_xrp_per_tx_drops?: string | null;
-  daily_xrp_limit_drops?: string | null;
+  max_per_tx_usd_cents?: string | null;
+  daily_limit_usd_cents?: string | null;
 }
 
 export interface ProvisionAgentParams {
@@ -454,8 +454,8 @@ export interface ProvisionAgentParams {
 }
 
 export interface AgentSpendPolicy {
-  max_xrp_per_tx_drops: string | null;
-  daily_xrp_limit_drops: string | null;
+  max_per_tx_usd_cents: string | null;
+  daily_limit_usd_cents: string | null;
 }
 
 export interface Agent {

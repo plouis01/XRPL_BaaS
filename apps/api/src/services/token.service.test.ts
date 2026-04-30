@@ -117,8 +117,8 @@ vi.mock('./spendPolicy.service.ts', () => ({
   enforceTokenOpCount: vi.fn(async () => undefined),
   resolvePolicy: vi.fn(async () => ({
     scope: 'unlimited' as const,
-    maxXrpPerTxDrops: null,
-    dailyXrpLimitDrops: null,
+    maxPerTxUsdCents: null,
+    dailyLimitUsdCents: null,
   })),
   SpendPolicyError: class SpendPolicyError extends Error {
     constructor(

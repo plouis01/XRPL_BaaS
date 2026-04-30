@@ -31,8 +31,8 @@ vi.mock('@railforge/db', () => {
       spendPolicies: {
         clientId: 'clientId',
         agentId: 'agentId',
-        maxXrpPerTxDrops: 'maxXrpPerTxDrops',
-        dailyXrpLimitDrops: 'dailyXrpLimitDrops',
+        maxPerTxUsdCents: 'maxPerTxUsdCents',
+        dailyLimitUsdCents: 'dailyLimitUsdCents',
         isActive: 'isActive',
       },
       transactions: {
@@ -60,6 +60,21 @@ vi.mock('../logger.ts', () => ({
     }),
     warn: vi.fn(),
   },
+}));
+
+// Price oracle is mocked with a sentinel rate of 1_000_000 cents/XRP so the
+// `getDailySpend` seed (which does drops × rate ÷ 1_000_000) is the
+// identity. This lets the existing fixture totals (which were written
+// when the counter was in drops) keep their numeric meaning when the
+// counter is in cents — no fixture rewriting needed. The test file
+// doesn't validate the oracle math; that lives in priceOracle's own
+// tests when added.
+vi.mock('./priceOracle.service.ts', () => ({
+  getXrpUsdRateCents: vi.fn(async () => ({
+    cents: 1_000_000,
+    source: 'fallback' as const,
+    fetchedAt: 0,
+  })),
 }));
 
 // ── Redis mock ─────────────────────────────────────────────────────────────
@@ -121,43 +136,43 @@ describe('enforceSpendPolicy', () => {
 
   it('is a no-op when no spend policy exists for the client', async () => {
     policySelectResult.current = [];
-    await expect(enforceSpendPolicy('client-1', '100000000')).resolves.toBeUndefined();
+    await expect(enforceSpendPolicy('client-1', BigInt('100000000'))).resolves.toBeUndefined();
   });
 
   it('is a no-op when the policy exists but is inactive', async () => {
     policySelectResult.current = [
       {
         agentId: null,
-        maxXrpPerTxDrops: '1000000',
-        dailyXrpLimitDrops: '10000000',
+        maxPerTxUsdCents: '1000000',
+        dailyLimitUsdCents: '10000000',
         isActive: false,
       },
     ];
-    await expect(enforceSpendPolicy('client-1', '100000000')).resolves.toBeUndefined();
+    await expect(enforceSpendPolicy('client-1', BigInt('100000000'))).resolves.toBeUndefined();
   });
 
   it('is a no-op when both limits are NULL (unlimited)', async () => {
     policySelectResult.current = [
       {
         agentId: null,
-        maxXrpPerTxDrops: null,
-        dailyXrpLimitDrops: null,
+        maxPerTxUsdCents: null,
+        dailyLimitUsdCents: null,
         isActive: true,
       },
     ];
-    await expect(enforceSpendPolicy('client-1', '100000000')).resolves.toBeUndefined();
+    await expect(enforceSpendPolicy('client-1', BigInt('100000000'))).resolves.toBeUndefined();
   });
 
   it('throws per_tx_limit_exceeded when amount exceeds per-tx limit', async () => {
     policySelectResult.current = [
       {
         agentId: null,
-        maxXrpPerTxDrops: '5000000',
-        dailyXrpLimitDrops: null,
+        maxPerTxUsdCents: '5000000',
+        dailyLimitUsdCents: null,
         isActive: true,
       },
     ];
-    const err = await enforceSpendPolicy('client-1', '10000000').catch((e: unknown) => e);
+    const err = await enforceSpendPolicy('client-1', BigInt('10000000')).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(SpendPolicyError);
     expect((err as InstanceType<typeof SpendPolicyError>).code).toBe('per_tx_limit_exceeded');
   });
@@ -166,38 +181,38 @@ describe('enforceSpendPolicy', () => {
     policySelectResult.current = [
       {
         agentId: null,
-        maxXrpPerTxDrops: '5000000',
-        dailyXrpLimitDrops: null,
+        maxPerTxUsdCents: '5000000',
+        dailyLimitUsdCents: null,
         isActive: true,
       },
     ];
-    await expect(enforceSpendPolicy('client-1', '5000000')).resolves.toBeUndefined();
+    await expect(enforceSpendPolicy('client-1', BigInt('5000000'))).resolves.toBeUndefined();
   });
 
   it('allows a transaction under the per-tx limit', async () => {
     policySelectResult.current = [
       {
         agentId: null,
-        maxXrpPerTxDrops: '5000000',
-        dailyXrpLimitDrops: null,
+        maxPerTxUsdCents: '5000000',
+        dailyLimitUsdCents: null,
         isActive: true,
       },
     ];
-    await expect(enforceSpendPolicy('client-1', '4999999')).resolves.toBeUndefined();
+    await expect(enforceSpendPolicy('client-1', BigInt('4999999'))).resolves.toBeUndefined();
   });
 
   it('throws daily_limit_exceeded when cumulative spend would exceed daily limit', async () => {
     policySelectResult.current = [
       {
         agentId: null,
-        maxXrpPerTxDrops: null,
-        dailyXrpLimitDrops: '50000000',
+        maxPerTxUsdCents: null,
+        dailyLimitUsdCents: '50000000',
         isActive: true,
       },
     ];
     dailySumResult.current = [{ total: '45000000' }];
 
-    const err = await enforceSpendPolicy('client-1', '10000000').catch((e: unknown) => e);
+    const err = await enforceSpendPolicy('client-1', BigInt('10000000')).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(SpendPolicyError);
     expect((err as InstanceType<typeof SpendPolicyError>).code).toBe('daily_limit_exceeded');
   });
@@ -206,29 +221,29 @@ describe('enforceSpendPolicy', () => {
     policySelectResult.current = [
       {
         agentId: null,
-        maxXrpPerTxDrops: null,
-        dailyXrpLimitDrops: '50000000',
+        maxPerTxUsdCents: null,
+        dailyLimitUsdCents: '50000000',
         isActive: true,
       },
     ];
     dailySumResult.current = [{ total: '40000000' }];
 
-    await expect(enforceSpendPolicy('client-1', '10000000')).resolves.toBeUndefined();
+    await expect(enforceSpendPolicy('client-1', BigInt('10000000'))).resolves.toBeUndefined();
   });
 
   it('checks both per-tx AND daily limits (per-tx fires first)', async () => {
     policySelectResult.current = [
       {
         agentId: null,
-        maxXrpPerTxDrops: '5000000',
-        dailyXrpLimitDrops: '50000000',
+        maxPerTxUsdCents: '5000000',
+        dailyLimitUsdCents: '50000000',
         isActive: true,
       },
     ];
     dailySumResult.current = [{ total: '0' }];
 
     // Amount exceeds per-tx limit but is under daily limit.
-    const err = await enforceSpendPolicy('client-1', '10000000').catch((e: unknown) => e);
+    const err = await enforceSpendPolicy('client-1', BigInt('10000000')).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(SpendPolicyError);
     expect((err as InstanceType<typeof SpendPolicyError>).code).toBe('per_tx_limit_exceeded');
   });
@@ -239,8 +254,8 @@ describe('enforceSpendPolicy', () => {
     policySelectResult.current = [
       {
         agentId: null,
-        maxXrpPerTxDrops: null,
-        dailyXrpLimitDrops: '100000000',
+        maxPerTxUsdCents: null,
+        dailyLimitUsdCents: '100000000',
         isActive: true,
       },
     ];
@@ -250,7 +265,7 @@ describe('enforceSpendPolicy', () => {
     redisState.counter = null;
 
     // Request 10M drops: seed(40M) + amount(10M) = 50M ≤ limit(100M) → accept.
-    await expect(enforceSpendPolicy('client-1', '10000000')).resolves.toBeUndefined();
+    await expect(enforceSpendPolicy('client-1', BigInt('10000000'))).resolves.toBeUndefined();
     // Counter should now reflect 40M (seed) + 10M (this tx) = 50M.
     expect(redisState.counter).toBe('50000000');
   });
@@ -259,15 +274,15 @@ describe('enforceSpendPolicy', () => {
     policySelectResult.current = [
       {
         agentId: null,
-        maxXrpPerTxDrops: null,
-        dailyXrpLimitDrops: '50000000',
+        maxPerTxUsdCents: null,
+        dailyLimitUsdCents: '50000000',
         isActive: true,
       },
     ];
     // Redis already has 45M recorded (warm path — no DB seed).
     redisState.counter = '45000000';
 
-    const err = await enforceSpendPolicy('client-1', '10000000').catch((e: unknown) => e);
+    const err = await enforceSpendPolicy('client-1', BigInt('10000000')).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(SpendPolicyError);
     expect((err as InstanceType<typeof SpendPolicyError>).code).toBe('daily_limit_exceeded');
     // Counter must be unchanged on rejection — no double-debit.
@@ -278,8 +293,8 @@ describe('enforceSpendPolicy', () => {
     policySelectResult.current = [
       {
         agentId: null,
-        maxXrpPerTxDrops: null,
-        dailyXrpLimitDrops: '100000000',
+        maxPerTxUsdCents: null,
+        dailyLimitUsdCents: '100000000',
         isActive: true,
       },
     ];
@@ -290,8 +305,8 @@ describe('enforceSpendPolicy', () => {
     // both would pass, cumulative spend would be 120M > 100M limit.
     // Post-fix, the second request sees the first's increment.
     const [r1, r2] = await Promise.allSettled([
-      enforceSpendPolicy('client-1', '60000000'),
-      enforceSpendPolicy('client-1', '60000000'),
+      enforceSpendPolicy('client-1', BigInt('60000000')),
+      enforceSpendPolicy('client-1', BigInt('60000000')),
     ]);
 
     // Exactly one must have been accepted and one rejected.
@@ -307,8 +322,8 @@ describe('enforceSpendPolicy', () => {
     policySelectResult.current = [
       {
         agentId: null,
-        maxXrpPerTxDrops: null,
-        dailyXrpLimitDrops: '50000000',
+        maxPerTxUsdCents: null,
+        dailyLimitUsdCents: '50000000',
         isActive: true,
       },
     ];
@@ -316,7 +331,7 @@ describe('enforceSpendPolicy', () => {
     redisState.shouldThrow = true;
 
     // DB says 45M + proposed 10M = 55M > 50M limit → reject.
-    const err = await enforceSpendPolicy('client-1', '10000000').catch((e: unknown) => e);
+    const err = await enforceSpendPolicy('client-1', BigInt('10000000')).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(SpendPolicyError);
     expect((err as InstanceType<typeof SpendPolicyError>).code).toBe('daily_limit_exceeded');
   });
@@ -325,14 +340,14 @@ describe('enforceSpendPolicy', () => {
     policySelectResult.current = [
       {
         agentId: null,
-        maxXrpPerTxDrops: null,
-        dailyXrpLimitDrops: '50000000',
+        maxPerTxUsdCents: null,
+        dailyLimitUsdCents: '50000000',
         isActive: true,
       },
     ];
     dailySumResult.current = [{ total: '10000000' }];
     redisState.shouldThrow = true;
 
-    await expect(enforceSpendPolicy('client-1', '10000000')).resolves.toBeUndefined();
+    await expect(enforceSpendPolicy('client-1', BigInt('10000000'))).resolves.toBeUndefined();
   });
 });

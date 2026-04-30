@@ -33,10 +33,10 @@ export type AgentPermission = (typeof PERMISSION_VALUES)[number];
 export type AgentAllowlistEntryType = 'destination' | 'token' | 'domain';
 
 export interface AgentPresetSpendPolicy {
-  /** XRP per-tx cap in drops. Null = no cap. */
-  maxXrpPerTxDrops: string | null;
-  /** XRP daily rolling cap in drops. Null = no cap. */
-  dailyXrpLimitDrops: string | null;
+  /** Per-tx cap in USD cents (migration 0019). Null = no cap. */
+  maxPerTxUsdCents: string | null;
+  /** Daily rolling cap in USD cents. Null = no cap. */
+  dailyLimitUsdCents: string | null;
 }
 
 export interface AgentPreset {
@@ -64,34 +64,33 @@ export interface AgentPreset {
 const PAYMENT_AGENT: AgentPreset = {
   name: 'payment-agent',
   description:
-    'Pay allowlisted destinations up to a daily XRP cap. Supports XRP, MPT, and issued-currency payments.',
+    'Pay allowlisted destinations up to a daily USD cap. Supports XRP, RLUSD, MPT, and issued-currency payments.',
   permissions: ['Payment'] as const,
   defaultSpendPolicy: {
-    // 10 XRP
-    maxXrpPerTxDrops: '10000000',
-    // 100 XRP
-    dailyXrpLimitDrops: '100000000',
+    // $10 per tx
+    maxPerTxUsdCents: '1000',
+    // $100 per day
+    dailyLimitUsdCents: '10000',
   },
   allowedEntryTypes: ['destination', 'token'] as const,
   requireAllowlist: true,
 };
 
 // ── Preset: treasury-agent ───────────────────────────────────────────────────
-// Internal-disbursement agent with larger caps: 1000 XRP per tx, 10000 XRP
-// per day. Allowlist can include XLS-80 domains so the agent may only pay
-// accounts that hold a qualifying credential (KYC'd holder set, loyalty
-// members, etc). Allowlist may start empty because treasury flows often
-// populate it dynamically.
+// Internal-disbursement agent with larger USD caps. Allowlist can include
+// XLS-80 domains so the agent may only pay accounts that hold a qualifying
+// credential (KYC'd holder set, loyalty members, etc). Allowlist may start
+// empty because treasury flows often populate it dynamically.
 const TREASURY_AGENT: AgentPreset = {
   name: 'treasury-agent',
   description:
-    'Disburse XRP and tokens to destinations or XLS-80 domain members with higher per-tx and daily caps.',
+    'Disburse XRP and tokens to destinations or XLS-80 domain members with higher per-tx and daily USD caps.',
   permissions: ['Payment'] as const,
   defaultSpendPolicy: {
-    // 1000 XRP
-    maxXrpPerTxDrops: '1000000000',
-    // 10000 XRP
-    dailyXrpLimitDrops: '10000000000',
+    // $1,000 per tx
+    maxPerTxUsdCents: '100000',
+    // $10,000 per day
+    dailyLimitUsdCents: '1000000',
   },
   allowedEntryTypes: ['destination', 'token', 'domain'] as const,
   requireAllowlist: false,

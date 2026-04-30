@@ -50,13 +50,23 @@ import {
  * If the key names drift, the bug is silent — keep them synced.
  */
 async function refundSpendCounterBestEffort(txId: string, log: Logger): Promise<void> {
-  let row: { clientId: string; agentId: string | null; amountDrops: string | null } | undefined;
+  let row:
+    | {
+        clientId: string;
+        agentId: string | null;
+        amountUsdCents: string | null;
+      }
+    | undefined;
   try {
     const rows = await db
       .select({
         clientId: schema.transactions.clientId,
         agentId: schema.transactions.agentId,
-        amountDrops: schema.transactions.amountDrops,
+        // Stamped at submission time by payment.service. NULL when no USD
+        // cap was applied (MPT, non-RLUSD IOU, system tx). Reading this
+        // directly avoids re-running the price oracle and the rate-drift
+        // skew that would introduce.
+        amountUsdCents: schema.transactions.amountUsdCents,
       })
       .from(schema.transactions)
       .where(eq(schema.transactions.id, txId))
@@ -66,10 +76,10 @@ async function refundSpendCounterBestEffort(txId: string, log: Logger): Promise<
     log.warn({ err }, 'spend-policy refund: failed to fetch tx amount (non-fatal)');
     return;
   }
-  if (!row || !row.amountDrops) return;
+  if (!row || !row.amountUsdCents) return;
   let amount: bigint;
   try {
-    amount = BigInt(row.amountDrops);
+    amount = BigInt(row.amountUsdCents);
   } catch {
     return;
   }

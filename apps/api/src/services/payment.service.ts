@@ -29,7 +29,27 @@ import {
 } from '@railforge/xrpl-core';
 import { logger } from '../logger.ts';
 import { AgentServiceError, authorizeAgentPayment } from './agent.service.ts';
+import { dropsToUsdCents, rlusdValueToUsdCents } from './priceOracle.service.ts';
 import { enforceSpendPolicy, enforceTokenOpCount } from './spendPolicy.service.ts';
+
+// RLUSD is the only IOU treated as a 1:1-peg amount-cap target. Anything
+// else falls through to enforceTokenOpCount (op-count ceiling).
+// Currency code may arrive as ASCII "RLUSD" or its 40-char hex form
+// (XRPL convention for codes longer than 3 chars). The hex covers
+// the dashboard well-known-token picker; the ASCII covers ad-hoc
+// callers. Issuer match is loose across networks — if the caller is on
+// the wrong network, the on-ledger Payment fails anyway.
+const RLUSD_HEX = '524C555344000000000000000000000000000000';
+const RLUSD_ISSUERS = new Set([
+  'rMxCKbEDwqr76QuheSUMdEGf4B9xJ8m5De', // mainnet
+  'rQhWct2fv4Vc4KRjRgMrxa8xPN9Zx9iLKV', // testnet
+]);
+
+function isRlusd(currency: string, issuer: string): boolean {
+  const upper = currency.toUpperCase();
+  if (upper !== 'RLUSD' && upper !== RLUSD_HEX) return false;
+  return RLUSD_ISSUERS.has(issuer);
+}
 
 export class PaymentServiceError extends Error {
   constructor(
@@ -203,14 +223,27 @@ export async function sendPayment(input: SendPaymentInput): Promise<{ txId: stri
     );
   }
 
+  // USD-denominated cap enforcement (migration 0019). Three asset paths:
+  //   - XRP   → drops × XRP/USD rate (priceOracle, 60s cache) → cents
+  //   - RLUSD → value × 100 = cents (1:1 peg, no oracle round-trip)
+  //   - other IOU/MPT → no per-asset oracle; falls through to
+  //                     enforceTokenOpCount (per-day op-count ceiling).
+  let usdCentsForCap: bigint | null = null;
   if (input.amountDrops) {
-    await enforceSpendPolicy(input.clientId, input.amountDrops, input.agentId ?? null);
+    usdCentsForCap = await dropsToUsdCents(input.amountDrops);
+  } else if (
+    input.currency &&
+    input.issuer &&
+    input.value &&
+    isRlusd(input.currency, input.issuer)
+  ) {
+    usdCentsForCap = rlusdValueToUsdCents(input.value);
+  }
+  if (usdCentsForCap !== null) {
+    await enforceSpendPolicy(input.clientId, usdCentsForCap, input.agentId ?? null);
   } else {
-    // REVIEW.md MED-03: MPT + issued-currency payments are asset-denominated
-    // and invisible to enforceSpendPolicy. Apply a nominal per-day op-count
-    // ceiling as defense-in-depth until a price-oracle integration lets us
-    // enforce asset-denominated limits properly. Per-agent counter when
-    // the agent has its own policy row, else the tenant counter.
+    // MPT, non-RLUSD IOU, or malformed RLUSD value — out of scope for the
+    // USD cap. The op-count ceiling still bounds the blast radius.
     await enforceTokenOpCount(input.clientId, input.agentId ?? null);
   }
 
@@ -223,6 +256,12 @@ export async function sendPayment(input: SendPaymentInput): Promise<{ txId: stri
       sourceAddress: source.address,
       status: 'queued',
       amountDrops: input.amountDrops ?? null,
+      // Stamp the cents amount the spend-policy counter was incremented
+      // by, so txConfirmer's refund path can decrement the same counter
+      // by the same amount on terminal failure (without re-running the
+      // oracle, which may have drifted between submission and refund).
+      // NULL when no USD cap was applied (MPT, non-RLUSD IOU).
+      amountUsdCents: usdCentsForCap !== null ? usdCentsForCap.toString() : null,
       // VISION.md agent launcher: stamp the originating agent so the
       // dashboard can render per-agent tx history. NULL for client-scoped
       // (non-agent) keys.
@@ -442,7 +481,9 @@ export async function createEscrow(input: CreateEscrowInput): Promise<{ txId: st
     );
   }
 
-  await enforceSpendPolicy(input.clientId, input.amountDrops);
+  // Escrow create is XRP-only at this layer; convert drops → USD cents.
+  const escrowUsdCents = await dropsToUsdCents(input.amountDrops);
+  await enforceSpendPolicy(input.clientId, escrowUsdCents);
 
   const txInserted = await db
     .insert(schema.transactions)
@@ -453,6 +494,7 @@ export async function createEscrow(input: CreateEscrowInput): Promise<{ txId: st
       sourceAddress: source.address,
       status: 'queued',
       amountDrops: input.amountDrops,
+      amountUsdCents: escrowUsdCents.toString(),
       requestBody: {
         op: 'createEscrow',
         source: input.source,

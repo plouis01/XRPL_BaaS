@@ -398,13 +398,13 @@ export const provisionAgentSchema = z.object({
   /**
    * Optional spend-policy override. Any field omitted falls back to the
    * preset's defaultSpendPolicy value. Pass `null` explicitly to remove a
-   * default cap (e.g. `max_xrp_per_tx_drops: null` to disable the per-tx
+   * default cap (e.g. `max_per_tx_usd_cents: null` to disable the per-tx
    * limit that the preset provides).
    */
   spend_policy: z
     .object({
-      max_xrp_per_tx_drops: z.string().nullable().optional(),
-      daily_xrp_limit_drops: z.string().nullable().optional(),
+      max_per_tx_usd_cents: z.string().nullable().optional(),
+      daily_limit_usd_cents: z.string().nullable().optional(),
     })
     .optional(),
   /**
@@ -445,11 +445,11 @@ const dropsAmountSchema = z
   .nullable();
 export const updateAgentSpendPolicySchema = z
   .object({
-    max_xrp_per_tx_drops: dropsAmountSchema.optional(),
-    daily_xrp_limit_drops: dropsAmountSchema.optional(),
+    max_per_tx_usd_cents: dropsAmountSchema.optional(),
+    daily_limit_usd_cents: dropsAmountSchema.optional(),
   })
-  .refine((v) => v.max_xrp_per_tx_drops !== undefined || v.daily_xrp_limit_drops !== undefined, {
-    message: 'at least one of max_xrp_per_tx_drops, daily_xrp_limit_drops is required',
+  .refine((v) => v.max_per_tx_usd_cents !== undefined || v.daily_limit_usd_cents !== undefined, {
+    message: 'at least one of max_per_tx_usd_cents, daily_limit_usd_cents is required',
   });
 
 // ── DEX ─────────────────────────────────────────────────────────────────

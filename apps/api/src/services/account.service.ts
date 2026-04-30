@@ -40,6 +40,7 @@ import {
 } from '@railforge/xrpl-core';
 import { Wallet } from 'xrpl';
 import { logger } from '../logger.ts';
+import { dropsToUsdCents } from './priceOracle.service.ts';
 import { enforceSpendPolicy } from './spendPolicy.service.ts';
 
 // Amount sent from the treasury to each new account. 20 XRP covers the
@@ -134,7 +135,7 @@ export async function createAccount(input: CreateAccountInput): Promise<AccountV
   // The worker generates the key, updates the row with the real address +
   // label, then enqueues the funding tx. The client polls by id.
   if (process.env.HSM_PROVIDER === 'aws_cloudhsm') {
-    await enforceSpendPolicy(input.clientId, FUNDING_AMOUNT_DROPS);
+    await enforceSpendPolicy(input.clientId, await dropsToUsdCents(FUNDING_AMOUNT_DROPS));
 
     const placeholderAddress = `pending-${crypto.randomUUID()}`;
     const acctInserted = await db
@@ -205,7 +206,8 @@ export async function createAccount(input: CreateAccountInput): Promise<AccountV
     amountDrops: FUNDING_AMOUNT_DROPS,
   });
 
-  await enforceSpendPolicy(input.clientId, FUNDING_AMOUNT_DROPS);
+  const fundingUsdCents = await dropsToUsdCents(FUNDING_AMOUNT_DROPS);
+  await enforceSpendPolicy(input.clientId, fundingUsdCents);
 
   let accountId: string;
   let txId: string;
@@ -220,6 +222,7 @@ export async function createAccount(input: CreateAccountInput): Promise<AccountV
           sourceAddress: treasuryAddress,
           status: 'queued',
           amountDrops: FUNDING_AMOUNT_DROPS,
+          amountUsdCents: fundingUsdCents.toString(),
           requestBody: {
             purpose: 'account_funding',
             destination: address,

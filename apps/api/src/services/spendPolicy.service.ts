@@ -1,43 +1,51 @@
-// Spend policy enforcement service (Sprint 7, PLAN.md §9.1 #15).
+// Spend policy enforcement service.
 //
-// Per-client transaction amount limits. Two dimensions:
+// USD-denominated transaction amount limits (migration 0019). The caller
+// converts the proposed tx amount to USD cents BEFORE calling
+// enforceSpendPolicy — this keeps oracle access concentrated in the
+// surfaces that need it (payment.service for XRP/RLUSD) instead of
+// every check.
 //
-//   1. Per-tx limit — reject any single tx whose XRP amount exceeds
-//      `spend_policies.max_xrp_per_tx_drops`. Cheap: one DB read (cached),
-//      no concurrency issues (pure comparison).
+// Two dimensions:
 //
-//   2. Daily rolling limit — reject if the sum of XRP amounts across all
-//      non-failed transactions in the last 24 hours plus the proposed tx
-//      exceeds `spend_policies.daily_xrp_limit_drops`.
+//   1. Per-tx limit — reject when amount > spend_policies.max_per_tx_usd_cents.
+//      Cheap: one DB read (cached), no concurrency issues.
+//
+//   2. Daily rolling limit — atomic Redis counter in cents, seeded from the
+//      DB SUM on cold start (REVIEW.md H-2). The seed converts historical
+//      `transactions.amount_drops` × current XRP/USD rate ÷ 1_000_000;
+//      RLUSD txs (no drops column) are missed by the seed, so an agent
+//      could in principle get a slightly larger budget after a Redis
+//      flush — acceptable trade-off for now since flushes are rare.
 //
 // Clients without a spend_policies row are unlimited (backward-compat).
 // A row with `is_active=false` is also treated as unlimited. NULL on a
 // limit column means "no limit" for that dimension.
 //
-// REVIEW.md H-2 fix: the daily check used to run `SELECT SUM + INSERT`
-// non-atomically. Two concurrent requests at 90%-of-limit both read the
-// same SUM, both passed, both inserted — the client silently exceeded
-// their limit. Fix: authoritative atomic counter in Redis, seeded from
-// the DB SUM on cold start. A Lua script does the check-and-increment
-// in a single round-trip so no two requests can both see a pre-increment
-// snapshot.
+// REVIEW.md H-2 fix: a naive `SELECT SUM + INSERT` was non-atomic. Two
+// concurrent requests at 90%-of-limit both read the same SUM, both
+// passed, both inserted — the client silently exceeded their limit.
+// Fix: authoritative atomic counter in Redis. A Lua script does the
+// check-and-increment in a single round-trip so no two requests can
+// both see a pre-increment snapshot.
 //
 // Tradeoffs of the Redis-first model:
-//   - Failed txs over-count. A tx that enforceSpendPolicy accepted but
-//     that later fails on-ledger stays in the counter (the counter only
-//     increments; it never decrements). This is conservative — the
-//     client's available budget shrinks slightly. Rectified when the
-//     counter's 24h TTL rolls over and the next request reseeds from
-//     the DB (which filters out `status='failed'`).
-//   - Redis unavailable → fall back to the old DB-only path. Loses
-//     TOCTOU protection in that mode but keeps the service running.
+//   - Failed txs over-count. The counter only ever INCRs from the
+//     enforcement path; refundSpendCounter on terminal `failed` rolls
+//     the over-count back. The 24h TTL roll-over also reseeds from DB.
+//   - Redis unavailable → fall back to the DB-only path. Loses TOCTOU
+//     protection in that mode but keeps the service running.
 //
-// Token amount limits (non-XRP) are deferred — they require an oracle
-// or price feed to be meaningful.
+// Asset coverage:
+//   - XRP    → drops × XRP/USD rate ÷ 1_000_000 = cents (priceOracle.service)
+//   - RLUSD  → value × 100 = cents (1:1 peg, no oracle)
+//   - other IOU / MPT → out of scope; bounded by enforceTokenOpCount
+//                       (a per-day op-count ceiling, not amount-based).
 
 import { and, db, eq, isNull, schema, sql } from '@railforge/db';
 import { logger } from '../logger.ts';
 import { getRedis } from '../redis.ts';
+import { getXrpUsdRateCents } from './priceOracle.service.ts';
 
 /**
  * Resolution scope for a spend-policy lookup. 'agent' = a per-agent
@@ -61,8 +69,8 @@ export class SpendPolicyError extends Error {
 
 interface CachedPolicy {
   scope: PolicyScope;
-  maxXrpPerTxDrops: bigint | null;
-  dailyXrpLimitDrops: bigint | null;
+  maxPerTxUsdCents: bigint | null;
+  dailyLimitUsdCents: bigint | null;
   fetchedAt: number;
 }
 
@@ -204,8 +212,8 @@ export async function resolvePolicy(
   const rows = await db
     .select({
       agentId: schema.spendPolicies.agentId,
-      maxXrpPerTxDrops: schema.spendPolicies.maxXrpPerTxDrops,
-      dailyXrpLimitDrops: schema.spendPolicies.dailyXrpLimitDrops,
+      maxPerTxUsdCents: schema.spendPolicies.maxPerTxUsdCents,
+      dailyLimitUsdCents: schema.spendPolicies.dailyLimitUsdCents,
       isActive: schema.spendPolicies.isActive,
     })
     .from(schema.spendPolicies)
@@ -232,8 +240,8 @@ export async function resolvePolicy(
 
   const policy: CachedPolicy = {
     scope,
-    maxXrpPerTxDrops: winner?.maxXrpPerTxDrops ? BigInt(winner.maxXrpPerTxDrops) : null,
-    dailyXrpLimitDrops: winner?.dailyXrpLimitDrops ? BigInt(winner.dailyXrpLimitDrops) : null,
+    maxPerTxUsdCents: winner?.maxPerTxUsdCents ? BigInt(winner.maxPerTxUsdCents) : null,
+    dailyLimitUsdCents: winner?.dailyLimitUsdCents ? BigInt(winner.dailyLimitUsdCents) : null,
     fetchedAt: now,
   };
   policyCache.set(cacheKey, policy);
@@ -278,8 +286,16 @@ async function getDailySpend(clientId: string, agentId: string | null): Promise<
             AND ${schema.transactions.status} != 'failed'
             AND ${schema.transactions.amountDrops} IS NOT NULL`,
     );
-  const total = result[0]?.total;
-  return total ? BigInt(total) : 0n;
+  const totalDrops = result[0]?.total ? BigInt(result[0].total) : 0n;
+  if (totalDrops === 0n) return 0n;
+  // Convert historical drops to USD cents at the CURRENT rate. Inaccurate
+  // for windows that span large rate movements, but the seed only matters
+  // on cold-start (counter missing) — the live check-and-increment path
+  // uses the live rate per tx. RLUSD historical txs are missed entirely
+  // (no drops column), so the seed under-counts when an agent has been
+  // moving RLUSD; documented in the file header.
+  const rate = await getXrpUsdRateCents();
+  return (totalDrops * BigInt(rate.cents)) / 1_000_000n;
 }
 
 /**
@@ -326,16 +342,18 @@ async function tryAtomicCheckAndIncrement(
 }
 
 /**
- * Enforce the resolved spend policy for a proposed XRP transaction.
+ * Enforce the resolved spend policy for a proposed transaction.
  *
  * @param clientId  The authenticated client.
- * @param amountDrops  The XRP amount (in drops) that this transaction
- *   will move. Pass the string value from the request body.
+ * @param amountUsdCents  The transaction amount in USD cents. Caller is
+ *   responsible for converting from the source asset:
+ *     - XRP   → priceOracle.dropsToUsdCents(drops)
+ *     - RLUSD → priceOracle.rlusdValueToUsdCents(value)
+ *   Other IOU/MPT amounts can't be converted without a per-asset oracle;
+ *   those callers route to enforceTokenOpCount instead.
  * @param agentId  When the calling key is agent-bound, the agent's UUID.
  *   Resolution prefers a per-agent row; otherwise falls back to the
- *   tenant-wide row. The Redis counter that tracks daily usage matches
- *   the resolved scope — agent-scoped policies use a per-agent counter,
- *   client-scoped policies share the tenant counter.
+ *   tenant-wide row. The Redis counter matches the resolved scope.
  *
  * @throws {SpendPolicyError} if the transaction would exceed a limit.
  *
@@ -346,38 +364,38 @@ async function tryAtomicCheckAndIncrement(
  */
 export async function enforceSpendPolicy(
   clientId: string,
-  amountDrops: string,
+  amountUsdCents: bigint,
   agentId: string | null = null,
 ): Promise<void> {
   const policy = await resolvePolicy(clientId, agentId);
   if (policy.scope === 'unlimited') return;
-  if (policy.maxXrpPerTxDrops === null && policy.dailyXrpLimitDrops === null) return;
+  if (policy.maxPerTxUsdCents === null && policy.dailyLimitUsdCents === null) return;
 
   // Counter scope follows policy scope — an agent override uses the
   // agent counter, an inherited (client-scoped) policy uses the
   // shared tenant counter.
   const counterAgentId = policy.scope === 'agent' ? agentId : null;
-  const amount = BigInt(amountDrops);
+  const amount = amountUsdCents;
 
-  if (policy.maxXrpPerTxDrops !== null && amount > policy.maxXrpPerTxDrops) {
+  if (policy.maxPerTxUsdCents !== null && amount > policy.maxPerTxUsdCents) {
     logger.warn(
       {
         clientId,
         agentId,
         scope: policy.scope,
-        amountDrops,
-        limit: policy.maxXrpPerTxDrops.toString(),
+        amountUsdCents: amount.toString(),
+        limit: policy.maxPerTxUsdCents.toString(),
       },
-      'spend policy: per-tx XRP limit exceeded',
+      'spend policy: per-tx USD limit exceeded',
     );
     throw new SpendPolicyError(
       'per_tx_limit_exceeded',
-      `Transaction amount ${amountDrops} drops exceeds per-transaction limit of ${policy.maxXrpPerTxDrops.toString()} drops`,
+      `Transaction amount ${amount.toString()} cents exceeds per-transaction limit of ${policy.maxPerTxUsdCents.toString()} cents`,
     );
   }
 
-  if (policy.dailyXrpLimitDrops !== null) {
-    const limit = policy.dailyXrpLimitDrops;
+  if (policy.dailyLimitUsdCents !== null) {
+    const limit = policy.dailyLimitUsdCents;
 
     // REVIEW.md H-2 fix: try the atomic Redis path first. Fall back to
     // the old DB-only path only when Redis throws (unreachable) — a
@@ -390,14 +408,14 @@ export async function enforceSpendPolicy(
             clientId,
             agentId,
             scope: policy.scope,
-            amountDrops,
+            amountUsdCents: amount.toString(),
             limit: limit.toString(),
           },
-          'spend policy: daily XRP limit exceeded (atomic)',
+          'spend policy: daily USD limit exceeded (atomic)',
         );
         throw new SpendPolicyError(
           'daily_limit_exceeded',
-          `Transaction would push daily XRP spend over limit of ${limit.toString()} drops`,
+          `Transaction would push daily USD spend over limit of ${limit.toString()} cents`,
         );
       }
       return;
@@ -424,15 +442,15 @@ export async function enforceSpendPolicy(
           clientId,
           agentId,
           scope: policy.scope,
-          amountDrops,
+          amountUsdCents: amount.toString(),
           dailySpend: dailySpend.toString(),
           limit: limit.toString(),
         },
-        'spend policy: daily XRP limit exceeded (DB fallback)',
+        'spend policy: daily USD limit exceeded (DB fallback)',
       );
       throw new SpendPolicyError(
         'daily_limit_exceeded',
-        `Transaction would push daily XRP spend to ${(dailySpend + amount).toString()} drops, exceeding limit of ${limit.toString()} drops`,
+        `Transaction would push daily USD spend to ${(dailySpend + amount).toString()} cents, exceeding limit of ${limit.toString()} cents`,
       );
     }
   }
@@ -574,25 +592,17 @@ export async function enforceTokenOpCount(
  */
 export async function refundSpendCounter(
   clientId: string,
-  amountDrops: string,
+  amountUsdCents: bigint,
   agentId: string | null = null,
 ): Promise<void> {
-  if (!amountDrops || amountDrops === '0') return;
+  if (amountUsdCents <= 0n) return;
   const policy = await resolvePolicy(clientId, agentId).catch(() => null);
   if (!policy || policy.scope === 'unlimited') return;
-  if (policy.dailyXrpLimitDrops === null) return;
+  if (policy.dailyLimitUsdCents === null) return;
 
   // Refund hits the same counter that enforcement incremented — agent
   // counter when policy resolved per-agent, client counter when inherited.
   const counterAgentId = policy.scope === 'agent' ? agentId : null;
-
-  let amount: bigint;
-  try {
-    amount = BigInt(amountDrops);
-  } catch {
-    return; // malformed — nothing to refund
-  }
-  if (amount <= 0n) return;
 
   try {
     const redis = getRedis();
@@ -603,14 +613,14 @@ export async function refundSpendCounter(
     // later pass every check.
     const exists = await redis.exists(key);
     if (exists === 0) return;
-    await redis.decrby(key, amount.toString());
+    await redis.decrby(key, amountUsdCents.toString());
   } catch (err) {
     logger.warn(
       {
         err: err instanceof Error ? err.message : String(err),
         clientId,
         agentId,
-        amountDrops,
+        amountUsdCents: amountUsdCents.toString(),
       },
       'spend policy: refund decrement failed (best-effort)',
     );

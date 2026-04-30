@@ -97,8 +97,8 @@ export interface ProvisionAgentInput {
   label?: string;
   allowlist: AgentAllowlistInput[];
   spendPolicy?: {
-    maxXrpPerTxDrops?: string | null;
-    dailyXrpLimitDrops?: string | null;
+    maxPerTxUsdCents?: string | null;
+    dailyLimitUsdCents?: string | null;
   };
   quorum?: number;
   idempotencyKey?: string;
@@ -122,8 +122,8 @@ export interface AgentView {
   pending_revocation?: boolean;
   allowlist: AgentAllowlistInput[];
   spend_policy: {
-    max_xrp_per_tx_drops: string | null;
-    daily_xrp_limit_drops: string | null;
+    max_per_tx_usd_cents: string | null;
+    daily_limit_usd_cents: string | null;
   };
   created_at: Date | null;
   /**
@@ -296,13 +296,13 @@ export async function provisionAgent(input: ProvisionAgentInput): Promise<AgentV
   // field omitted falls back to the preset default. `null` is honored as
   // "explicitly disable this cap."
   const maxPerTx =
-    input.spendPolicy?.maxXrpPerTxDrops === undefined
-      ? preset.defaultSpendPolicy.maxXrpPerTxDrops
-      : input.spendPolicy.maxXrpPerTxDrops;
+    input.spendPolicy?.maxPerTxUsdCents === undefined
+      ? preset.defaultSpendPolicy.maxPerTxUsdCents
+      : input.spendPolicy.maxPerTxUsdCents;
   const dailyLimit =
-    input.spendPolicy?.dailyXrpLimitDrops === undefined
-      ? preset.defaultSpendPolicy.dailyXrpLimitDrops
-      : input.spendPolicy.dailyXrpLimitDrops;
+    input.spendPolicy?.dailyLimitUsdCents === undefined
+      ? preset.defaultSpendPolicy.dailyLimitUsdCents
+      : input.spendPolicy.dailyLimitUsdCents;
 
   let agentId: string;
   try {
@@ -372,15 +372,15 @@ export async function provisionAgent(input: ProvisionAgentInput): Promise<AgentV
         .values({
           clientId: input.clientId,
           agentId: agentRow.id,
-          maxXrpPerTxDrops: maxPerTx,
-          dailyXrpLimitDrops: dailyLimit,
+          maxPerTxUsdCents: maxPerTx,
+          dailyLimitUsdCents: dailyLimit,
           isActive: true,
         })
         .onConflictDoUpdate({
           target: [schema.spendPolicies.clientId, schema.spendPolicies.agentId],
           set: {
-            maxXrpPerTxDrops: maxPerTx,
-            dailyXrpLimitDrops: dailyLimit,
+            maxPerTxUsdCents: maxPerTx,
+            dailyLimitUsdCents: dailyLimit,
             isActive: true,
             updatedAt: new Date(),
           },
@@ -452,8 +452,8 @@ export async function provisionAgent(input: ProvisionAgentInput): Promise<AgentV
     status: 'pending',
     allowlist: input.allowlist,
     spend_policy: {
-      max_xrp_per_tx_drops: maxPerTx,
-      daily_xrp_limit_drops: dailyLimit,
+      max_per_tx_usd_cents: maxPerTx,
+      daily_limit_usd_cents: dailyLimit,
     },
     created_at: new Date(),
     agent_seed: agentSeed,
@@ -627,8 +627,8 @@ async function loadSpendPolicy(
   clientId: string,
   agentId: string | null,
 ): Promise<{
-  max_xrp_per_tx_drops: string | null;
-  daily_xrp_limit_drops: string | null;
+  max_per_tx_usd_cents: string | null;
+  daily_limit_usd_cents: string | null;
 }> {
   // Pull both candidate rows in one round-trip; pick the per-agent row
   // when present and active, otherwise fall back to the tenant default.
@@ -636,8 +636,8 @@ async function loadSpendPolicy(
   const rows = await db
     .select({
       agentId: schema.spendPolicies.agentId,
-      maxXrpPerTxDrops: schema.spendPolicies.maxXrpPerTxDrops,
-      dailyXrpLimitDrops: schema.spendPolicies.dailyXrpLimitDrops,
+      maxPerTxUsdCents: schema.spendPolicies.maxPerTxUsdCents,
+      dailyLimitUsdCents: schema.spendPolicies.dailyLimitUsdCents,
       isActive: schema.spendPolicies.isActive,
     })
     .from(schema.spendPolicies)
@@ -649,11 +649,11 @@ async function loadSpendPolicy(
   // and can interpret that as "no cap installed" exactly like a preset
   // that disabled both fields.
   if (!row) {
-    return { max_xrp_per_tx_drops: null, daily_xrp_limit_drops: null };
+    return { max_per_tx_usd_cents: null, daily_limit_usd_cents: null };
   }
   return {
-    max_xrp_per_tx_drops: row.maxXrpPerTxDrops,
-    daily_xrp_limit_drops: row.dailyXrpLimitDrops,
+    max_per_tx_usd_cents: row.maxPerTxUsdCents,
+    daily_limit_usd_cents: row.dailyLimitUsdCents,
   };
 }
 
@@ -661,8 +661,8 @@ function rowToView(
   row: AgentJoinedRow,
   allowlist: AgentAllowlistInput[],
   spendPolicy: {
-    max_xrp_per_tx_drops: string | null;
-    daily_xrp_limit_drops: string | null;
+    max_per_tx_usd_cents: string | null;
+    daily_limit_usd_cents: string | null;
   },
 ): AgentView {
   return {
@@ -888,8 +888,8 @@ export interface UpdateAgentSpendPolicyInput {
    *   - `undefined`                  → leave existing value untouched
    * The route validator rejects empty bodies, so at least one is set.
    */
-  maxXrpPerTxDrops?: string | null;
-  dailyXrpLimitDrops?: string | null;
+  maxPerTxUsdCents?: string | null;
+  dailyLimitUsdCents?: string | null;
 }
 
 /**
@@ -955,8 +955,8 @@ export async function updateAgentSpendPolicy(
   // the schema so each agent has its own row.
   const existing = await db
     .select({
-      maxXrpPerTxDrops: schema.spendPolicies.maxXrpPerTxDrops,
-      dailyXrpLimitDrops: schema.spendPolicies.dailyXrpLimitDrops,
+      maxPerTxUsdCents: schema.spendPolicies.maxPerTxUsdCents,
+      dailyLimitUsdCents: schema.spendPolicies.dailyLimitUsdCents,
     })
     .from(schema.spendPolicies)
     .where(
@@ -968,13 +968,13 @@ export async function updateAgentSpendPolicy(
     .limit(1);
 
   const nextMaxPerTx =
-    input.maxXrpPerTxDrops === undefined
-      ? (existing[0]?.maxXrpPerTxDrops ?? null)
-      : input.maxXrpPerTxDrops;
+    input.maxPerTxUsdCents === undefined
+      ? (existing[0]?.maxPerTxUsdCents ?? null)
+      : input.maxPerTxUsdCents;
   const nextDaily =
-    input.dailyXrpLimitDrops === undefined
-      ? (existing[0]?.dailyXrpLimitDrops ?? null)
-      : input.dailyXrpLimitDrops;
+    input.dailyLimitUsdCents === undefined
+      ? (existing[0]?.dailyLimitUsdCents ?? null)
+      : input.dailyLimitUsdCents;
 
   try {
     await db
@@ -982,15 +982,15 @@ export async function updateAgentSpendPolicy(
       .values({
         clientId: input.clientId,
         agentId: input.agentId,
-        maxXrpPerTxDrops: nextMaxPerTx,
-        dailyXrpLimitDrops: nextDaily,
+        maxPerTxUsdCents: nextMaxPerTx,
+        dailyLimitUsdCents: nextDaily,
         isActive: true,
       })
       .onConflictDoUpdate({
         target: [schema.spendPolicies.clientId, schema.spendPolicies.agentId],
         set: {
-          maxXrpPerTxDrops: nextMaxPerTx,
-          dailyXrpLimitDrops: nextDaily,
+          maxPerTxUsdCents: nextMaxPerTx,
+          dailyLimitUsdCents: nextDaily,
           isActive: true,
           updatedAt: new Date(),
         },

@@ -277,6 +277,13 @@ export const transactions = pgTable(
     // NULL for non-XRP or zero-value transactions (credentials,
     // domains, permissions, key rotations, etc.).
     amountDrops: text('amount_drops'),
+    // USD-denominated amount stamped at enforcement time (migration 0020).
+    // Set when enforceSpendPolicy was called: drops × XRP/USD rate ÷ 1M
+    // for XRP, or value × 100 for RLUSD. NULL for non-policy-checked txs
+    // (MPT, non-RLUSD IOU, zero-value system txs). Used by txConfirmer's
+    // refund path so it can decrement the cents counter directly without
+    // rerunning the oracle.
+    amountUsdCents: text('amount_usd_cents'),
     // VISION.md agent launcher: when non-null, this tx was submitted by an
     // agent-bound API key (ctx.agentId set in payment.service). Powers the
     // per-agent tx history view on the dashboard. ON DELETE SET NULL so a
@@ -360,8 +367,14 @@ export const spendPolicies = pgTable(
     agentId: uuid('agent_id').references(() => agents.id, {
       onDelete: 'cascade',
     }),
-    maxXrpPerTxDrops: text('max_xrp_per_tx_drops'),
-    dailyXrpLimitDrops: text('daily_xrp_limit_drops'),
+    // USD-denominated caps (migration 0019). Both XRP and RLUSD payments
+    // are converted to cents at enforcement time:
+    //   - XRP   → drops × XRP/USD rate (CoinGecko, 60s cache) ÷ 1_000_000
+    //   - RLUSD → value × 100 (1:1 peg, no oracle needed)
+    //   - other IOU / MPT → out of scope, gated by enforceTokenOpCount instead
+    // Stored as text to avoid JS-number precision loss on large caps.
+    maxPerTxUsdCents: text('max_per_tx_usd_cents'),
+    dailyLimitUsdCents: text('daily_limit_usd_cents'),
     isActive: boolean('is_active').notNull().default(true),
     createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow(),

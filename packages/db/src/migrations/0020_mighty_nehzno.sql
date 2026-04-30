@@ -1,0 +1,1 @@
+ALTER TABLE "transactions" ADD COLUMN "amount_usd_cents" text;

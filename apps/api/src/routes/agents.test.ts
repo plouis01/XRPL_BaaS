@@ -80,8 +80,8 @@ describe('POST /agents — happy path', () => {
       status: 'pending',
       allowlist: [{ entry_type: 'destination', entry_value: VALID_DEST }],
       spend_policy: {
-        max_xrp_per_tx_drops: '10000000',
-        daily_xrp_limit_drops: '100000000',
+        max_per_tx_usd_cents: '10000000',
+        daily_limit_usd_cents: '100000000',
       },
       created_at: new Date('2026-04-27T00:00:00Z'),
       agent_seed: 'sEdT...REDACTED_IN_LOG_ONLY',
@@ -116,8 +116,8 @@ describe('POST /agents — happy path', () => {
       status: 'pending',
       allowlist: [],
       spend_policy: {
-        max_xrp_per_tx_drops: '10000000',
-        daily_xrp_limit_drops: '100000000',
+        max_per_tx_usd_cents: '10000000',
+        daily_limit_usd_cents: '100000000',
       },
       created_at: new Date(),
       agent_seed: 'sEdT...x',
@@ -151,8 +151,8 @@ describe('POST /agents — happy path', () => {
       status: 'pending',
       allowlist: [],
       spend_policy: {
-        max_xrp_per_tx_drops: null,
-        daily_xrp_limit_drops: '50000000',
+        max_per_tx_usd_cents: null,
+        daily_limit_usd_cents: '50000000',
       },
       created_at: new Date(),
       agent_seed: 'sEdT...y',
@@ -167,20 +167,20 @@ describe('POST /agents — happy path', () => {
         preset: 'treasury-agent',
         parent_address: VALID_PARENT,
         spend_policy: {
-          max_xrp_per_tx_drops: null,
-          daily_xrp_limit_drops: '50000000',
+          max_per_tx_usd_cents: null,
+          daily_limit_usd_cents: '50000000',
         },
       }),
     });
 
     const arg = mockProvisionAgent.mock.calls[0]?.[0] as {
       spendPolicy?: {
-        maxXrpPerTxDrops: string | null;
-        dailyXrpLimitDrops: string | null;
+        maxPerTxUsdCents: string | null;
+        dailyLimitUsdCents: string | null;
       };
     };
-    expect(arg.spendPolicy?.maxXrpPerTxDrops).toBeNull();
-    expect(arg.spendPolicy?.dailyXrpLimitDrops).toBe('50000000');
+    expect(arg.spendPolicy?.maxPerTxUsdCents).toBeNull();
+    expect(arg.spendPolicy?.dailyLimitUsdCents).toBe('50000000');
   });
 });
 
@@ -294,8 +294,8 @@ function viewWithoutSeed() {
     status: 'active',
     allowlist: [{ entry_type: 'destination', entry_value: VALID_DEST }],
     spend_policy: {
-      max_xrp_per_tx_drops: '10000000',
-      daily_xrp_limit_drops: '100000000',
+      max_per_tx_usd_cents: '10000000',
+      daily_limit_usd_cents: '100000000',
     },
     created_at: new Date('2026-04-27T00:00:00Z'),
     // No agent_seed, no grant_tx_id — read-path contract.

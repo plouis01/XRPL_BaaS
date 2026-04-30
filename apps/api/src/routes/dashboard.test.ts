@@ -222,8 +222,8 @@ vi.mock('@railforge/db', () => ({
       __tableName: 'spend_policies',
       id: {},
       clientId: {},
-      maxXrpPerTxDrops: {},
-      dailyXrpLimitDrops: {},
+      maxPerTxUsdCents: {},
+      dailyLimitUsdCents: {},
       isActive: {},
     },
   },
@@ -236,12 +236,22 @@ vi.mock('@railforge/db', () => ({
 let nextDailySpendUsage = '0';
 let nextResolvedPolicy: {
   scope: 'agent' | 'client' | 'unlimited';
-  maxXrpPerTxDrops: bigint | null;
-  dailyXrpLimitDrops: bigint | null;
-} = { scope: 'unlimited', maxXrpPerTxDrops: null, dailyXrpLimitDrops: null };
+  maxPerTxUsdCents: bigint | null;
+  dailyLimitUsdCents: bigint | null;
+} = { scope: 'unlimited', maxPerTxUsdCents: null, dailyLimitUsdCents: null };
 vi.mock('../services/spendPolicy.service.ts', () => ({
   getDailySpendUsage: vi.fn(async () => nextDailySpendUsage),
   resolvePolicy: vi.fn(async () => nextResolvedPolicy),
+}));
+
+// Price oracle is mocked because dashboard /agents/:id/usage now reads the
+// rate metadata to surface "XRP converted at $X.XX" alongside the meter.
+vi.mock('../services/priceOracle.service.ts', () => ({
+  getXrpUsdRateCents: vi.fn(async () => ({
+    cents: 50,
+    source: 'fallback' as const,
+    fetchedAt: 0,
+  })),
 }));
 
 const { default: dashboardRoute } = await import('./dashboard.ts');
@@ -266,8 +276,8 @@ beforeEach(() => {
   nextDailySpendUsage = '0';
   nextResolvedPolicy = {
     scope: 'unlimited',
-    maxXrpPerTxDrops: null,
-    dailyXrpLimitDrops: null,
+    maxPerTxUsdCents: null,
+    dailyLimitUsdCents: null,
   };
   nextAgentOwnershipRows = [];
   nextInsertReturning = [];
@@ -670,22 +680,24 @@ describe('GET /dashboard/agents/:id/usage', () => {
     expect(res.status).toBe(404);
   });
 
-  it('returns agent-scoped drops + caps when a per-agent override resolves', async () => {
+  it('returns agent-scoped USD caps + counter + rate metadata when a per-agent override resolves', async () => {
     nextAgentOwnershipRows = [{ id: validId }];
     nextResolvedPolicy = {
       scope: 'agent',
-      maxXrpPerTxDrops: 10_000_000n,
-      dailyXrpLimitDrops: 100_000_000n,
+      maxPerTxUsdCents: 1000n,
+      dailyLimitUsdCents: 10_000n,
     };
-    nextDailySpendUsage = '42000000';
+    nextDailySpendUsage = '4200';
     const app = makeApp();
     const res = await app.request(`/dashboard/agents/${validId}/usage`);
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({
-      daily_used_drops: '42000000',
-      daily_limit_drops: '100000000',
-      max_per_tx_drops: '10000000',
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body).toMatchObject({
+      daily_used_usd_cents: '4200',
+      daily_limit_usd_cents: '10000',
+      max_per_tx_usd_cents: '1000',
       scope: 'agent',
+      xrp_usd_rate: { cents: 50, source: 'fallback' },
     });
   });
 
@@ -693,17 +705,18 @@ describe('GET /dashboard/agents/:id/usage', () => {
     nextAgentOwnershipRows = [{ id: validId }];
     nextResolvedPolicy = {
       scope: 'client',
-      maxXrpPerTxDrops: 5_000_000n,
-      dailyXrpLimitDrops: 50_000_000n,
+      maxPerTxUsdCents: 500n,
+      dailyLimitUsdCents: 5000n,
     };
-    nextDailySpendUsage = '1000000';
+    nextDailySpendUsage = '100';
     const app = makeApp();
     const res = await app.request(`/dashboard/agents/${validId}/usage`);
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({
-      daily_used_drops: '1000000',
-      daily_limit_drops: '50000000',
-      max_per_tx_drops: '5000000',
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body).toMatchObject({
+      daily_used_usd_cents: '100',
+      daily_limit_usd_cents: '5000',
+      max_per_tx_usd_cents: '500',
       scope: 'client',
     });
   });
@@ -712,17 +725,18 @@ describe('GET /dashboard/agents/:id/usage', () => {
     nextAgentOwnershipRows = [{ id: validId }];
     nextResolvedPolicy = {
       scope: 'unlimited',
-      maxXrpPerTxDrops: null,
-      dailyXrpLimitDrops: null,
+      maxPerTxUsdCents: null,
+      dailyLimitUsdCents: null,
     };
     nextDailySpendUsage = '0';
     const app = makeApp();
     const res = await app.request(`/dashboard/agents/${validId}/usage`);
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({
-      daily_used_drops: '0',
-      daily_limit_drops: null,
-      max_per_tx_drops: null,
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body).toMatchObject({
+      daily_used_usd_cents: '0',
+      daily_limit_usd_cents: null,
+      max_per_tx_usd_cents: null,
       scope: 'unlimited',
     });
   });

@@ -32,8 +32,8 @@ export interface Agent {
   pending_revocation?: boolean;
   allowlist?: AgentAllowlistEntry[];
   spend_policy?: {
-    max_xrp_per_tx_drops: string | null;
-    daily_xrp_limit_drops: string | null;
+    max_per_tx_usd_cents: string | null;
+    daily_limit_usd_cents: string | null;
   };
   created_at: string | null;
 }
@@ -72,16 +72,29 @@ export interface AgentTransaction extends Transaction {
 }
 
 /**
- * GET /v1/dashboard/agents/:id/usage. `scope` flags whether the caps
- * apply per-client (today) or per-agent (future, once spend_policies
- * grows an agent_id column). All drop values are strings to avoid
- * JS-number precision loss.
+ * GET /v1/dashboard/agents/:id/usage (migration 0019: USD-denominated).
+ *
+ * `scope` flags how the policy resolved:
+ *   - 'agent'     → a per-agent override row applied
+ *   - 'client'    → fell back to the tenant-wide default
+ *   - 'unlimited' → no row of either kind, no caps
+ *
+ * Cent values are strings to avoid JS-number precision loss on large
+ * caps. `xrp_usd_rate` is the conversion the API used at request time
+ * for any XRP-denominated tx — surfaced so the UI can show the user
+ * what rate is being applied and how stale the price feed is.
  */
 export interface AgentUsage {
-  daily_used_drops: string;
-  daily_limit_drops: string | null;
-  max_per_tx_drops: string | null;
-  scope: 'client' | 'agent';
+  daily_used_usd_cents: string;
+  daily_limit_usd_cents: string | null;
+  max_per_tx_usd_cents: string | null;
+  scope: 'client' | 'agent' | 'unlimited';
+  xrp_usd_rate: {
+    cents: number;
+    source: 'coingecko' | 'fallback';
+    /** ISO-8601 timestamp of when the rate was last fetched. */
+    fetched_at: string;
+  };
 }
 
 export interface Credential {

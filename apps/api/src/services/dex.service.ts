@@ -18,6 +18,7 @@ import {
   buildOfferCreate,
 } from '@railforge/xrpl-core';
 import { logger } from '../logger.ts';
+import { dropsToUsdCents } from './priceOracle.service.ts';
 import { enforceSpendPolicy, enforceTokenOpCount } from './spendPolicy.service.ts';
 
 export class DexServiceError extends Error {
@@ -124,7 +125,7 @@ export async function createOffer(
   // enforce the client's spend limit on that amount.
   const xrpDropsOut = 'drops' in input.takerGets ? input.takerGets.drops : null;
   if (xrpDropsOut) {
-    await enforceSpendPolicy(input.clientId, xrpDropsOut);
+    await enforceSpendPolicy(input.clientId, await dropsToUsdCents(xrpDropsOut));
   } else {
     // REVIEW.md MED-03: non-XRP OfferCreate falls outside the drops-based
     // limit. Apply the token-op count ceiling.

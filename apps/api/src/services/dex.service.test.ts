@@ -53,6 +53,14 @@ vi.mock('../logger.ts', () => ({
   },
 }));
 
+// Oracle stub — DEX tests don't validate cents conversion. Identity rate
+// keeps the cap-math fixtures meaningful (drops in == drops out as cents).
+vi.mock('./priceOracle.service.ts', () => ({
+  dropsToUsdCents: vi.fn(async (drops: string | bigint) =>
+    typeof drops === 'bigint' ? drops : BigInt(drops),
+  ),
+}));
+
 // ── Import after mocks ────────────────────────────────────────────────────
 
 const { createOffer, cancelOffer, ammDeposit, ammWithdraw } = await import('./dex.service.ts');

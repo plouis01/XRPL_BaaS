@@ -30,6 +30,7 @@ import { and, db, desc, eq, schema } from '@railforge/db';
 import { Hono } from 'hono';
 import { z } from 'zod';
 import { hashApiKey } from '../middleware/auth.ts';
+import { getXrpUsdRateCents } from '../services/priceOracle.service.ts';
 import { getDailySpendUsage, resolvePolicy } from '../services/spendPolicy.service.ts';
 import type { AppEnv } from '../types.ts';
 
@@ -497,14 +498,26 @@ dashboard.get('/agents/:id/usage', async (c) => {
 
   const policy = await resolvePolicy(clientId, id);
   const counterAgentId = policy.scope === 'agent' ? id : null;
-  const dailyUsedDrops = await getDailySpendUsage(clientId, counterAgentId);
+  // Counter is now denominated in USD cents (migration 0019). The XRP
+  // rate metadata lets the dashboard show the user what conversion rate
+  // is being applied to XRP txs and how stale the price feed is.
+  const [dailyUsedCents, xrpRate] = await Promise.all([
+    getDailySpendUsage(clientId, counterAgentId),
+    getXrpUsdRateCents(),
+  ]);
 
   return c.json({
-    daily_used_drops: dailyUsedDrops,
-    daily_limit_drops:
-      policy.dailyXrpLimitDrops !== null ? policy.dailyXrpLimitDrops.toString() : null,
-    max_per_tx_drops: policy.maxXrpPerTxDrops !== null ? policy.maxXrpPerTxDrops.toString() : null,
+    daily_used_usd_cents: dailyUsedCents,
+    daily_limit_usd_cents:
+      policy.dailyLimitUsdCents !== null ? policy.dailyLimitUsdCents.toString() : null,
+    max_per_tx_usd_cents:
+      policy.maxPerTxUsdCents !== null ? policy.maxPerTxUsdCents.toString() : null,
     scope: policy.scope,
+    xrp_usd_rate: {
+      cents: xrpRate.cents,
+      source: xrpRate.source,
+      fetched_at: new Date(xrpRate.fetchedAt).toISOString(),
+    },
   });
 });
 

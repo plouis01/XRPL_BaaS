@@ -134,6 +134,20 @@
       "when": 1777555051201,
       "tag": "0018_flawless_the_spike",
       "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "7",
+      "when": 1777650000000,
+      "tag": "0019_usd_denominated_caps",
+      "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "7",
+      "when": 1777561745863,
+      "tag": "0020_mighty_nehzno",
+      "breakpoints": true
     }
   ]
 }
