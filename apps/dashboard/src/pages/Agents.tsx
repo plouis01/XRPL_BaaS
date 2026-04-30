@@ -82,6 +82,40 @@ function formatTxAmount(drops: string | null): string {
   });
 }
 
+// Well-known IOU tokens, indexed by network. Each entry produces a
+// single allowlist token-row in the format the server expects:
+// `<currency>:<issuer>` where currency is the 40-char hex form (XRPL's
+// canonical encoding for codes longer than 3 chars). RLUSD = "RLUSD"
+// → 0x52,0x4C,0x55,0x53,0x44 padded to 20 bytes.
+//
+// Adding more entries here is the single edit point for the picker —
+// both the new-agent form and the post-deploy editor read this list.
+interface WellKnownToken {
+  /** Display label shown in the dropdown. */
+  label: string;
+  /** Short note shown next to the label, e.g. "Ripple stablecoin". */
+  description: string;
+  /** Pre-formatted `<currency-hex>:<issuer-r-address>` allowlist entry. */
+  entry: string;
+}
+
+const WELL_KNOWN_TOKENS: Record<Network, WellKnownToken[]> = {
+  mainnet: [
+    {
+      label: 'RLUSD',
+      description: 'Ripple stablecoin (mainnet)',
+      entry: '524C555344000000000000000000000000000000:rMxCKbEDwqr76QuheSUMdEGf4B9xJ8m5De',
+    },
+  ],
+  testnet: [
+    {
+      label: 'RLUSD',
+      description: 'Ripple stablecoin (testnet)',
+      entry: '524C555344000000000000000000000000000000:rQhWct2fv4Vc4KRjRgMrxa8xPN9Zx9iLKV',
+    },
+  ],
+};
+
 export function Agents({ network }: { network: Network }) {
   const [agents, setAgents] = useState<AgentSummary[]>([]);
   const [loading, setLoading] = useState(true);
@@ -320,7 +354,11 @@ export function Agents({ network }: { network: Network }) {
                           }}
                         >
                           <td colSpan={7} style={{ padding: '16px 24px' }}>
-                            <AgentDetail agentId={a.id} onStatusFlip={() => void fetchAgents()} />
+                            <AgentDetail
+                              agentId={a.id}
+                              network={network}
+                              onStatusFlip={() => void fetchAgents()}
+                            />
                           </td>
                         </tr>
                       )}
@@ -338,9 +376,13 @@ export function Agents({ network }: { network: Network }) {
 
 function AgentDetail({
   agentId,
+  network,
   onStatusFlip,
 }: {
   agentId: string;
+  /** Threaded down to AllowlistEditor → AllowlistTypeInput for the
+   *  well-known-token picker (RLUSD issuer differs by network). */
+  network: Network;
   onStatusFlip: () => void;
 }) {
   const [agent, setAgent] = useState<Agent | null>(null);
@@ -593,6 +635,7 @@ function AgentDetail({
             }}
             saving={savingAllowlist}
             error={allowlistError}
+            network={network}
           />
         ) : !agent.allowlist || agent.allowlist.length === 0 ? (
           <span style={{ fontSize: 12, color: '#94a3b8' }}>—</span>
@@ -888,16 +931,74 @@ function AllowlistTypeInput({
   value,
   onChange,
   inputStyle,
+  network,
 }: {
   type: 'destination' | 'token' | 'domain';
   value: string;
   onChange: (v: string) => void;
   inputStyle: React.CSSProperties;
+  /**
+   * When provided AND type === 'token', a "well-known token" picker
+   * appears next to the label. Selecting an entry appends the canonical
+   * `<currency-hex>:<issuer>` form to the textarea (skipping if already
+   * present). Network determines which issuer address is used (mainnet
+   * vs testnet RLUSD live at different r-addresses).
+   */
+  network?: Network;
 }) {
   const meta = ALLOWLIST_TYPE_META[type];
+  const knownTokens = network && type === 'token' ? WELL_KNOWN_TOKENS[network] : null;
+
+  const addEntry = (entry: string) => {
+    // Skip the append if the same entry already exists in the textarea —
+    // server would reject the duplicate via the (agent_id, entry_type,
+    // entry_value) UNIQUE constraint, but catching it here keeps the
+    // textarea tidy and avoids a confusing 409 on save.
+    const existing = value
+      .split('\n')
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0);
+    if (existing.includes(entry)) return;
+    const next = [...existing, entry].join('\n');
+    onChange(next);
+  };
+
   return (
     <div>
-      <div style={{ fontSize: 12, color: '#475569', marginBottom: 4 }}>{meta.label}</div>
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          marginBottom: 4,
+        }}
+      >
+        <div style={{ fontSize: 12, color: '#475569' }}>{meta.label}</div>
+        {knownTokens && knownTokens.length > 0 && (
+          <select
+            value=""
+            onChange={(e) => {
+              if (e.target.value) addEntry(e.target.value);
+              // Reset so re-selecting the same option fires onChange again.
+              e.target.value = '';
+            }}
+            style={{
+              fontSize: 11,
+              padding: '2px 6px',
+              borderRadius: 4,
+              border: '1px solid #cbd5e1',
+              cursor: 'pointer',
+            }}
+          >
+            <option value="">+ Well-known token…</option>
+            {knownTokens.map((t) => (
+              <option key={t.entry} value={t.entry}>
+                {t.label} — {t.description}
+              </option>
+            ))}
+          </select>
+        )}
+      </div>
       <textarea
         value={value}
         onChange={(e) => onChange(e.target.value)}
@@ -921,6 +1022,7 @@ function AllowlistEditor({
   onCancel,
   saving,
   error,
+  network,
 }: {
   preset: string;
   buckets: Record<'destination' | 'token' | 'domain', string>;
@@ -929,6 +1031,8 @@ function AllowlistEditor({
   onCancel: () => void;
   saving: boolean;
   error: string | null;
+  /** Drives the well-known-token picker on the token textarea. */
+  network: Network;
 }) {
   // Falls back to all three types when the preset is unknown — the server
   // is the source of truth on what's accepted, so we don't want to
@@ -961,6 +1065,7 @@ function AllowlistEditor({
           value={buckets[type]}
           onChange={(v) => onChange({ ...buckets, [type]: v })}
           inputStyle={editorInputStyle}
+          network={network}
         />
       ))}
       <div style={{ fontSize: 11, color: '#94a3b8' }}>
@@ -1644,6 +1749,7 @@ function NewAgentForm({
               value={allowlistByType[type]}
               onChange={(v) => setAllowlistByType((prev) => ({ ...prev, [type]: v }))}
               inputStyle={inputStyle}
+              network={network}
             />
           ))}
         </div>
