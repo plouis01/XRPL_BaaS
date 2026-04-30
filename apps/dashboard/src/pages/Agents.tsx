@@ -692,6 +692,54 @@ const PRESET_DEFAULTS: Record<
   },
 };
 
+const ALLOWLIST_TYPE_META: Record<
+  'destination' | 'token' | 'domain',
+  { label: string; placeholder: string }
+> = {
+  destination: {
+    label: 'Destinations (r-addresses)',
+    placeholder: 'rDestAddress1...\nrDestAddress2...',
+  },
+  token: {
+    label: 'Tokens (MPT id or CUR:issuer)',
+    placeholder: '00ABCDEF...\nUSD:rIssuer...',
+  },
+  domain: {
+    label: 'XLS-80 domains (64-char hex DomainID)',
+    placeholder: 'ABCD...64hex',
+  },
+};
+
+function AllowlistTypeInput({
+  type,
+  value,
+  onChange,
+  inputStyle,
+}: {
+  type: 'destination' | 'token' | 'domain';
+  value: string;
+  onChange: (v: string) => void;
+  inputStyle: React.CSSProperties;
+}) {
+  const meta = ALLOWLIST_TYPE_META[type];
+  return (
+    <div>
+      <div style={{ fontSize: 12, color: '#475569', marginBottom: 4 }}>{meta.label}</div>
+      <textarea
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={meta.placeholder}
+        rows={3}
+        style={{
+          ...inputStyle,
+          fontFamily: 'monospace',
+          resize: 'vertical',
+        }}
+      />
+    </div>
+  );
+}
+
 function NewAgentForm({
   network,
   onCreated,
@@ -706,10 +754,12 @@ function NewAgentForm({
   const [preset, setPreset] = useState<'payment-agent' | 'treasury-agent'>('payment-agent');
   const [parent, setParent] = useState('');
   const [label, setLabel] = useState('');
-  const [allowlistText, setAllowlistText] = useState('');
-  const [allowlistType, setAllowlistType] = useState<'destination' | 'token' | 'domain'>(
-    'destination',
-  );
+  // One textarea per entry type so a single provision can mix destinations,
+  // tokens, and (for treasury-agent) XLS-80 domains. Server flattens them
+  // back into a single allowlist array on the wire.
+  const [allowlistByType, setAllowlistByType] = useState<
+    Record<'destination' | 'token' | 'domain', string>
+  >({ destination: '', token: '', domain: '' });
   const [overrideMaxPerTx, setOverrideMaxPerTx] = useState('');
   const [overrideDaily, setOverrideDaily] = useState('');
 
@@ -747,15 +797,16 @@ function NewAgentForm({
     setSubmitting(true);
     setSubmitError(null);
     try {
-      // Parse allowlist textarea: one entry per line, current entry-type
-      // applied to all. Lets the user paste a list quickly without
-      // repeating type labels. Empty → no allowlist (server enforces
-      // required-allowlist by preset).
-      const allowlist = allowlistText
-        .split('\n')
-        .map((s) => s.trim())
-        .filter((s) => s.length > 0)
-        .map((s) => ({ entry_type: allowlistType, entry_value: s }));
+      // Flatten the per-type textareas into a single allowlist array.
+      // One entry per line, blank lines dropped. Empty across all types →
+      // no allowlist (server rejects on required-allowlist presets).
+      const allowlist = (presetCfg?.allowedEntryTypes ?? []).flatMap((type) =>
+        allowlistByType[type]
+          .split('\n')
+          .map((s) => s.trim())
+          .filter((s) => s.length > 0)
+          .map((s) => ({ entry_type: type, entry_value: s })),
+      );
 
       const body: Record<string, unknown> = {
         preset,
@@ -883,38 +934,19 @@ function NewAgentForm({
         <span style={labelStyle}>
           Allowlist {presetCfg?.requireAllowlist && <em>(required for this preset)</em>}
         </span>
-        <div style={{ display: 'flex', gap: 8 }}>
-          <select
-            value={allowlistType}
-            onChange={(e) => setAllowlistType(e.target.value as 'destination' | 'token' | 'domain')}
-            style={{ ...inputStyle, width: 130, flex: 'none' }}
-          >
-            {presetCfg?.allowedEntryTypes.map((t) => (
-              <option key={t} value={t}>
-                {t}
-              </option>
-            ))}
-          </select>
-          <textarea
-            value={allowlistText}
-            onChange={(e) => setAllowlistText(e.target.value)}
-            placeholder={
-              allowlistType === 'destination'
-                ? 'rDestAddress1...\nrDestAddress2...'
-                : allowlistType === 'token'
-                  ? '00ABCDEF...  or  USD:rIssuer...'
-                  : '64-char hex DomainID'
-            }
-            rows={3}
-            style={{
-              ...inputStyle,
-              fontFamily: 'monospace',
-              resize: 'vertical',
-            }}
-          />
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+          {presetCfg?.allowedEntryTypes.map((type) => (
+            <AllowlistTypeInput
+              key={type}
+              type={type}
+              value={allowlistByType[type]}
+              onChange={(v) => setAllowlistByType((prev) => ({ ...prev, [type]: v }))}
+              inputStyle={inputStyle}
+            />
+          ))}
         </div>
-        <div style={{ fontSize: 11, color: '#94a3b8', marginTop: 4 }}>
-          One entry per line. All lines use the type selected above.
+        <div style={{ fontSize: 11, color: '#94a3b8', marginTop: 6 }}>
+          One entry per line. Leave a section blank to skip that type.
         </div>
       </div>
 
