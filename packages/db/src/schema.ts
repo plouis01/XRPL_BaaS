@@ -277,6 +277,15 @@ export const transactions = pgTable(
     // NULL for non-XRP or zero-value transactions (credentials,
     // domains, permissions, key rotations, etc.).
     amountDrops: text('amount_drops'),
+    // VISION.md agent launcher: when non-null, this tx was submitted by an
+    // agent-bound API key (ctx.agentId set in payment.service). Powers the
+    // per-agent tx history view on the dashboard. ON DELETE SET NULL so a
+    // future agent purge doesn't cascade into transaction-history loss.
+    // FK uses `() => agents.id` (lazy) because `agents` is declared below
+    // and a direct ref would be a forward-reference TDZ error.
+    agentId: uuid('agent_id').references(() => agents.id, {
+      onDelete: 'set null',
+    }),
     createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
     submittedAt: timestamp('submitted_at', { withTimezone: true }),
     confirmedAt: timestamp('confirmed_at', { withTimezone: true }),
@@ -291,6 +300,8 @@ export const transactions = pgTable(
     idempotencyIdx: index('idx_transactions_idempotency').on(t.clientId, t.idempotencyKey),
     clientStatusIdx: index('idx_transactions_client_status').on(t.clientId, t.status),
     hashIdx: index('idx_transactions_hash').on(t.txHash),
+    // Per-agent history query: WHERE agent_id=$1 ORDER BY created_at DESC.
+    agentCreatedIdx: index('idx_transactions_agent_created').on(t.agentId, t.createdAt),
   }),
 );
 

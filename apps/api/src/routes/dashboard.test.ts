@@ -37,6 +37,11 @@ interface Select {
 
 let nextRows: unknown[] = [];
 let nextKeyCheckRows: unknown[] = [];
+// Per-test knob for the `agents` ownership probe (`.limit(1)` on the agents
+// table). The /dashboard/agents/:id/transactions handler runs an ownership
+// check before the tx list query — separating the two knobs lets a test
+// queue "agent exists" + "no txs" or "agent missing" without conflict.
+let nextAgentOwnershipRows: unknown[] = [];
 
 // Per-request counter for api_keys `.limit(1)` queries. The first call
 // in every request comes from revocationCheck middleware (REVIEW.md LOW-07);
@@ -71,6 +76,14 @@ function makeSelect(): Select {
                 return Promise.resolve([{ id: 'key-1' }]);
               }
               return Promise.resolve(nextKeyCheckRows);
+            }
+            if (table.__tableName === 'agents') {
+              // Backward compat: pre-existing tests stage the agent probe
+              // via `nextRows`. Only override when a test explicitly set
+              // the dedicated knob.
+              return Promise.resolve(
+                nextAgentOwnershipRows.length > 0 ? nextAgentOwnershipRows : nextRows,
+              );
             }
             return Promise.resolve(nextRows);
           },
@@ -137,6 +150,8 @@ vi.mock('@railforge/db', () => ({
       txHash: {},
       resultCode: {},
       ledgerIndex: {},
+      amountDrops: {},
+      agentId: {},
       createdAt: {},
       confirmedAt: {},
     },
@@ -219,6 +234,7 @@ function makeApp(callerEnv: 'testnet' | 'mainnet' = 'testnet'): Hono<AppEnv> {
 beforeEach(() => {
   nextRows = [];
   nextKeyCheckRows = [];
+  nextAgentOwnershipRows = [];
   nextInsertReturning = [];
   nextUpdateReturning = [];
   insertCalls.length = 0;
@@ -544,6 +560,62 @@ describe('GET /dashboard/agents', () => {
     );
     // Critical: dashboard list never carries the seed.
     expect('agent_seed' in (body.data[0] ?? {})).toBe(false);
+  });
+});
+
+describe('GET /dashboard/agents/:id/transactions', () => {
+  const validId = '11111111-1111-1111-1111-111111111111';
+
+  it('400 when agent id is malformed', async () => {
+    const app = makeApp();
+    const res = await app.request('/dashboard/agents/not-a-uuid/transactions');
+    expect(res.status).toBe(400);
+  });
+
+  it('400 when limit is out of range', async () => {
+    const app = makeApp();
+    const res = await app.request(`/dashboard/agents/${validId}/transactions?limit=999`);
+    expect(res.status).toBe(400);
+  });
+
+  it('404 when agent does not belong to the caller', async () => {
+    nextAgentOwnershipRows = [];
+    const app = makeApp();
+    const res = await app.request(`/dashboard/agents/${validId}/transactions`);
+    expect(res.status).toBe(404);
+  });
+
+  it('returns mapped tx rows scoped to the agent', async () => {
+    nextAgentOwnershipRows = [{ id: validId }];
+    nextRows = [
+      {
+        id: 'tx-1',
+        txType: 'Payment',
+        sourceAddress: 'rParentAddress',
+        status: 'validated',
+        txHash: 'ABCDEF',
+        resultCode: 'tesSUCCESS',
+        ledgerIndex: 12345,
+        amountDrops: '1000000',
+        createdAt: new Date('2026-04-27'),
+        confirmedAt: new Date('2026-04-27'),
+      },
+    ];
+    const app = makeApp();
+    const res = await app.request(`/dashboard/agents/${validId}/transactions`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      data: Array<Record<string, unknown>>;
+    };
+    expect(body.data).toHaveLength(1);
+    expect(body.data[0]).toEqual(
+      expect.objectContaining({
+        id: 'tx-1',
+        tx_type: 'Payment',
+        status: 'validated',
+        amount_drops: '1000000',
+      }),
+    );
   });
 });
 

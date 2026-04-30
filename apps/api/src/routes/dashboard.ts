@@ -404,6 +404,71 @@ dashboard.get('/agents', async (c) => {
   });
 });
 
+// GET /agents/:id/transactions?limit=N — per-agent tx history. Filters by
+// transactions.agent_id (set in payment.service when ctx.agentId is
+// non-null) AND clientId for tenant isolation. Two-clause WHERE rather
+// than a JOIN through agents because the agent_id column itself already
+// proves origin — the clientId clause is just the standard cross-tenant
+// safety check.
+dashboard.get('/agents/:id/transactions', async (c) => {
+  const clientId = c.get('clientId');
+  const id = c.req.param('id');
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) {
+    return c.json({ error: 'invalid agent id' }, 400);
+  }
+
+  const limitRaw = c.req.query('limit');
+  const limit = limitRaw ? Number.parseInt(limitRaw, 10) : 50;
+  if (Number.isNaN(limit) || limit < 1 || limit > 200) {
+    return c.json({ error: 'limit must be an integer between 1 and 200' }, 400);
+  }
+
+  // Confirm the agent belongs to the caller before returning rows. Skipping
+  // this would still be safe (the agent_id+clientId WHERE produces an
+  // empty set for cross-tenant ids) but a 404 is the clearer signal.
+  const agentRows = await db
+    .select({ id: schema.agents.id })
+    .from(schema.agents)
+    .where(and(eq(schema.agents.id, id), eq(schema.agents.clientId, clientId)))
+    .limit(1);
+  if (agentRows.length === 0) {
+    return c.json({ error: 'Agent not found' }, 404);
+  }
+
+  const rows = await db
+    .select({
+      id: schema.transactions.id,
+      txType: schema.transactions.txType,
+      sourceAddress: schema.transactions.sourceAddress,
+      status: schema.transactions.status,
+      txHash: schema.transactions.txHash,
+      resultCode: schema.transactions.resultCode,
+      ledgerIndex: schema.transactions.ledgerIndex,
+      amountDrops: schema.transactions.amountDrops,
+      createdAt: schema.transactions.createdAt,
+      confirmedAt: schema.transactions.confirmedAt,
+    })
+    .from(schema.transactions)
+    .where(and(eq(schema.transactions.clientId, clientId), eq(schema.transactions.agentId, id)))
+    .orderBy(desc(schema.transactions.createdAt))
+    .limit(limit);
+
+  return c.json({
+    data: rows.map((r) => ({
+      id: r.id,
+      tx_type: r.txType,
+      source_address: r.sourceAddress,
+      status: r.status,
+      tx_hash: r.txHash,
+      result_code: r.resultCode,
+      ledger_index: r.ledgerIndex,
+      amount_drops: r.amountDrops,
+      created_at: r.createdAt,
+      confirmed_at: r.confirmedAt,
+    })),
+  });
+});
+
 // GET /keys?environment=X — list the client's API keys for the selected
 // environment. Key secrets are never returned (they were only shown at
 // creation time). This is the one endpoint where the filter is *inherent*

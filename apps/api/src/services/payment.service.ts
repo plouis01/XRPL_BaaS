@@ -222,6 +222,10 @@ export async function sendPayment(input: SendPaymentInput): Promise<{ txId: stri
       sourceAddress: source.address,
       status: 'queued',
       amountDrops: input.amountDrops ?? null,
+      // VISION.md agent launcher: stamp the originating agent so the
+      // dashboard can render per-agent tx history. NULL for client-scoped
+      // (non-agent) keys.
+      agentId: input.agentId ?? null,
       requestBody: {
         op: 'sendPayment',
         source: input.source,

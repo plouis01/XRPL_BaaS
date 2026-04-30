@@ -11,7 +11,7 @@
 
 import { Fragment, useCallback, useEffect, useState } from 'react';
 import { ApiError, api } from '../api.ts';
-import type { Account, Agent, AgentSummary, Network } from '../types.ts';
+import type { Account, Agent, AgentSummary, AgentTransaction, Network } from '../types.ts';
 
 function errorMessage(err: unknown): string {
   if (err instanceof ApiError) return `API error ${err.status}: ${err.body.slice(0, 160)}`;
@@ -64,6 +64,15 @@ function formatDrops(drops: string | null): string {
   const n = Number(drops);
   if (!Number.isFinite(n)) return drops;
   return `${(n / 1_000_000).toLocaleString(undefined, { maximumFractionDigits: 6 })} XRP`;
+}
+
+function formatTxAmount(drops: string | null): string {
+  if (!drops) return '— (non-XRP)';
+  const n = Number(drops);
+  if (!Number.isFinite(n)) return drops;
+  return (n / 1_000_000).toLocaleString(undefined, {
+    maximumFractionDigits: 6,
+  });
 }
 
 export function Agents({ network }: { network: Network }) {
@@ -350,6 +359,28 @@ function AgentDetail({
   const [savingAllowlist, setSavingAllowlist] = useState(false);
   const [allowlistError, setAllowlistError] = useState<string | null>(null);
 
+  // Per-agent tx history. Loaded once when the row expands and refreshed
+  // alongside the detail poll so a freshly-validated tx surfaces without
+  // a manual reload.
+  const [txHistory, setTxHistory] = useState<AgentTransaction[] | null>(null);
+  const [txHistoryError, setTxHistoryError] = useState<string | null>(null);
+
+  const fetchTxHistory = useCallback(async () => {
+    try {
+      const data = await api<{ data: AgentTransaction[] }>(
+        `/v1/dashboard/agents/${agentId}/transactions?limit=50`,
+      );
+      setTxHistory(data.data);
+      setTxHistoryError(null);
+    } catch (err) {
+      setTxHistoryError(errorMessage(err));
+    }
+  }, [agentId]);
+
+  useEffect(() => {
+    void fetchTxHistory();
+  }, [fetchTxHistory]);
+
   const fetchDetail = useCallback(async () => {
     try {
       const data = await api<Agent>(`/v1/agents/${agentId}`);
@@ -545,6 +576,12 @@ function AgentDetail({
           </ul>
         )}
       </div>
+
+      <AgentTxHistory
+        rows={txHistory}
+        error={txHistoryError}
+        onRefresh={() => void fetchTxHistory()}
+      />
 
       {/* Revoke action — only meaningful while status='active' and no
           revocation is already in flight. The server enforces these same
@@ -924,6 +961,140 @@ function AllowlistEditor({
         </button>
       </div>
     </div>
+  );
+}
+
+function AgentTxHistory({
+  rows,
+  error,
+  onRefresh,
+}: {
+  rows: AgentTransaction[] | null;
+  error: string | null;
+  onRefresh: () => void;
+}) {
+  const headerStyle: React.CSSProperties = {
+    padding: '6px 8px',
+    fontSize: 11,
+    color: '#64748b',
+    textAlign: 'left',
+    borderBottom: '1px solid #e2e8f0',
+  };
+  const cellStyle: React.CSSProperties = {
+    padding: '6px 8px',
+    fontSize: 12,
+  };
+  return (
+    <div>
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          marginBottom: 4,
+        }}
+      >
+        <div style={{ fontSize: 12, color: '#64748b' }}>
+          Transaction history ({rows?.length ?? 0})
+        </div>
+        <button
+          type="button"
+          onClick={onRefresh}
+          style={{
+            padding: '2px 10px',
+            background: 'transparent',
+            color: '#475569',
+            border: '1px solid #cbd5e1',
+            borderRadius: 4,
+            cursor: 'pointer',
+            fontSize: 11,
+          }}
+        >
+          Refresh
+        </button>
+      </div>
+      {error ? (
+        <span style={{ fontSize: 12, color: '#991b1b' }}>{error}</span>
+      ) : rows === null ? (
+        <span style={{ fontSize: 12, color: '#94a3b8' }}>Loading…</span>
+      ) : rows.length === 0 ? (
+        <span style={{ fontSize: 12, color: '#94a3b8' }}>
+          No transactions yet — this agent hasn't submitted any payments.
+        </span>
+      ) : (
+        <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+          <thead>
+            <tr>
+              <th style={headerStyle}>When</th>
+              <th style={headerStyle}>Type</th>
+              <th style={headerStyle}>Status</th>
+              <th style={headerStyle}>Amount (XRP)</th>
+              <th style={headerStyle}>Tx hash</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((tx) => (
+              <tr key={tx.id} style={{ borderBottom: '1px solid #f1f5f9' }}>
+                <td style={cellStyle}>
+                  {tx.created_at ? new Date(tx.created_at).toLocaleString() : '—'}
+                </td>
+                <td style={cellStyle}>{tx.tx_type}</td>
+                <td style={cellStyle}>
+                  <TxStatusBadge status={tx.status} />
+                  {tx.result_code && tx.result_code !== 'tesSUCCESS' && (
+                    <span
+                      style={{
+                        marginLeft: 6,
+                        fontSize: 11,
+                        color: '#991b1b',
+                      }}
+                    >
+                      {tx.result_code}
+                    </span>
+                  )}
+                </td>
+                <td style={cellStyle}>{formatTxAmount(tx.amount_drops)}</td>
+                <td style={{ ...cellStyle, fontFamily: 'monospace' }}>
+                  {tx.tx_hash ? (
+                    <code style={{ fontSize: 11, wordBreak: 'break-all' }}>
+                      {tx.tx_hash.slice(0, 12)}…
+                    </code>
+                  ) : (
+                    <span style={{ color: '#94a3b8' }}>—</span>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </div>
+  );
+}
+
+function TxStatusBadge({ status }: { status: string }) {
+  const palette: Record<string, { bg: string; text: string }> = {
+    queued: { bg: '#fef3c7', text: '#92400e' },
+    submitting: { bg: '#fef3c7', text: '#92400e' },
+    submitted: { bg: '#fef3c7', text: '#92400e' },
+    validated: { bg: '#dcfce7', text: '#166534' },
+    failed: { bg: '#fee2e2', text: '#991b1b' },
+  };
+  const c = palette[status] ?? { bg: '#f1f5f9', text: '#475569' };
+  return (
+    <span
+      style={{
+        display: 'inline-block',
+        padding: '1px 8px',
+        borderRadius: 9999,
+        fontSize: 10,
+        fontWeight: 500,
+        background: c.bg,
+        color: c.text,
+      }}
+    >
+      {status}
+    </span>
   );
 }
 

@@ -62,6 +62,15 @@ export interface Transaction {
   confirmed_at: string | null;
 }
 
+/**
+ * GET /v1/dashboard/agents/:id/transactions row shape. Adds `amount_drops`
+ * (XRP-denominated only — null for token/cross-currency txs) on top of the
+ * standard transaction view so the per-agent panel can show payment size.
+ */
+export interface AgentTransaction extends Transaction {
+  amount_drops: string | null;
+}
+
 export interface Credential {
   id: string;
   issuer_address: string;
