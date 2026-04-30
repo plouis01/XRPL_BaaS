@@ -342,6 +342,14 @@ function AgentDetail({
   const [revoking, setRevoking] = useState(false);
   const [revokeError, setRevokeError] = useState<string | null>(null);
 
+  // Allowlist editor state. `editing` non-null = inline editor is open with
+  // a working copy of the per-type buckets; null = read-only view.
+  const [editing, setEditing] = useState<Record<'destination' | 'token' | 'domain', string> | null>(
+    null,
+  );
+  const [savingAllowlist, setSavingAllowlist] = useState(false);
+  const [allowlistError, setAllowlistError] = useState<string | null>(null);
+
   const fetchDetail = useCallback(async () => {
     try {
       const data = await api<Agent>(`/v1/agents/${agentId}`);
@@ -378,6 +386,51 @@ function AgentDetail({
     }, 4000);
     return () => clearInterval(t);
   }, [agent, fetchDetail]);
+
+  const startEditing = () => {
+    if (!agent) return;
+    const buckets: Record<'destination' | 'token' | 'domain', string[]> = {
+      destination: [],
+      token: [],
+      domain: [],
+    };
+    for (const e of agent.allowlist ?? []) {
+      buckets[e.entry_type].push(e.entry_value);
+    }
+    setEditing({
+      destination: buckets.destination.join('\n'),
+      token: buckets.token.join('\n'),
+      domain: buckets.domain.join('\n'),
+    });
+    setAllowlistError(null);
+  };
+
+  const saveAllowlist = async () => {
+    if (!agent || !editing) return;
+    setSavingAllowlist(true);
+    setAllowlistError(null);
+    try {
+      const presetCfg = PRESET_DEFAULTS[agent.preset];
+      const allowed = presetCfg?.allowedEntryTypes ?? ['destination', 'token', 'domain'];
+      const allowlist = allowed.flatMap((type) =>
+        editing[type]
+          .split('\n')
+          .map((s) => s.trim())
+          .filter((s) => s.length > 0)
+          .map((s) => ({ entry_type: type, entry_value: s })),
+      );
+      const updated = await api<Agent>(`/v1/agents/${agent.id}/allowlist`, {
+        method: 'PUT',
+        body: { allowlist },
+      });
+      setAgent(updated);
+      setEditing(null);
+    } catch (err) {
+      setAllowlistError(errorMessage(err));
+    } finally {
+      setSavingAllowlist(false);
+    }
+  };
 
   const handleRevoke = async () => {
     if (!agent) return;
@@ -424,10 +477,51 @@ function AgentDetail({
         </div>
       </div>
       <div>
-        <div style={{ fontSize: 12, color: '#64748b', marginBottom: 4 }}>
-          Allowlist ({agent.allowlist?.length ?? 0})
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            marginBottom: 4,
+          }}
+        >
+          <div style={{ fontSize: 12, color: '#64748b' }}>
+            Allowlist ({agent.allowlist?.length ?? 0})
+          </div>
+          {/* Edit only meaningful while the agent can still spend. Revoked /
+              pending-revocation agents are read-only. */}
+          {editing === null && agent.status === 'active' && !agent.pending_revocation && (
+            <button
+              type="button"
+              onClick={startEditing}
+              style={{
+                padding: '2px 10px',
+                background: 'transparent',
+                color: '#2563eb',
+                border: '1px solid #2563eb',
+                borderRadius: 4,
+                cursor: 'pointer',
+                fontSize: 11,
+              }}
+            >
+              Edit
+            </button>
+          )}
         </div>
-        {!agent.allowlist || agent.allowlist.length === 0 ? (
+        {editing !== null ? (
+          <AllowlistEditor
+            preset={agent.preset}
+            buckets={editing}
+            onChange={setEditing}
+            onSave={() => void saveAllowlist()}
+            onCancel={() => {
+              setEditing(null);
+              setAllowlistError(null);
+            }}
+            saving={savingAllowlist}
+            error={allowlistError}
+          />
+        ) : !agent.allowlist || agent.allowlist.length === 0 ? (
           <span style={{ fontSize: 12, color: '#94a3b8' }}>—</span>
         ) : (
           <ul style={{ margin: 0, padding: '0 0 0 16px', fontSize: 13 }}>
@@ -736,6 +830,99 @@ function AllowlistTypeInput({
           resize: 'vertical',
         }}
       />
+    </div>
+  );
+}
+
+function AllowlistEditor({
+  preset,
+  buckets,
+  onChange,
+  onSave,
+  onCancel,
+  saving,
+  error,
+}: {
+  preset: string;
+  buckets: Record<'destination' | 'token' | 'domain', string>;
+  onChange: (b: Record<'destination' | 'token' | 'domain', string>) => void;
+  onSave: () => void;
+  onCancel: () => void;
+  saving: boolean;
+  error: string | null;
+}) {
+  // Falls back to all three types when the preset is unknown — the server
+  // is the source of truth on what's accepted, so we don't want to
+  // pre-filter so aggressively that an unrecognized preset can't be edited.
+  const allowed = PRESET_DEFAULTS[preset]?.allowedEntryTypes ?? ['destination', 'token', 'domain'];
+  const editorInputStyle: React.CSSProperties = {
+    width: '100%',
+    padding: '6px 8px',
+    borderRadius: 4,
+    border: '1px solid #cbd5e1',
+    fontSize: 13,
+    boxSizing: 'border-box',
+  };
+  return (
+    <div
+      style={{
+        border: '1px solid #cbd5e1',
+        borderRadius: 6,
+        padding: 12,
+        background: '#fff',
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 10,
+      }}
+    >
+      {allowed.map((type) => (
+        <AllowlistTypeInput
+          key={type}
+          type={type}
+          value={buckets[type]}
+          onChange={(v) => onChange({ ...buckets, [type]: v })}
+          inputStyle={editorInputStyle}
+        />
+      ))}
+      <div style={{ fontSize: 11, color: '#94a3b8' }}>
+        One entry per line. Saving replaces the entire allowlist (pure DB, no on-ledger
+        transaction).
+      </div>
+      {error && <div style={{ fontSize: 12, color: '#991b1b' }}>{error}</div>}
+      <div style={{ display: 'flex', gap: 8 }}>
+        <button
+          type="button"
+          onClick={onSave}
+          disabled={saving}
+          style={{
+            padding: '6px 14px',
+            background: saving ? '#cbd5e1' : '#2563eb',
+            color: '#fff',
+            border: 'none',
+            borderRadius: 4,
+            cursor: saving ? 'not-allowed' : 'pointer',
+            fontSize: 12,
+          }}
+        >
+          {saving ? 'Saving…' : 'Save allowlist'}
+        </button>
+        <button
+          type="button"
+          onClick={onCancel}
+          disabled={saving}
+          style={{
+            padding: '6px 14px',
+            background: 'transparent',
+            color: '#475569',
+            border: '1px solid #cbd5e1',
+            borderRadius: 4,
+            cursor: saving ? 'not-allowed' : 'pointer',
+            fontSize: 12,
+          }}
+        >
+          Cancel
+        </button>
+      </div>
     </div>
   );
 }
