@@ -339,18 +339,40 @@ export const auditLog = pgTable(
 // Limits are XRP-only (in drops) for Sprint 7. Token amount limits
 // require an oracle/price-feed, deferred to a later sprint.
 
-export const spendPolicies = pgTable('spend_policies', {
-  id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
-  clientId: uuid('client_id')
-    .notNull()
-    .references(() => clients.id)
-    .unique(),
-  maxXrpPerTxDrops: text('max_xrp_per_tx_drops'),
-  dailyXrpLimitDrops: text('daily_xrp_limit_drops'),
-  isActive: boolean('is_active').notNull().default(true),
-  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
-  updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow(),
-});
+// VISION.md agent launcher — per-agent caps. A row with agent_id IS NULL is
+// the tenant-wide default (the original Sprint 7 behavior). A row with
+// agent_id set is an override for that specific agent. Resolution:
+//   agent row exists → use its caps + the agent's own Redis counter
+//   else            → use the client row + the client's Redis counter
+//   else            → unlimited
+//
+// UNIQUE(client_id, agent_id) NULLS NOT DISTINCT enforces "exactly one
+// tenant-wide row per client" AND "at most one row per (client, agent)"
+// in a single constraint — see migration 0018 for the raw SQL since
+// Drizzle's `.unique()` doesn't emit NULLS NOT DISTINCT yet.
+export const spendPolicies = pgTable(
+  'spend_policies',
+  {
+    id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+    clientId: uuid('client_id')
+      .notNull()
+      .references(() => clients.id),
+    agentId: uuid('agent_id').references(() => agents.id, {
+      onDelete: 'cascade',
+    }),
+    maxXrpPerTxDrops: text('max_xrp_per_tx_drops'),
+    dailyXrpLimitDrops: text('daily_xrp_limit_drops'),
+    isActive: boolean('is_active').notNull().default(true),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow(),
+  },
+  (t) => ({
+    // The composite scope index: lookup is "find the policy for
+    // (client, agent)" and falls back to "find the policy for
+    // (client, NULL)". A B-tree on (client_id, agent_id) covers both.
+    scopeIdx: index('idx_spend_policies_scope').on(t.clientId, t.agentId),
+  }),
+);
 
 // ── Agent launcher (VISION.md) ───────────────────────────────────────────────
 // An "agent" is a delegated sub-account of a parent managed account. The

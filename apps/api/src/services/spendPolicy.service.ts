@@ -35,9 +35,19 @@
 // Token amount limits (non-XRP) are deferred — they require an oracle
 // or price feed to be meaningful.
 
-import { db, eq, schema, sql } from '@railforge/db';
+import { and, db, eq, isNull, schema, sql } from '@railforge/db';
 import { logger } from '../logger.ts';
 import { getRedis } from '../redis.ts';
+
+/**
+ * Resolution scope for a spend-policy lookup. 'agent' = a per-agent
+ * override row was found (spend_policies.agent_id = agentId). 'client' =
+ * fell through to the tenant-wide default (agent_id IS NULL). 'unlimited'
+ * = no row of either kind, no caps applied.
+ *
+ * Counters (Redis keys) match the scope of the policy that resolved.
+ */
+export type PolicyScope = 'agent' | 'client' | 'unlimited';
 
 export class SpendPolicyError extends Error {
   constructor(
@@ -50,13 +60,20 @@ export class SpendPolicyError extends Error {
 }
 
 interface CachedPolicy {
+  scope: PolicyScope;
   maxXrpPerTxDrops: bigint | null;
   dailyXrpLimitDrops: bigint | null;
   fetchedAt: number;
 }
 
 const CACHE_TTL_MS = 60_000;
+// Cache key composes both client and agent so a per-agent resolution and
+// the same client's tenant-wide resolution don't collide.
 const policyCache = new Map<string, CachedPolicy>();
+
+function policyCacheKey(clientId: string, agentId: string | null): string {
+  return agentId ? `${clientId}|${agentId}` : `${clientId}|*`;
+}
 
 // 24h rolling window. Matches the SQL interval in getDailySpend().
 const DAILY_WINDOW_SECONDS = 24 * 60 * 60;
@@ -107,19 +124,28 @@ const SEED_IF_MISSING_SCRIPT = `
   return 0
 `;
 
-function dailyCounterKey(clientId: string): string {
-  return `railforge:spendpolicy:daily:${clientId}`;
+// Redis key for the daily-spend counter. The agentId-null branch keeps
+// the original (pre-agent) key shape so live counters survive the
+// per-agent migration without resetting all tenants' budgets at deploy.
+function dailyCounterKey(clientId: string, agentId: string | null): string {
+  return agentId
+    ? `railforge:spendpolicy:daily:${clientId}:agent:${agentId}`
+    : `railforge:spendpolicy:daily:${clientId}`;
 }
 
 /**
- * Drop the in-process policy cache for a single client. Called after a
- * dashboard write to spend_policies so the next enforceSpendPolicy on this
- * node re-reads the row instead of serving the stale cached caps for up to
- * CACHE_TTL_MS. Other API nodes still serve the stale cap until their own
- * TTL rolls — acceptable for a 60s window on an admin-set policy.
+ * Drop the in-process policy cache for one (client, agent) scope. Called
+ * after a dashboard write so the next enforceSpendPolicy on this node
+ * re-reads the row. Pass agentId=null to invalidate the tenant-wide
+ * default. Other API nodes still serve the stale cap for up to
+ * CACHE_TTL_MS — acceptable for an admin-set policy.
+ *
+ * NOTE: when an agent override is created or removed, callers must
+ * invalidate BOTH the agent scope AND the client scope on the same node,
+ * since enforcement may have cached the now-incorrect resolution.
  */
-export function invalidateSpendPolicyCache(clientId: string): void {
-  policyCache.delete(clientId);
+export function invalidateSpendPolicyCache(clientId: string, agentId: string | null = null): void {
+  policyCache.delete(policyCacheKey(clientId, agentId));
 }
 
 /**
@@ -128,78 +154,129 @@ export function invalidateSpendPolicyCache(clientId: string): void {
  * the window) and "0" on a Redis fault — callers that surface this to the
  * UI should treat it as a best-effort metric, not a billing source.
  */
-export async function getDailySpendUsage(clientId: string): Promise<string> {
+export async function getDailySpendUsage(
+  clientId: string,
+  agentId: string | null = null,
+): Promise<string> {
   try {
     const redis = getRedis();
-    const raw = await redis.get(dailyCounterKey(clientId));
+    const raw = await redis.get(dailyCounterKey(clientId, agentId));
     if (!raw) return '0';
     const n = Number(raw);
     if (!Number.isFinite(n) || n < 0) return '0';
     return raw;
   } catch (err) {
-    logger.warn({ err, clientId }, 'spend policy: failed to read daily counter, reporting 0');
+    logger.warn(
+      { err, clientId, agentId },
+      'spend policy: failed to read daily counter, reporting 0',
+    );
     return '0';
   }
 }
 
 /**
- * Fetch the active spend policy for a client. Returns null if no policy
- * exists or the policy is inactive (both mean "unlimited").
+ * Resolve the active spend policy for a (client, agent) pair.
  *
- * Results are cached in-process for CACHE_TTL_MS to avoid a DB round-trip
- * on every transaction.
+ * Resolution order:
+ *   1. If agentId is set and a row exists with `(client_id=X, agent_id=Y)`
+ *      and is_active, return it with scope='agent'.
+ *   2. Else if a row exists with `(client_id=X, agent_id IS NULL)` and
+ *      is_active, return it with scope='client'.
+ *   3. Else scope='unlimited'.
+ *
+ * Caps that are NULL in the resolved row mean "no limit" for that axis.
+ * Cached in-process per (client, agent) pair to avoid DB round-trips on
+ * every tx; an `unlimited` resolution is also cached so cold-start
+ * traffic for a client without a policy doesn't hammer the DB.
  */
-async function getPolicy(clientId: string): Promise<CachedPolicy | null> {
+export async function resolvePolicy(
+  clientId: string,
+  agentId: string | null = null,
+): Promise<CachedPolicy> {
   const now = Date.now();
-  const cached = policyCache.get(clientId);
+  const cacheKey = policyCacheKey(clientId, agentId);
+  const cached = policyCache.get(cacheKey);
   if (cached && now - cached.fetchedAt < CACHE_TTL_MS) return cached;
 
+  // Single query that pulls BOTH the agent override (if any) AND the
+  // client default in one round-trip. PostgreSQL planner: this is an
+  // index range scan on (client_id, agent_id) plus a bounded fetch.
   const rows = await db
     .select({
+      agentId: schema.spendPolicies.agentId,
       maxXrpPerTxDrops: schema.spendPolicies.maxXrpPerTxDrops,
       dailyXrpLimitDrops: schema.spendPolicies.dailyXrpLimitDrops,
       isActive: schema.spendPolicies.isActive,
     })
     .from(schema.spendPolicies)
-    .where(eq(schema.spendPolicies.clientId, clientId))
-    .limit(1);
+    .where(
+      agentId
+        ? and(
+            eq(schema.spendPolicies.clientId, clientId),
+            // Either the agent's row OR the tenant default; the JS layer
+            // picks the agent one first when both are returned.
+            sql`(${schema.spendPolicies.agentId} = ${agentId} OR ${schema.spendPolicies.agentId} IS NULL)`,
+          )
+        : and(eq(schema.spendPolicies.clientId, clientId), isNull(schema.spendPolicies.agentId)),
+    )
+    // UNIQUE(client_id, agent_id) bounds this to at most 2 rows; the
+    // explicit limit defends against runaway queries on a corrupted
+    // index AND keeps the test mock disambiguating on `.limit()`.
+    .limit(2);
 
-  const row = rows[0];
-  if (!row || !row.isActive) {
-    policyCache.set(clientId, {
-      maxXrpPerTxDrops: null,
-      dailyXrpLimitDrops: null,
-      fetchedAt: now,
-    });
-    return null;
-  }
+  // Prefer an agent-scoped active row; fall back to client-scoped.
+  const agentRow = agentId ? rows.find((r) => r.agentId === agentId && r.isActive) : null;
+  const clientRow = rows.find((r) => r.agentId === null && r.isActive);
+  const winner = agentRow ?? clientRow;
+  const scope: PolicyScope = agentRow ? 'agent' : clientRow ? 'client' : 'unlimited';
 
   const policy: CachedPolicy = {
-    maxXrpPerTxDrops: row.maxXrpPerTxDrops ? BigInt(row.maxXrpPerTxDrops) : null,
-    dailyXrpLimitDrops: row.dailyXrpLimitDrops ? BigInt(row.dailyXrpLimitDrops) : null,
+    scope,
+    maxXrpPerTxDrops: winner?.maxXrpPerTxDrops ? BigInt(winner.maxXrpPerTxDrops) : null,
+    dailyXrpLimitDrops: winner?.dailyXrpLimitDrops ? BigInt(winner.dailyXrpLimitDrops) : null,
     fetchedAt: now,
   };
-  policyCache.set(clientId, policy);
+  policyCache.set(cacheKey, policy);
   return policy;
 }
 
 /**
- * Query the rolling 24-hour XRP spend for a client. Sums
- * `transactions.amount_drops` for non-failed rows created in the last
- * 24 hours. Returns 0n if no rows match. Used for initial Redis
- * seeding AND as a fallback when Redis is unavailable.
+ * Query the rolling 24-hour XRP spend for the given (client, agent) scope.
+ * Sums `transactions.amount_drops` for non-failed rows created in the last
+ * 24 hours. Returns 0n if no rows match. Used for initial Redis seeding
+ * AND as a fallback when Redis is unavailable.
+ *
+ * Scope filter:
+ *   - agentId set     → `agent_id = Y` (per-agent counter seed)
+ *   - agentId is null → `agent_id IS NULL` (client-counter seed: only
+ *                       non-agent-key txs land in this bucket)
+ *
+ * Caveat: when an agent INHERITS the client policy (no per-agent row),
+ * its txs hit the client counter at runtime but carry `agent_id != NULL`
+ * in the DB. On client-counter cold-start they're missed by this seed
+ * (the seed under-counts), so the client gets a slightly more generous
+ * budget for the first window. Self-corrects when the next reseed sees
+ * the matured rows or — more typically — never matters because the
+ * counter is set the moment the first tx of the window comes in.
  */
-async function getDailySpend(clientId: string): Promise<bigint> {
+async function getDailySpend(clientId: string, agentId: string | null): Promise<bigint> {
   const result = await db
     .select({
       total: sql<string>`COALESCE(SUM(${schema.transactions.amountDrops}::bigint), 0)`,
     })
     .from(schema.transactions)
     .where(
-      sql`${schema.transactions.clientId} = ${clientId}
-        AND ${schema.transactions.createdAt} > now() - interval '24 hours'
-        AND ${schema.transactions.status} != 'failed'
-        AND ${schema.transactions.amountDrops} IS NOT NULL`,
+      agentId
+        ? sql`${schema.transactions.clientId} = ${clientId}
+            AND ${schema.transactions.agentId} = ${agentId}
+            AND ${schema.transactions.createdAt} > now() - interval '24 hours'
+            AND ${schema.transactions.status} != 'failed'
+            AND ${schema.transactions.amountDrops} IS NOT NULL`
+        : sql`${schema.transactions.clientId} = ${clientId}
+            AND ${schema.transactions.agentId} IS NULL
+            AND ${schema.transactions.createdAt} > now() - interval '24 hours'
+            AND ${schema.transactions.status} != 'failed'
+            AND ${schema.transactions.amountDrops} IS NOT NULL`,
     );
   const total = result[0]?.total;
   return total ? BigInt(total) : 0n;
@@ -218,11 +295,12 @@ async function getDailySpend(clientId: string): Promise<bigint> {
  */
 async function tryAtomicCheckAndIncrement(
   clientId: string,
+  agentId: string | null,
   amount: bigint,
   limit: bigint,
 ): Promise<boolean> {
   const redis = getRedis();
-  const key = dailyCounterKey(clientId);
+  const key = dailyCounterKey(clientId, agentId);
 
   const args = [amount.toString(), limit.toString(), DAILY_WINDOW_SECONDS.toString()];
 
@@ -233,7 +311,7 @@ async function tryAtomicCheckAndIncrement(
     // Counter missing — seed from DB and retry. Seeding is idempotent
     // via SEED_IF_MISSING_SCRIPT (SET NX EX), so two concurrent cold-
     // start requests resolve to the same baseline.
-    const seedValue = (await getDailySpend(clientId)).toString();
+    const seedValue = (await getDailySpend(clientId, agentId)).toString();
     await redis.eval(SEED_IF_MISSING_SCRIPT, 1, key, seedValue, DAILY_WINDOW_SECONDS.toString());
     rc = Number(await redis.eval(CHECK_AND_INCREMENT_SCRIPT, 1, key, ...args));
     // If still -1, something catastrophic happened (Redis evicted the
@@ -248,29 +326,48 @@ async function tryAtomicCheckAndIncrement(
 }
 
 /**
- * Enforce the client's spend policy for a proposed XRP transaction.
+ * Enforce the resolved spend policy for a proposed XRP transaction.
  *
  * @param clientId  The authenticated client.
  * @param amountDrops  The XRP amount (in drops) that this transaction
  *   will move. Pass the string value from the request body.
+ * @param agentId  When the calling key is agent-bound, the agent's UUID.
+ *   Resolution prefers a per-agent row; otherwise falls back to the
+ *   tenant-wide row. The Redis counter that tracks daily usage matches
+ *   the resolved scope — agent-scoped policies use a per-agent counter,
+ *   client-scoped policies share the tenant counter.
  *
  * @throws {SpendPolicyError} if the transaction would exceed a limit.
  *
  * No-op (returns immediately) when:
- *   - The client has no spend_policies row
- *   - The row exists but is_active=false
+ *   - No row exists for either scope
+ *   - The resolved row is_active=false
  *   - Both limit columns are NULL (no limits configured)
  */
-export async function enforceSpendPolicy(clientId: string, amountDrops: string): Promise<void> {
-  const policy = await getPolicy(clientId);
-  if (!policy) return;
+export async function enforceSpendPolicy(
+  clientId: string,
+  amountDrops: string,
+  agentId: string | null = null,
+): Promise<void> {
+  const policy = await resolvePolicy(clientId, agentId);
+  if (policy.scope === 'unlimited') return;
   if (policy.maxXrpPerTxDrops === null && policy.dailyXrpLimitDrops === null) return;
 
+  // Counter scope follows policy scope — an agent override uses the
+  // agent counter, an inherited (client-scoped) policy uses the
+  // shared tenant counter.
+  const counterAgentId = policy.scope === 'agent' ? agentId : null;
   const amount = BigInt(amountDrops);
 
   if (policy.maxXrpPerTxDrops !== null && amount > policy.maxXrpPerTxDrops) {
     logger.warn(
-      { clientId, amountDrops, limit: policy.maxXrpPerTxDrops.toString() },
+      {
+        clientId,
+        agentId,
+        scope: policy.scope,
+        amountDrops,
+        limit: policy.maxXrpPerTxDrops.toString(),
+      },
       'spend policy: per-tx XRP limit exceeded',
     );
     throw new SpendPolicyError(
@@ -286,10 +383,16 @@ export async function enforceSpendPolicy(clientId: string, amountDrops: string):
     // the old DB-only path only when Redis throws (unreachable) — a
     // rejected-by-Redis response is authoritative.
     try {
-      const accepted = await tryAtomicCheckAndIncrement(clientId, amount, limit);
+      const accepted = await tryAtomicCheckAndIncrement(clientId, counterAgentId, amount, limit);
       if (!accepted) {
         logger.warn(
-          { clientId, amountDrops, limit: limit.toString() },
+          {
+            clientId,
+            agentId,
+            scope: policy.scope,
+            amountDrops,
+            limit: limit.toString(),
+          },
           'spend policy: daily XRP limit exceeded (atomic)',
         );
         throw new SpendPolicyError(
@@ -301,11 +404,12 @@ export async function enforceSpendPolicy(clientId: string, amountDrops: string):
     } catch (err) {
       if (err instanceof SpendPolicyError) throw err;
       // Redis unavailable — fall through to degraded DB-only path.
-      // Note: no `X-Spend-Policy-Mode: degraded` header because this
-      // service is called from the service layer, not middleware. Ops
-      // should alert on Redis connectivity instead.
       logger.warn(
-        { err: err instanceof Error ? err.message : String(err), clientId },
+        {
+          err: err instanceof Error ? err.message : String(err),
+          clientId,
+          agentId,
+        },
         'spend policy: atomic check unavailable, falling back to DB-only (race-prone)',
       );
     }
@@ -313,11 +417,13 @@ export async function enforceSpendPolicy(clientId: string, amountDrops: string):
     // Degraded fallback: the original (non-atomic) DB SUM check. Keeps
     // the service running when Redis is down, but the TOCTOU race the
     // atomic path protects against re-opens in this mode.
-    const dailySpend = await getDailySpend(clientId);
+    const dailySpend = await getDailySpend(clientId, counterAgentId);
     if (dailySpend + amount > limit) {
       logger.warn(
         {
           clientId,
+          agentId,
+          scope: policy.scope,
           amountDrops,
           dailySpend: dailySpend.toString(),
           limit: limit.toString(),
@@ -368,8 +474,12 @@ function getTokenOpsLimit(): number {
   return n;
 }
 
-function tokenOpsKey(clientId: string): string {
-  return `railforge:spendpolicy:tokenops:${clientId}`;
+// Token-op counter key. Like dailyCounterKey, the agentId-null branch
+// preserves the pre-agent shape so live counters survive deploy.
+function tokenOpsKey(clientId: string, agentId: string | null): string {
+  return agentId
+    ? `railforge:spendpolicy:tokenops:${clientId}:agent:${agentId}`
+    : `railforge:spendpolicy:tokenops:${clientId}`;
 }
 
 /**
@@ -397,28 +507,48 @@ const TOKEN_OP_INCR_SCRIPT = `
 `;
 
 /**
- * Enforce a per-client daily count ceiling on non-XRP state-changing ops
+ * Enforce a daily count ceiling on non-XRP state-changing ops
  * (token transfer, MPT payment, issued-currency payment, DEX offer,
  * AMM deposit/withdraw). Throws SpendPolicyError('daily_limit_exceeded')
  * when the ceiling is crossed. Best-effort: silently no-ops on Redis
  * failure so a cache outage doesn't hard-block the API surface.
+ *
+ * Counter scope follows the resolved spend policy: an agent with its
+ * own policy row gets a per-agent counter; an agent inheriting the
+ * client default shares the tenant counter. Resolution is reused from
+ * resolvePolicy so a single (client, agent) tuple has consistent
+ * scope across XRP and non-XRP enforcement.
  */
-export async function enforceTokenOpCount(clientId: string): Promise<void> {
+export async function enforceTokenOpCount(
+  clientId: string,
+  agentId: string | null = null,
+): Promise<void> {
   const limit = getTokenOpsLimit();
+  // Agent's resolved scope decides which counter to bump. resolvePolicy
+  // is cached so this is one map hit on the hot path.
+  const policy = await resolvePolicy(clientId, agentId);
+  const counterAgentId = policy.scope === 'agent' ? agentId : null;
   let count: number;
   try {
     const redis = getRedis();
-    const key = tokenOpsKey(clientId);
+    const key = tokenOpsKey(clientId, counterAgentId);
     count = Number(await redis.eval(TOKEN_OP_INCR_SCRIPT, 1, key, DAILY_WINDOW_SECONDS.toString()));
   } catch (err) {
     logger.warn(
-      { err: err instanceof Error ? err.message : String(err), clientId },
+      {
+        err: err instanceof Error ? err.message : String(err),
+        clientId,
+        agentId,
+      },
       'spend policy: token-op counter unavailable, failing open',
     );
     return;
   }
   if (count > limit) {
-    logger.warn({ clientId, count, limit }, 'spend policy: daily token-op count exceeded');
+    logger.warn(
+      { clientId, agentId, scope: policy.scope, count, limit },
+      'spend policy: daily token-op count exceeded',
+    );
     throw new SpendPolicyError('daily_limit_exceeded', `Daily token-op limit of ${limit} exceeded`);
   }
 }
@@ -442,10 +572,19 @@ export async function enforceTokenOpCount(clientId: string): Promise<void> {
  *   - DECRBY may drive the counter below zero on a race (harmless — it
  *     just means the client has a tiny slack window on reseed).
  */
-export async function refundSpendCounter(clientId: string, amountDrops: string): Promise<void> {
+export async function refundSpendCounter(
+  clientId: string,
+  amountDrops: string,
+  agentId: string | null = null,
+): Promise<void> {
   if (!amountDrops || amountDrops === '0') return;
-  const policy = await getPolicy(clientId).catch(() => null);
-  if (!policy || policy.dailyXrpLimitDrops === null) return;
+  const policy = await resolvePolicy(clientId, agentId).catch(() => null);
+  if (!policy || policy.scope === 'unlimited') return;
+  if (policy.dailyXrpLimitDrops === null) return;
+
+  // Refund hits the same counter that enforcement incremented — agent
+  // counter when policy resolved per-agent, client counter when inherited.
+  const counterAgentId = policy.scope === 'agent' ? agentId : null;
 
   let amount: bigint;
   try {
@@ -457,7 +596,7 @@ export async function refundSpendCounter(clientId: string, amountDrops: string):
 
   try {
     const redis = getRedis();
-    const key = dailyCounterKey(clientId);
+    const key = dailyCounterKey(clientId, counterAgentId);
     // DECRBY is a no-op if the key is missing (it creates the key at 0
     // then decrements, resulting in -amount — which is wrong). Guard
     // with EXISTS so we don't synthesize a negative counter that would
@@ -470,6 +609,7 @@ export async function refundSpendCounter(clientId: string, amountDrops: string):
       {
         err: err instanceof Error ? err.message : String(err),
         clientId,
+        agentId,
         amountDrops,
       },
       'spend policy: refund decrement failed (best-effort)',

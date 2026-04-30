@@ -669,6 +669,7 @@ describe('getAgent', () => {
     ];
     dbSelectResults.spend_policies = [
       {
+        agentId: 'agent-uuid-1',
         maxXrpPerTxDrops: '10000000',
         dailyXrpLimitDrops: '100000000',
         isActive: true,
@@ -712,6 +713,7 @@ describe('getAgent', () => {
     dbSelectResults.agent_allowlists = [];
     dbSelectResults.spend_policies = [
       {
+        agentId: 'agent-uuid-1',
         maxXrpPerTxDrops: '10000000',
         dailyXrpLimitDrops: '100000000',
         isActive: false,
@@ -1001,6 +1003,7 @@ describe('updateAgentAllowlist', () => {
     dbSelectResults.agents_joined = [ACTIVE_AGENT_ROW];
     dbSelectResults.spend_policies = [
       {
+        agentId: 'agent-uuid-1',
         maxXrpPerTxDrops: '10000000',
         dailyXrpLimitDrops: '100000000',
         isActive: true,
@@ -1159,10 +1162,11 @@ describe('updateAgentSpendPolicy', () => {
 
   it('preserves the untouched cap when only one field is provided', async () => {
     dbSelectResults.agents_joined = [ACTIVE_AGENT_ROW];
-    // existing spend_policies row has both caps; the update only sets
+    // Per-agent override row exists with both caps; the update only sets
     // max_xrp_per_tx_drops, so daily_xrp_limit_drops must be carried over.
     dbSelectResults.spend_policies = [
       {
+        agentId: 'agent-uuid-1',
         maxXrpPerTxDrops: '5000000',
         dailyXrpLimitDrops: '50000000',
         isActive: true,
@@ -1176,16 +1180,23 @@ describe('updateAgentSpendPolicy', () => {
     const upsert = dbInsertCalls.find((c) => c.table === 'spend_policies');
     expect(upsert).toBeDefined();
     const vals = upsert?.values as Record<string, unknown>;
+    expect(vals.clientId).toBe(CLIENT_ID);
+    expect(vals.agentId).toBe('agent-uuid-1');
     expect(vals.maxXrpPerTxDrops).toBe('20000000');
     expect(vals.dailyXrpLimitDrops).toBe('50000000');
     expect(vals.isActive).toBe(true);
-    expect(invalidateSpendPolicyCacheMock).toHaveBeenCalledWith(CLIENT_ID);
+    // Both scopes invalidated — the change can flip resolution from
+    // inheriting → having an override (or back), so a stale cache for
+    // EITHER scope on this node would serve the wrong policy.
+    expect(invalidateSpendPolicyCacheMock).toHaveBeenCalledWith(CLIENT_ID, 'agent-uuid-1');
+    expect(invalidateSpendPolicyCacheMock).toHaveBeenCalledWith(CLIENT_ID, null);
   });
 
   it('clears a cap when the field is explicitly null', async () => {
     dbSelectResults.agents_joined = [ACTIVE_AGENT_ROW];
     dbSelectResults.spend_policies = [
       {
+        agentId: 'agent-uuid-1',
         maxXrpPerTxDrops: '5000000',
         dailyXrpLimitDrops: '50000000',
         isActive: true,

@@ -50,11 +50,12 @@ import {
  * If the key names drift, the bug is silent — keep them synced.
  */
 async function refundSpendCounterBestEffort(txId: string, log: Logger): Promise<void> {
-  let row: { clientId: string; amountDrops: string | null } | undefined;
+  let row: { clientId: string; agentId: string | null; amountDrops: string | null } | undefined;
   try {
     const rows = await db
       .select({
         clientId: schema.transactions.clientId,
+        agentId: schema.transactions.agentId,
         amountDrops: schema.transactions.amountDrops,
       })
       .from(schema.transactions)
@@ -74,9 +75,35 @@ async function refundSpendCounterBestEffort(txId: string, log: Logger): Promise<
   }
   if (amount <= 0n) return;
 
+  // Mirror resolvePolicy from apps/api/src/services/spendPolicy.service.ts:
+  // if a per-agent policy row exists, the enforcement incremented the
+  // agent counter; otherwise it incremented the client counter. Look up
+  // both in one query and pick the agent row when present and active.
+  let counterAgentId: string | null = null;
+  if (row.agentId) {
+    try {
+      const policyRows = await db
+        .select({
+          agentId: schema.spendPolicies.agentId,
+          isActive: schema.spendPolicies.isActive,
+        })
+        .from(schema.spendPolicies)
+        .where(eq(schema.spendPolicies.clientId, row.clientId));
+      const hasAgentOverride = policyRows.some((p) => p.agentId === row?.agentId && p.isActive);
+      if (hasAgentOverride) counterAgentId = row.agentId;
+    } catch (err) {
+      log.warn(
+        { err },
+        'spend-policy refund: failed to resolve scope, defaulting to client counter (non-fatal)',
+      );
+    }
+  }
+
   try {
     const redis = getJobsRedis();
-    const key = `railforge:spendpolicy:daily:${row.clientId}`;
+    const key = counterAgentId
+      ? `railforge:spendpolicy:daily:${row.clientId}:agent:${counterAgentId}`
+      : `railforge:spendpolicy:daily:${row.clientId}`;
     const exists = await redis.exists(key);
     if (exists === 0) return;
     await redis.decrby(key, amount.toString());

@@ -27,21 +27,25 @@ vi.mock('@railforge/db', () => {
 
   return {
     db: { select },
-    eq: vi.fn(),
     schema: {
       spendPolicies: {
         clientId: 'clientId',
+        agentId: 'agentId',
         maxXrpPerTxDrops: 'maxXrpPerTxDrops',
         dailyXrpLimitDrops: 'dailyXrpLimitDrops',
         isActive: 'isActive',
       },
       transactions: {
         clientId: 'clientId',
+        agentId: 'agentId',
         createdAt: 'createdAt',
         status: 'status',
         amountDrops: 'amountDrops',
       },
     },
+    eq: vi.fn(),
+    and: vi.fn(),
+    isNull: vi.fn(),
     sql: vi.fn((...args: unknown[]) => args),
   };
 });
@@ -123,6 +127,7 @@ describe('enforceSpendPolicy', () => {
   it('is a no-op when the policy exists but is inactive', async () => {
     policySelectResult.current = [
       {
+        agentId: null,
         maxXrpPerTxDrops: '1000000',
         dailyXrpLimitDrops: '10000000',
         isActive: false,
@@ -133,14 +138,24 @@ describe('enforceSpendPolicy', () => {
 
   it('is a no-op when both limits are NULL (unlimited)', async () => {
     policySelectResult.current = [
-      { maxXrpPerTxDrops: null, dailyXrpLimitDrops: null, isActive: true },
+      {
+        agentId: null,
+        maxXrpPerTxDrops: null,
+        dailyXrpLimitDrops: null,
+        isActive: true,
+      },
     ];
     await expect(enforceSpendPolicy('client-1', '100000000')).resolves.toBeUndefined();
   });
 
   it('throws per_tx_limit_exceeded when amount exceeds per-tx limit', async () => {
     policySelectResult.current = [
-      { maxXrpPerTxDrops: '5000000', dailyXrpLimitDrops: null, isActive: true },
+      {
+        agentId: null,
+        maxXrpPerTxDrops: '5000000',
+        dailyXrpLimitDrops: null,
+        isActive: true,
+      },
     ];
     const err = await enforceSpendPolicy('client-1', '10000000').catch((e: unknown) => e);
     expect(err).toBeInstanceOf(SpendPolicyError);
@@ -149,14 +164,24 @@ describe('enforceSpendPolicy', () => {
 
   it('allows a transaction exactly at the per-tx limit', async () => {
     policySelectResult.current = [
-      { maxXrpPerTxDrops: '5000000', dailyXrpLimitDrops: null, isActive: true },
+      {
+        agentId: null,
+        maxXrpPerTxDrops: '5000000',
+        dailyXrpLimitDrops: null,
+        isActive: true,
+      },
     ];
     await expect(enforceSpendPolicy('client-1', '5000000')).resolves.toBeUndefined();
   });
 
   it('allows a transaction under the per-tx limit', async () => {
     policySelectResult.current = [
-      { maxXrpPerTxDrops: '5000000', dailyXrpLimitDrops: null, isActive: true },
+      {
+        agentId: null,
+        maxXrpPerTxDrops: '5000000',
+        dailyXrpLimitDrops: null,
+        isActive: true,
+      },
     ];
     await expect(enforceSpendPolicy('client-1', '4999999')).resolves.toBeUndefined();
   });
@@ -164,6 +189,7 @@ describe('enforceSpendPolicy', () => {
   it('throws daily_limit_exceeded when cumulative spend would exceed daily limit', async () => {
     policySelectResult.current = [
       {
+        agentId: null,
         maxXrpPerTxDrops: null,
         dailyXrpLimitDrops: '50000000',
         isActive: true,
@@ -179,6 +205,7 @@ describe('enforceSpendPolicy', () => {
   it('allows when cumulative spend plus tx is exactly at the daily limit', async () => {
     policySelectResult.current = [
       {
+        agentId: null,
         maxXrpPerTxDrops: null,
         dailyXrpLimitDrops: '50000000',
         isActive: true,
@@ -192,6 +219,7 @@ describe('enforceSpendPolicy', () => {
   it('checks both per-tx AND daily limits (per-tx fires first)', async () => {
     policySelectResult.current = [
       {
+        agentId: null,
         maxXrpPerTxDrops: '5000000',
         dailyXrpLimitDrops: '50000000',
         isActive: true,
@@ -210,6 +238,7 @@ describe('enforceSpendPolicy', () => {
   it('seeds the Redis counter from the DB on cold start', async () => {
     policySelectResult.current = [
       {
+        agentId: null,
         maxXrpPerTxDrops: null,
         dailyXrpLimitDrops: '100000000',
         isActive: true,
@@ -229,6 +258,7 @@ describe('enforceSpendPolicy', () => {
   it('atomic counter rejects when cumulative spend would exceed daily limit', async () => {
     policySelectResult.current = [
       {
+        agentId: null,
         maxXrpPerTxDrops: null,
         dailyXrpLimitDrops: '50000000',
         isActive: true,
@@ -247,6 +277,7 @@ describe('enforceSpendPolicy', () => {
   it('atomic counter prevents the concurrent-request race', async () => {
     policySelectResult.current = [
       {
+        agentId: null,
         maxXrpPerTxDrops: null,
         dailyXrpLimitDrops: '100000000',
         isActive: true,
@@ -275,6 +306,7 @@ describe('enforceSpendPolicy', () => {
   it('falls back to DB-only check when Redis is unreachable', async () => {
     policySelectResult.current = [
       {
+        agentId: null,
         maxXrpPerTxDrops: null,
         dailyXrpLimitDrops: '50000000',
         isActive: true,
@@ -292,6 +324,7 @@ describe('enforceSpendPolicy', () => {
   it('falls back to DB-only check and accepts when Redis down + under limit', async () => {
     policySelectResult.current = [
       {
+        agentId: null,
         maxXrpPerTxDrops: null,
         dailyXrpLimitDrops: '50000000',
         isActive: true,

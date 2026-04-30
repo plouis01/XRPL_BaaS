@@ -107,6 +107,30 @@ vi.mock('@railforge/jobs', () => ({
   }),
 }));
 
+// ── spendPolicy.service mock ────────────────────────────────────────────────
+// Token-op enforcement now resolves the policy via spendPolicy.service.
+// Token tests aren't validating that interaction, so stub the surface
+// to a no-op + unlimited resolution. The live module also boots Redis
+// at load time, which we don't want in unit tests.
+vi.mock('./spendPolicy.service.ts', () => ({
+  enforceSpendPolicy: vi.fn(async () => undefined),
+  enforceTokenOpCount: vi.fn(async () => undefined),
+  resolvePolicy: vi.fn(async () => ({
+    scope: 'unlimited' as const,
+    maxXrpPerTxDrops: null,
+    dailyXrpLimitDrops: null,
+  })),
+  SpendPolicyError: class SpendPolicyError extends Error {
+    constructor(
+      public readonly code: 'per_tx_limit_exceeded' | 'daily_limit_exceeded',
+      message: string,
+    ) {
+      super(message);
+      this.name = 'SpendPolicyError';
+    }
+  },
+}));
+
 // Import after mocks.
 const {
   authorizeToken,

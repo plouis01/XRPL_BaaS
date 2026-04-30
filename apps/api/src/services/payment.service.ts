@@ -204,13 +204,14 @@ export async function sendPayment(input: SendPaymentInput): Promise<{ txId: stri
   }
 
   if (input.amountDrops) {
-    await enforceSpendPolicy(input.clientId, input.amountDrops);
+    await enforceSpendPolicy(input.clientId, input.amountDrops, input.agentId ?? null);
   } else {
     // REVIEW.md MED-03: MPT + issued-currency payments are asset-denominated
     // and invisible to enforceSpendPolicy. Apply a nominal per-day op-count
     // ceiling as defense-in-depth until a price-oracle integration lets us
-    // enforce asset-denominated limits properly.
-    await enforceTokenOpCount(input.clientId);
+    // enforce asset-denominated limits properly. Per-agent counter when
+    // the agent has its own policy row, else the tenant counter.
+    await enforceTokenOpCount(input.clientId, input.agentId ?? null);
   }
 
   const txInserted = await db

@@ -362,19 +362,22 @@ export async function provisionAgent(input: ProvisionAgentInput): Promise<AgentV
       // silently degrading to "no policy" (security regression). Doing it
       // here, before grantPermission queues any on-ledger work, means a
       // failure leaves no SignerListSet in flight and no orphaned-active
-      // agent on retry. VISION.md notes spend_policies grows a nullable
-      // agent_id column in a later migration; until then, the policy is
-      // installed at client scope.
+      // agent on retry. Migration 0018 widened spend_policies to be
+      // keyed by (client_id, agent_id) NULLS NOT DISTINCT — the per-
+      // agent row is the override; the agent_id IS NULL row is the
+      // tenant-wide default. We write the per-agent override here so
+      // the new agent's caps are isolated from the tenant pool.
       await tx
         .insert(schema.spendPolicies)
         .values({
           clientId: input.clientId,
+          agentId: agentRow.id,
           maxXrpPerTxDrops: maxPerTx,
           dailyXrpLimitDrops: dailyLimit,
           isActive: true,
         })
         .onConflictDoUpdate({
-          target: schema.spendPolicies.clientId,
+          target: [schema.spendPolicies.clientId, schema.spendPolicies.agentId],
           set: {
             maxXrpPerTxDrops: maxPerTx,
             dailyXrpLimitDrops: dailyLimit,
@@ -588,10 +591,12 @@ export async function authorizeAgentPayment(input: AuthorizePaymentInput): Promi
 // read path. The shape stays consistent with provisionAgent's response so
 // the SDK can use one type.
 //
-// Spend policy is currently per-client (VISION.md notes a future migration
-// adds an agent_id column). Both reads pull spend_policies by clientId; if
-// no row exists, the agent surfaces with null caps — the same shape the
-// preset would produce when both fields are explicitly disabled.
+// Spend policy is per-(client, agent) since migration 0018. The shape that
+// the agent surfaces here is the resolved policy: prefer the per-agent row
+// (spend_policies.agent_id = agentId) and fall back to the tenant default
+// (agent_id IS NULL). If neither row exists or both are inactive, the
+// agent surfaces with null caps — the same shape a preset with both
+// fields disabled would produce.
 
 interface AgentJoinedRow {
   id: string;
@@ -618,24 +623,32 @@ async function loadAllowlist(agentId: string): Promise<AgentAllowlistInput[]> {
   }));
 }
 
-async function loadSpendPolicy(clientId: string): Promise<{
+async function loadSpendPolicy(
+  clientId: string,
+  agentId: string | null,
+): Promise<{
   max_xrp_per_tx_drops: string | null;
   daily_xrp_limit_drops: string | null;
 }> {
+  // Pull both candidate rows in one round-trip; pick the per-agent row
+  // when present and active, otherwise fall back to the tenant default.
+  // Mirrors resolvePolicy in spendPolicy.service.ts.
   const rows = await db
     .select({
+      agentId: schema.spendPolicies.agentId,
       maxXrpPerTxDrops: schema.spendPolicies.maxXrpPerTxDrops,
       dailyXrpLimitDrops: schema.spendPolicies.dailyXrpLimitDrops,
       isActive: schema.spendPolicies.isActive,
     })
     .from(schema.spendPolicies)
-    .where(eq(schema.spendPolicies.clientId, clientId))
-    .limit(1);
-  const row = rows[0];
-  // No row, or row exists but is_active=false → no caps. Caller sees null/null
-  // and can interpret that as "no cap installed" exactly like a preset that
-  // disabled both fields.
-  if (!row || !row.isActive) {
+    .where(eq(schema.spendPolicies.clientId, clientId));
+  const agentRow = agentId ? rows.find((r) => r.agentId === agentId && r.isActive) : null;
+  const clientRow = rows.find((r) => r.agentId === null && r.isActive);
+  const row = agentRow ?? clientRow;
+  // No active row of either scope → no caps. Caller sees null/null
+  // and can interpret that as "no cap installed" exactly like a preset
+  // that disabled both fields.
+  if (!row) {
     return { max_xrp_per_tx_drops: null, daily_xrp_limit_drops: null };
   }
   return {
@@ -688,7 +701,7 @@ export async function getAgent(clientId: string, agentId: string): Promise<Agent
   if (!row) return null;
   const [allowlist, spendPolicy] = await Promise.all([
     loadAllowlist(row.id),
-    loadSpendPolicy(clientId),
+    loadSpendPolicy(clientId, row.id),
   ]);
   return rowToView(row, allowlist, spendPolicy);
 }
@@ -709,14 +722,15 @@ export async function listAgents(clientId: string): Promise<AgentView[]> {
     .innerJoin(schema.accounts, eq(schema.agents.parentAccountId, schema.accounts.id))
     .where(eq(schema.agents.clientId, clientId))
     .limit(200);
-  // Spend policy is currently shared across all agents of a client, so one
-  // load instead of per-row. Allowlist is per-agent — sequential, since
-  // tenants typically have a handful of agents (parallelizing would just
-  // hammer Postgres for marginal gains and complicate error handling).
-  const spendPolicy = await loadSpendPolicy(clientId);
+  // Each agent has its own resolved spend policy (per-agent override or
+  // tenant default). Sequential loop keeps DB pressure predictable —
+  // tenants typically have a handful of agents.
   const views: AgentView[] = [];
   for (const row of rows) {
-    const allowlist = await loadAllowlist(row.id);
+    const [allowlist, spendPolicy] = await Promise.all([
+      loadAllowlist(row.id),
+      loadSpendPolicy(clientId, row.id),
+    ]);
     views.push(rowToView(row, allowlist, spendPolicy));
   }
   return views;
@@ -860,7 +874,7 @@ export async function updateAgentAllowlist(input: UpdateAgentAllowlistInput): Pr
   // 5. Return the fresh view. spend_policy is unchanged; refetch to keep
   //    the response shape consistent with getAgent (no caller has to know
   //    that the policy didn't change).
-  const spendPolicy = await loadSpendPolicy(input.clientId);
+  const spendPolicy = await loadSpendPolicy(input.clientId, agentRow.id);
   return rowToView(agentRow, input.allowlist, spendPolicy);
 }
 
@@ -925,8 +939,7 @@ export async function updateAgentSpendPolicy(
   }
 
   // Same status gate as updateAgentAllowlist — refuse to mutate a
-  // revoked / pending-revocation agent. The semantic is identical: the
-  // policy still applies client-wide, but exposing the edit surface only
+  // revoked / pending-revocation agent. Exposing the edit surface only
   // for active agents keeps the UI consistent.
   if (agentRow.status !== 'active' || agentRow.pendingRevocation) {
     throw new AgentServiceError(
@@ -937,18 +950,21 @@ export async function updateAgentSpendPolicy(
     );
   }
 
-  // Read the existing row so we can preserve untouched fields on UPSERT.
-  // Without this, an `INSERT … ON CONFLICT DO UPDATE SET maxXrpPerTxDrops=…`
-  // that omits dailyXrpLimitDrops would still need a value at insert-time
-  // for the brand-new-row case; pulling current values keeps both paths
-  // (insert vs update) producing the same final shape.
+  // Read the existing per-agent row so we can preserve untouched fields
+  // on UPSERT. Filter on (clientId, agentId) — migration 0018 widened
+  // the schema so each agent has its own row.
   const existing = await db
     .select({
       maxXrpPerTxDrops: schema.spendPolicies.maxXrpPerTxDrops,
       dailyXrpLimitDrops: schema.spendPolicies.dailyXrpLimitDrops,
     })
     .from(schema.spendPolicies)
-    .where(eq(schema.spendPolicies.clientId, input.clientId))
+    .where(
+      and(
+        eq(schema.spendPolicies.clientId, input.clientId),
+        eq(schema.spendPolicies.agentId, input.agentId),
+      ),
+    )
     .limit(1);
 
   const nextMaxPerTx =
@@ -965,12 +981,13 @@ export async function updateAgentSpendPolicy(
       .insert(schema.spendPolicies)
       .values({
         clientId: input.clientId,
+        agentId: input.agentId,
         maxXrpPerTxDrops: nextMaxPerTx,
         dailyXrpLimitDrops: nextDaily,
         isActive: true,
       })
       .onConflictDoUpdate({
-        target: schema.spendPolicies.clientId,
+        target: [schema.spendPolicies.clientId, schema.spendPolicies.agentId],
         set: {
           maxXrpPerTxDrops: nextMaxPerTx,
           dailyXrpLimitDrops: nextDaily,
@@ -990,15 +1007,17 @@ export async function updateAgentSpendPolicy(
   }
 
   // Drop the in-process cache so the next enforceSpendPolicy on this node
-  // doesn't serve the stale cap. Other nodes pick up the change within
-  // CACHE_TTL_MS — acceptable for an admin-set policy.
-  invalidateSpendPolicyCache(input.clientId);
+  // doesn't serve the stale resolution. Both the agent scope AND the
+  // client scope can be affected by this write (e.g. flipping from
+  // inheriting → having an override), so invalidate both.
+  invalidateSpendPolicyCache(input.clientId, input.agentId);
+  invalidateSpendPolicyCache(input.clientId, null);
 
   // Return the fresh agent view so the dashboard can swap state without
   // a follow-up GET.
   const [allowlist, spendPolicy] = await Promise.all([
     loadAllowlist(agentRow.id),
-    loadSpendPolicy(input.clientId),
+    loadSpendPolicy(input.clientId, input.agentId),
   ]);
   return rowToView(agentRow, allowlist, spendPolicy);
 }

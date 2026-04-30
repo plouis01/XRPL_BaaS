@@ -230,11 +230,18 @@ vi.mock('@railforge/db', () => ({
 }));
 
 // Spend-policy service is mocked because the live one boots a Redis client
-// at module load. The /agents/:id/usage handler only depends on
-// `getDailySpendUsage` from this module.
+// at module load. The /agents/:id/usage handler depends on `resolvePolicy`
+// (which classifies the resolution as agent / client / unlimited) and
+// `getDailySpendUsage` (the per-scope counter read).
 let nextDailySpendUsage = '0';
+let nextResolvedPolicy: {
+  scope: 'agent' | 'client' | 'unlimited';
+  maxXrpPerTxDrops: bigint | null;
+  dailyXrpLimitDrops: bigint | null;
+} = { scope: 'unlimited', maxXrpPerTxDrops: null, dailyXrpLimitDrops: null };
 vi.mock('../services/spendPolicy.service.ts', () => ({
   getDailySpendUsage: vi.fn(async () => nextDailySpendUsage),
+  resolvePolicy: vi.fn(async () => nextResolvedPolicy),
 }));
 
 const { default: dashboardRoute } = await import('./dashboard.ts');
@@ -257,6 +264,11 @@ beforeEach(() => {
   nextKeyCheckRows = [];
   nextSpendPolicyRows = [];
   nextDailySpendUsage = '0';
+  nextResolvedPolicy = {
+    scope: 'unlimited',
+    maxXrpPerTxDrops: null,
+    dailyXrpLimitDrops: null,
+  };
   nextAgentOwnershipRows = [];
   nextInsertReturning = [];
   nextUpdateReturning = [];
@@ -658,15 +670,13 @@ describe('GET /dashboard/agents/:id/usage', () => {
     expect(res.status).toBe(404);
   });
 
-  it('returns drops + caps when an active policy exists', async () => {
+  it('returns agent-scoped drops + caps when a per-agent override resolves', async () => {
     nextAgentOwnershipRows = [{ id: validId }];
-    nextSpendPolicyRows = [
-      {
-        maxXrpPerTxDrops: '10000000',
-        dailyXrpLimitDrops: '100000000',
-        isActive: true,
-      },
-    ];
+    nextResolvedPolicy = {
+      scope: 'agent',
+      maxXrpPerTxDrops: 10_000_000n,
+      dailyXrpLimitDrops: 100_000_000n,
+    };
     nextDailySpendUsage = '42000000';
     const app = makeApp();
     const res = await app.request(`/dashboard/agents/${validId}/usage`);
@@ -675,13 +685,36 @@ describe('GET /dashboard/agents/:id/usage', () => {
       daily_used_drops: '42000000',
       daily_limit_drops: '100000000',
       max_per_tx_drops: '10000000',
+      scope: 'agent',
+    });
+  });
+
+  it("returns scope='client' when no per-agent override exists but tenant default applies", async () => {
+    nextAgentOwnershipRows = [{ id: validId }];
+    nextResolvedPolicy = {
+      scope: 'client',
+      maxXrpPerTxDrops: 5_000_000n,
+      dailyXrpLimitDrops: 50_000_000n,
+    };
+    nextDailySpendUsage = '1000000';
+    const app = makeApp();
+    const res = await app.request(`/dashboard/agents/${validId}/usage`);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      daily_used_drops: '1000000',
+      daily_limit_drops: '50000000',
+      max_per_tx_drops: '5000000',
       scope: 'client',
     });
   });
 
-  it('reports null caps when no spend policy is configured', async () => {
+  it('reports unlimited scope + null caps when no spend policy is configured', async () => {
     nextAgentOwnershipRows = [{ id: validId }];
-    nextSpendPolicyRows = [];
+    nextResolvedPolicy = {
+      scope: 'unlimited',
+      maxXrpPerTxDrops: null,
+      dailyXrpLimitDrops: null,
+    };
     nextDailySpendUsage = '0';
     const app = makeApp();
     const res = await app.request(`/dashboard/agents/${validId}/usage`);
@@ -690,25 +723,8 @@ describe('GET /dashboard/agents/:id/usage', () => {
       daily_used_drops: '0',
       daily_limit_drops: null,
       max_per_tx_drops: null,
-      scope: 'client',
+      scope: 'unlimited',
     });
-  });
-
-  it('treats inactive policy as no caps', async () => {
-    nextAgentOwnershipRows = [{ id: validId }];
-    nextSpendPolicyRows = [
-      {
-        maxXrpPerTxDrops: '10000000',
-        dailyXrpLimitDrops: '100000000',
-        isActive: false,
-      },
-    ];
-    const app = makeApp();
-    const res = await app.request(`/dashboard/agents/${validId}/usage`);
-    expect(res.status).toBe(200);
-    const body = (await res.json()) as Record<string, unknown>;
-    expect(body.daily_limit_drops).toBeNull();
-    expect(body.max_per_tx_drops).toBeNull();
   });
 });
 
