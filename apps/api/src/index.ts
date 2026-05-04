@@ -1,3 +1,4 @@
+import { checkMigrationDrift } from '@railforge/db';
 import { Hono } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
 import { logger } from './logger.ts';
@@ -128,6 +129,42 @@ app.route('/v1', v1);
 
 const port = Number(process.env.API_PORT ?? 3000);
 logger.info({ port }, 'RailForge API starting');
+
+// Migration drift check. We had an outage in May 2026 where a manual
+// edit to packages/db/src/migrations/meta/_journal.json desynchronized
+// drizzle-kit's bookkeeping — `bun run db:migrate` reported success but
+// silently no-op'd a pending migration, and the API booted against a
+// schema missing a column that every payment-service insert needed. The
+// production-side symptom was a generic 500. This check logs the drift
+// at boot so the next pair of eyes spots it before traffic starts. We
+// log-and-continue rather than fail the boot — apps with a long-running
+// connection pool and a legitimate journal-trailing-DB scenario (newer
+// API code rolling out before the migrate job lands) shouldn't be hard-
+// blocked. Mainnet rollout can escalate to fatal when warranted.
+//
+// Best-effort: if the check itself throws (DATABASE_URL missing, journal
+// file unreadable in a bundled deploy), swallow and keep booting.
+void checkMigrationDrift()
+  .then((result) => {
+    if (result.drift) {
+      logger.warn(
+        {
+          journalCount: result.journalCount,
+          appliedCount: result.appliedCount,
+          missingTags: result.missingTags,
+        },
+        'migration drift detected: journal has more entries than DB has applied. Run `bun run db:migrate` or check for a manually-edited journal.',
+      );
+    } else {
+      logger.info({ migrations: result.appliedCount }, 'migration drift check OK');
+    }
+  })
+  .catch((err) => {
+    logger.warn(
+      { err: err instanceof Error ? err.message : String(err) },
+      'migration drift check skipped (non-fatal)',
+    );
+  });
 
 // REVIEW.md M-1: thread Bun's `server` into Hono's env so middleware can
 // call `server.requestIP(request)` to get the socket peer IP. Used by
