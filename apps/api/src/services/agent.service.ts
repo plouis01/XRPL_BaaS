@@ -431,6 +431,31 @@ export async function provisionAgent(input: ProvisionAgentInput): Promise<AgentV
     });
     grantTxId = grant.tx_id;
   } catch (err) {
+    // Synchronous orphan recovery (mirrors the orphan-reconciler sweep
+    // for pending agents in apps/worker/src/jobs/orphanReconciler.ts).
+    // The outer DB transaction has already committed the agents row
+    // with status='pending'. If grantPermission throws, the row is
+    // unrecoverable from the user's perspective — there's no on-ledger
+    // tx queued, no delegations row, no path forward. Flip it to
+    // 'failed' here so the dashboard surfaces the terminal state
+    // immediately instead of stranding a 'pending' row until the
+    // worker's reconciler catches up (5 min). Best-effort: if THIS
+    // update fails, the reconciler is the safety net.
+    try {
+      await db
+        .update(schema.agents)
+        .set({ status: 'failed', revokedAt: new Date() })
+        .where(and(eq(schema.agents.id, agentId), eq(schema.agents.status, 'pending')));
+    } catch (markErr) {
+      log.error(
+        {
+          err: markErr instanceof Error ? markErr.message : String(markErr),
+          agentId,
+        },
+        'failed to mark agent failed after grantPermission threw — orphan reconciler will catch it',
+      );
+    }
+
     if (err instanceof PermissionServiceError) {
       log.error({ err: err.message, code: err.code }, 'permission grant failed during provision');
       throw new AgentServiceError(

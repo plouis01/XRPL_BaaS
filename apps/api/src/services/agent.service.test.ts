@@ -482,6 +482,47 @@ describe('provisionAgent — happy path', () => {
     // though the caller failed, leaving an orphaned active agent.
     expect(grantPermissionMock).not.toHaveBeenCalled();
   });
+
+  it('marks agent failed synchronously when grantPermission throws (orphan recovery)', async () => {
+    // The outer DB transaction commits the agents row BEFORE
+    // grantPermission runs (separate inner transaction). If
+    // grantPermission throws — Redis blip on enqueue, transient DB
+    // error, anything — the agent row is left with status='pending',
+    // delegation_id=NULL. Without this fix the row strands until the
+    // worker's orphan reconciler catches up (5 min). With the fix,
+    // provisionAgent flips it to 'failed' synchronously so the user
+    // sees the terminal state immediately.
+    seedFundedParent();
+    grantPermissionMock.mockRejectedValueOnce(
+      new MockedPermissionServiceError('enqueue_failed', 'Failed to enqueue permission grant'),
+    );
+
+    await expect(
+      provisionAgent({
+        clientId: CLIENT_ID,
+        preset: 'payment-agent',
+        parentAddress: PARENT_ADDRESS,
+        allowlist: [{ entry_type: 'destination', entry_value: OTHER_DESTINATION }],
+      }),
+    ).rejects.toMatchObject({
+      name: 'AgentServiceError',
+      code: 'enqueue_failed',
+    });
+
+    // The agent row was flipped to 'failed' inside the catch, before
+    // the AgentServiceError was thrown to the caller. The test mock
+    // captures every UPDATE through `dbUpdateCalls` — assert that one
+    // of them set status='failed'.
+    const failureUpdate = dbUpdateCalls.find(
+      (vals) =>
+        typeof vals === 'object' &&
+        vals !== null &&
+        (vals as Record<string, unknown>).status === 'failed',
+    );
+    expect(failureUpdate).toBeDefined();
+    expect(failureUpdate).toMatchObject({ status: 'failed' });
+    expect((failureUpdate as Record<string, unknown>).revokedAt).toBeInstanceOf(Date);
+  });
 });
 
 // ── authorizeAgentPayment ───────────────────────────────────────────────────
