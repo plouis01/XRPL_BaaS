@@ -54,6 +54,17 @@ const GRACE_PERIOD_MS = 10 * 60 * 1000;
 // sit in 'submitting' for up to ~15s under load.
 const SUBMITTING_GRACE_PERIOD_MS = 30 * 60 * 1000;
 
+// Agent rows in 'pending' with no delegation_id older than this are
+// eligible for orphan cleanup. provisionAgent (agent.service.ts) commits
+// the agent row in an outer DB transaction THEN calls grantPermission
+// in a separate inner transaction. If the inner transaction fails, the
+// outer agent row is left orphaned: status='pending', delegation_id=
+// NULL, no transactions row, no delegations row. Fix-3 (caller-side
+// catch) closes most of these synchronously, but a hard process kill
+// between the commit and the catch can still strand a row. 5 minutes
+// is plenty — a healthy provision settles in under a second.
+const PENDING_AGENT_GRACE_PERIOD_MS = 5 * 60 * 1000;
+
 // Cap each sweep so a backlog can't tie up the worker concurrency slot
 // for an unbounded duration. If there's more than this in one sweep,
 // the next scheduled run picks up the rest.
@@ -85,6 +96,15 @@ export interface OrphanReconcileResult {
    * mid-submit would otherwise strand the row indefinitely.
    */
   submittingOrphanedCount: number;
+  /**
+   * Count of `agents` rows stranded in 'pending' with no delegation_id
+   * past PENDING_AGENT_GRACE_PERIOD_MS that this sweep marked 'failed'.
+   * Closes the provisionAgent gap where the outer DB tx commits the
+   * agent row, then the inner grantPermission call fails (or the
+   * process is killed) before the agent row gets linked to a
+   * delegation — leaving an unrecoverable 'pending' row in the UI.
+   */
+  pendingAgentsOrphanedCount: number;
 }
 
 /**
@@ -269,12 +289,57 @@ export async function processOrphanReconcileSweep(
     );
   }
 
+  // Pending-agent sweep. provisionAgent (agent.service.ts) commits the
+  // agents row in an outer DB transaction THEN calls grantPermission in
+  // a separate inner transaction. If the inner transaction fails or the
+  // process is killed before the link UPDATE, the agent row is stranded
+  // with status='pending', delegation_id=NULL — no on-ledger work
+  // queued, no transactions row, no delegations row. Single-statement
+  // UPDATE … RETURNING with a delegation_id IS NULL guard claims
+  // exactly the rows the inner-transaction failure would leave behind,
+  // ignoring legitimate 'pending' agents whose grant tx is still in
+  // flight (those have delegation_id set already by grantPermission's
+  // atomic linkage).
+  const pendingAgentCutoff = new Date(Date.now() - PENDING_AGENT_GRACE_PERIOD_MS);
+  const pendingAgents = await db
+    .update(schema.agents)
+    .set({
+      status: 'failed',
+      revokedAt: new Date(),
+    })
+    .where(
+      and(
+        eq(schema.agents.status, 'pending'),
+        isNull(schema.agents.delegationId),
+        lt(schema.agents.createdAt, pendingAgentCutoff),
+      ),
+    )
+    .returning({
+      id: schema.agents.id,
+      agentAddress: schema.agents.agentAddress,
+    });
+
+  const pendingAgentsOrphanedCount = pendingAgents.length;
+  if (pendingAgentsOrphanedCount > 0) {
+    log.warn(
+      {
+        agents: pendingAgents.map((a) => ({
+          id: a.id,
+          address: a.agentAddress,
+        })),
+        count: pendingAgentsOrphanedCount,
+      },
+      'pending agents marked failed (orphaned by provisionAgent grantPermission failure)',
+    );
+  }
+
   log.info(
     {
       orphanedCount,
       accountsSoftDeleted,
       hsmOrphansSoftDeleted,
       submittingOrphanedCount,
+      pendingAgentsOrphanedCount,
       scannedCount: stale.length,
       scannedSubmittingCount: stuckSubmitting.length,
     },
@@ -285,6 +350,7 @@ export async function processOrphanReconcileSweep(
     accountsSoftDeleted,
     hsmOrphansSoftDeleted,
     submittingOrphanedCount,
+    pendingAgentsOrphanedCount,
   };
 }
 

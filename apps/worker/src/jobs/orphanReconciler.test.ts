@@ -29,6 +29,9 @@ const transactionsClaimQueue: Array<Array<{ id: string }>> = [];
 // Same shape for accounts soft-delete UPDATE.
 const accountsDeleteQueue: Array<Array<{ id: string }>> = [];
 
+// Same shape for the pending-agent sweep UPDATE.
+const agentsClaimQueue: Array<Array<{ id: string; agentAddress: string }>> = [];
+
 // Records every UPDATE so tests can assert on what the reconciler did.
 interface RecordedUpdate {
   table: string;
@@ -71,6 +74,9 @@ vi.mock('@railforge/db', () => {
           if (table.__name === 'accounts') {
             return accountsDeleteQueue.shift() ?? [];
           }
+          if (table.__name === 'agents') {
+            return agentsClaimQueue.shift() ?? [];
+          }
           return [];
         }),
       })),
@@ -98,6 +104,14 @@ vi.mock('@railforge/db', () => {
         fundingTxId: 'accounts.fundingTxId',
         isFunded: 'accounts.isFunded',
       },
+      agents: {
+        __name: 'agents',
+        id: 'agents.id',
+        status: 'agents.status',
+        delegationId: 'agents.delegationId',
+        createdAt: 'agents.createdAt',
+        agentAddress: 'agents.agentAddress',
+      },
     },
   };
 });
@@ -124,6 +138,7 @@ beforeEach(async () => {
   selectCallCount.current = 0;
   transactionsClaimQueue.length = 0;
   accountsDeleteQueue.length = 0;
+  agentsClaimQueue.length = 0;
   recordedUpdates.length = 0;
   const mod = await import('./orphanReconciler.ts');
   processOrphanReconcileSweep = mod.processOrphanReconcileSweep;
@@ -142,10 +157,11 @@ describe('processOrphanReconcileSweep', () => {
       accountsSoftDeleted: 0,
       hsmOrphansSoftDeleted: 0,
       submittingOrphanedCount: 0,
+      pendingAgentsOrphanedCount: 0,
     });
     // HIGH-09: the HSM pre-funding sweep runs unconditionally at the end.
     // With no matching rows it still records one accounts UPDATE.
-    expect(recordedUpdates).toHaveLength(1);
+    expect(recordedUpdates).toHaveLength(2);
     expect(recordedUpdates[0]?.table).toBe('accounts');
   });
 
@@ -161,11 +177,12 @@ describe('processOrphanReconcileSweep', () => {
       accountsSoftDeleted: 1,
       hsmOrphansSoftDeleted: 0,
       submittingOrphanedCount: 0,
+      pendingAgentsOrphanedCount: 0,
     });
 
     // Three updates: transactions (mark failed), accounts (soft-delete),
     // and the HIGH-09 HSM pre-funding sweep (another accounts UPDATE).
-    expect(recordedUpdates).toHaveLength(3);
+    expect(recordedUpdates).toHaveLength(4);
     expect(recordedUpdates[0]?.table).toBe('transactions');
     expect(recordedUpdates[0]?.set).toMatchObject({
       status: 'failed',
@@ -194,9 +211,10 @@ describe('processOrphanReconcileSweep', () => {
       accountsSoftDeleted: 0,
       hsmOrphansSoftDeleted: 0,
       submittingOrphanedCount: 0,
+      pendingAgentsOrphanedCount: 0,
     });
     // Both per-orphan UPDATEs + the HIGH-09 HSM pre-funding sweep = 3.
-    expect(recordedUpdates).toHaveLength(3);
+    expect(recordedUpdates).toHaveLength(4);
     expect(recordedUpdates[1]?.table).toBe('accounts');
   });
 
@@ -217,12 +235,19 @@ describe('processOrphanReconcileSweep', () => {
       accountsSoftDeleted: 1,
       hsmOrphansSoftDeleted: 0,
       submittingOrphanedCount: 0,
+      pendingAgentsOrphanedCount: 0,
     });
     // Updates recorded: tx-3 claim attempt (returned []), tx-4 claim
     // (returned id), accounts soft-delete (returned id), + the HIGH-09
     // HSM pre-funding sweep at the end.
     const tableSequence = recordedUpdates.map((u) => u.table);
-    expect(tableSequence).toEqual(['transactions', 'transactions', 'accounts', 'accounts']);
+    expect(tableSequence).toEqual([
+      'transactions',
+      'transactions',
+      'accounts',
+      'accounts', // HIGH-09 HSM pre-funding sweep
+      'agents', // pending-agent sweep
+    ]);
   });
 
   it('processes multiple orphans in a single sweep', async () => {
@@ -241,10 +266,11 @@ describe('processOrphanReconcileSweep', () => {
       accountsSoftDeleted: 2,
       hsmOrphansSoftDeleted: 0,
       submittingOrphanedCount: 0,
+      pendingAgentsOrphanedCount: 0,
     });
     // 3 transactions UPDATEs + 3 per-orphan accounts UPDATEs + 1 HSM
     // pre-funding sweep at the end.
-    expect(recordedUpdates).toHaveLength(7);
+    expect(recordedUpdates).toHaveLength(8);
   });
 
   it('honors the gracePeriodMs override (smoke check that the parameter wires through)', async () => {
@@ -258,6 +284,7 @@ describe('processOrphanReconcileSweep', () => {
       accountsSoftDeleted: 0,
       hsmOrphansSoftDeleted: 0,
       submittingOrphanedCount: 0,
+      pendingAgentsOrphanedCount: 0,
     });
   });
 
@@ -278,8 +305,9 @@ describe('processOrphanReconcileSweep', () => {
       accountsSoftDeleted: 0,
       hsmOrphansSoftDeleted: 1,
       submittingOrphanedCount: 0,
+      pendingAgentsOrphanedCount: 0,
     });
-    expect(recordedUpdates).toHaveLength(1);
+    expect(recordedUpdates).toHaveLength(2);
     expect(recordedUpdates[0]?.table).toBe('accounts');
     expect(recordedUpdates[0]?.set).toHaveProperty('deletedAt');
   });
@@ -303,10 +331,11 @@ describe('processOrphanReconcileSweep', () => {
       accountsSoftDeleted: 0,
       hsmOrphansSoftDeleted: 0,
       submittingOrphanedCount: 1,
+      pendingAgentsOrphanedCount: 0,
     });
     // The HSM accounts UPDATE always runs unconditionally + the
     // stranded-submitting transactions UPDATE = 2 total.
-    expect(recordedUpdates).toHaveLength(2);
+    expect(recordedUpdates).toHaveLength(3);
     const txUpdate = recordedUpdates.find((u) => u.table === 'transactions');
     expect(txUpdate?.set).toMatchObject({
       status: 'failed',
@@ -324,7 +353,36 @@ describe('processOrphanReconcileSweep', () => {
 
     expect(result.submittingOrphanedCount).toBe(0);
     // One transactions UPDATE (the claim attempt that returned []) +
-    // the unconditional HSM accounts UPDATE.
-    expect(recordedUpdates).toHaveLength(2);
+    // the unconditional HSM accounts UPDATE + the unconditional
+    // pending-agents UPDATE.
+    expect(recordedUpdates).toHaveLength(3);
+  });
+
+  it('marks pending agents with no delegation_id as failed', async () => {
+    // provisionAgent commits the agent row outside grantPermission's
+    // transaction. If grantPermission throws, the agent row is left
+    // with status='pending', delegation_id=NULL, and no on-ledger work
+    // queued. The sweep finds these past PENDING_AGENT_GRACE_PERIOD_MS
+    // and marks them failed so the dashboard surfaces the terminal
+    // state instead of a forever-pending row.
+    staleSelectResults.current = [];
+    agentsClaimQueue.push([
+      { id: 'agent-orphan-1', agentAddress: 'rOrphanAgent' },
+      { id: 'agent-orphan-2', agentAddress: 'rOrphanAgent2' },
+    ]);
+
+    const result = await processOrphanReconcileSweep();
+
+    expect(result).toEqual({
+      orphanedCount: 0,
+      accountsSoftDeleted: 0,
+      hsmOrphansSoftDeleted: 0,
+      submittingOrphanedCount: 0,
+      pendingAgentsOrphanedCount: 2,
+    });
+    // Sweep order: HSM accounts UPDATE, then agents UPDATE.
+    const agentsUpdate = recordedUpdates.find((u) => u.table === 'agents');
+    expect(agentsUpdate?.set).toMatchObject({ status: 'failed' });
+    expect(agentsUpdate?.set.revokedAt).toBeInstanceOf(Date);
   });
 });
