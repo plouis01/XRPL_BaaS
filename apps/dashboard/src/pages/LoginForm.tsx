@@ -11,8 +11,11 @@ export function LoginForm({ onLoggedIn }: { onLoggedIn: () => void }) {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // After a successful signup we surface the raw key once so the user can
-  // copy it before the page transitions. Auto-login happens regardless.
+  // copy it before the page transitions. The user must click Continue —
+  // we never auto-redirect, because the key is shown ONCE and a too-short
+  // timeout means a user who blinked has to revoke + reseed.
   const [mintedKey, setMintedKey] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
 
   const formatError = (err: unknown): string => {
     if (err instanceof ApiError) {
@@ -45,15 +48,27 @@ export function LoginForm({ onLoggedIn }: { onLoggedIn: () => void }) {
     setSubmitting(true);
     try {
       const result = await signup(email.trim(), name.trim());
-      setMintedKey(result.api_key);
-      // Auto-login with the freshly minted key. The user still sees the
-      // key once on screen so they can stash it elsewhere if they want.
+      // Set the cookie session in the background so the eventual Continue
+      // click is a no-op redirect. The key stays on screen until the user
+      // explicitly continues — no race with a copy-paste.
       await login(result.api_key);
-      // Brief pause so the user can see the key before the page swaps.
-      setTimeout(() => onLoggedIn(), 1500);
+      setMintedKey(result.api_key);
     } catch (err) {
       setError(formatError(err));
+    } finally {
       setSubmitting(false);
+    }
+  };
+
+  const copyKey = async () => {
+    if (!mintedKey) return;
+    try {
+      await navigator.clipboard.writeText(mintedKey);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      // Clipboard API can fail on insecure origins or strict permissions —
+      // fall back to leaving the key on screen for manual selection.
     }
   };
 
@@ -61,6 +76,7 @@ export function LoginForm({ onLoggedIn }: { onLoggedIn: () => void }) {
     setMode(next);
     setError(null);
     setMintedKey(null);
+    setCopied(false);
   };
 
   return (
@@ -198,47 +214,97 @@ export function LoginForm({ onLoggedIn }: { onLoggedIn: () => void }) {
               fontSize: 12,
             }}
           >
-            <div style={{ fontWeight: 600, marginBottom: 4 }}>API key (copy now — shown once):</div>
+            <div
+              style={{
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'center',
+                marginBottom: 6,
+              }}
+            >
+              <span style={{ fontWeight: 600 }}>API key (shown once — copy it now):</span>
+              <button
+                type="button"
+                onClick={() => void copyKey()}
+                style={{
+                  background: copied ? '#065f46' : '#fff',
+                  color: copied ? '#fff' : '#065f46',
+                  border: '1px solid #6ee7b7',
+                  borderRadius: 4,
+                  padding: '2px 8px',
+                  fontSize: 11,
+                  cursor: 'pointer',
+                  fontWeight: 500,
+                }}
+              >
+                {copied ? 'Copied' : 'Copy'}
+              </button>
+            </div>
             <code
               style={{
                 fontFamily: 'ui-monospace, Menlo, monospace',
                 wordBreak: 'break-all',
                 fontSize: 11,
+                userSelect: 'all',
               }}
             >
               {mintedKey}
             </code>
+            <div style={{ marginTop: 6, color: '#047857', fontSize: 11 }}>
+              Stash it in a password manager — the dashboard cannot show it again. You can mint
+              another from API Keys after continuing.
+            </div>
           </div>
         )}
 
-        <button
-          type="submit"
-          disabled={
-            submitting ||
-            (mode === 'signin'
-              ? apiKey.trim().length === 0
-              : email.trim().length === 0 || name.trim().length === 0)
-          }
-          style={{
-            marginTop: 16,
-            width: '100%',
-            padding: '10px 16px',
-            background: submitting ? '#93c5fd' : '#2563eb',
-            color: '#fff',
-            border: 'none',
-            borderRadius: 6,
-            cursor: submitting ? 'not-allowed' : 'pointer',
-            fontWeight: 500,
-          }}
-        >
-          {submitting
-            ? mode === 'signin'
-              ? 'Signing in...'
-              : 'Creating account...'
-            : mode === 'signin'
-              ? 'Sign in'
-              : 'Create account'}
-        </button>
+        {mintedKey ? (
+          <button
+            type="button"
+            onClick={() => onLoggedIn()}
+            style={{
+              marginTop: 16,
+              width: '100%',
+              padding: '10px 16px',
+              background: '#2563eb',
+              color: '#fff',
+              border: 'none',
+              borderRadius: 6,
+              cursor: 'pointer',
+              fontWeight: 500,
+            }}
+          >
+            Continue to dashboard
+          </button>
+        ) : (
+          <button
+            type="submit"
+            disabled={
+              submitting ||
+              (mode === 'signin'
+                ? apiKey.trim().length === 0
+                : email.trim().length === 0 || name.trim().length === 0)
+            }
+            style={{
+              marginTop: 16,
+              width: '100%',
+              padding: '10px 16px',
+              background: submitting ? '#93c5fd' : '#2563eb',
+              color: '#fff',
+              border: 'none',
+              borderRadius: 6,
+              cursor: submitting ? 'not-allowed' : 'pointer',
+              fontWeight: 500,
+            }}
+          >
+            {submitting
+              ? mode === 'signin'
+                ? 'Signing in...'
+                : 'Creating account...'
+              : mode === 'signin'
+                ? 'Sign in'
+                : 'Create account'}
+          </button>
+        )}
 
         <p style={{ marginTop: 16, fontSize: 12, color: '#64748b' }}>
           {mode === 'signin' ? (
