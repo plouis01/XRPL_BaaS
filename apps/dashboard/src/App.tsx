@@ -187,11 +187,31 @@ export function App() {
             </li>
           </ul>
 
+          <a
+            href="http://localhost:4321"
+            target="_blank"
+            rel="noopener noreferrer"
+            style={{
+              marginTop: 16,
+              padding: '6px 10px',
+              background: 'transparent',
+              color: '#64748b',
+              border: '1px solid #cbd5e1',
+              borderRadius: 4,
+              fontSize: 13,
+              textAlign: 'center',
+              textDecoration: 'none',
+              display: 'block',
+            }}
+          >
+            Documentation
+          </a>
+
           <button
             type="button"
             onClick={() => void handleLogout()}
             style={{
-              marginTop: 16,
+              marginTop: 8,
               padding: '6px 10px',
               background: 'transparent',
               color: '#64748b',
