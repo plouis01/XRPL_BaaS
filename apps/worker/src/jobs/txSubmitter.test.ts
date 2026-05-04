@@ -115,6 +115,19 @@ vi.mock('../queues.ts', () => ({
   }),
 }));
 
+// Confirmer hooks are imported by txSubmitter for the submit-reject
+// branch (closes the temMALFORMED gap where agent rows would otherwise
+// stay stuck in 'pending' / 'pending_revocation=true'). Mock them so
+// tests assert call patterns without spinning up the full confirmer
+// module (which imports xrpl + ioredis at load time).
+const applyAgentGrantOutcomeMock = vi.fn();
+const applyDelegationRevocationOutcomeMock = vi.fn();
+vi.mock('./txConfirmer.ts', () => ({
+  applyAgentGrantOutcome: (...args: unknown[]) => applyAgentGrantOutcomeMock(...args),
+  applyDelegationRevocationOutcome: (...args: unknown[]) =>
+    applyDelegationRevocationOutcomeMock(...args),
+}));
+
 // Import AFTER the mocks are registered.
 const { processTxSubmitJob } = await import('./txSubmitter.ts');
 
@@ -164,6 +177,8 @@ describe('processTxSubmitJob', () => {
       throw new Error(`unexpected command ${req.command}`);
     });
     stubs.confirmQueueAdd.mockResolvedValue({});
+    applyAgentGrantOutcomeMock.mockReset().mockResolvedValue(undefined);
+    applyDelegationRevocationOutcomeMock.mockReset().mockResolvedValue(undefined);
   });
 
   afterEach(() => {
@@ -461,4 +476,54 @@ describe('processTxSubmitJob', () => {
   // index.test.ts). We deliberately do NOT spy on the logger here because
   // (a) it's redundant with those tests and (b) any future change that
   // imports a secret into a log line will be caught by the redact test suite.
+
+  it("submit-rejected (temMALFORMED): fires agent-state hooks so revocation/grant rows aren't stuck", async () => {
+    // Closes the gap where applyDelegationRevocationOutcome only ran from
+    // txConfirmer's validated-outcome branch. A tem* / tef* / tel*
+    // rejection at submit time terminates the tx without ever reaching
+    // the confirmer — leaving the agent's `pending_revocation=true` (or
+    // `status='pending'` for grants) forever. The submitter now calls
+    // both hooks with isSuccess=false on every non-tesSUCCESS engine
+    // result; the hooks self-filter on requestBody.op so calling both
+    // is safe.
+    stubs.clientRequest.mockImplementation(async (req: { command: string }) => {
+      if (req.command === 'ledger_current') return { result: { ledger_current_index: 100 } };
+      if (req.command === 'submit') return { result: { engine_result: 'temMALFORMED' } };
+      throw new Error('unexpected');
+    });
+
+    await processTxSubmitJob(makeJob(baseJobData()));
+
+    // Tx was marked failed (pre-existing behavior, captured at index 0).
+    const update = dbUpdateCalls[0]!.set as Record<string, unknown>;
+    expect(update.status).toBe('failed');
+    expect(update.resultCode).toBe('temMALFORMED');
+
+    // Both agent-state hooks fired with isSuccess=false. These no-op
+    // when the tx isn't a SignerListSet for an agent flow, so the
+    // submitter calls both unconditionally.
+    expect(applyAgentGrantOutcomeMock).toHaveBeenCalledTimes(1);
+    expect(applyAgentGrantOutcomeMock).toHaveBeenCalledWith('tx-uuid-1', false, expect.anything());
+    expect(applyDelegationRevocationOutcomeMock).toHaveBeenCalledTimes(1);
+    expect(applyDelegationRevocationOutcomeMock).toHaveBeenCalledWith(
+      'tx-uuid-1',
+      false,
+      expect.anything(),
+    );
+
+    // Confirmation polling is NOT enqueued for a rejected tx (it would
+    // never validate, so the confirmer would just expire it).
+    expect(stubs.confirmQueueAdd).not.toHaveBeenCalled();
+  });
+
+  it('submit-success: does NOT fire agent-state hooks (confirmer owns the validated outcome)', async () => {
+    // The success path leaves the agent in 'pending' / 'pending_revocation'
+    // intentionally — txConfirmer fires the hooks once the tx validates
+    // on-ledger. Firing them here would race with the confirmer.
+    await processTxSubmitJob(makeJob(baseJobData()));
+
+    expect(applyAgentGrantOutcomeMock).not.toHaveBeenCalled();
+    expect(applyDelegationRevocationOutcomeMock).not.toHaveBeenCalled();
+    expect(stubs.confirmQueueAdd).toHaveBeenCalledTimes(1);
+  });
 });

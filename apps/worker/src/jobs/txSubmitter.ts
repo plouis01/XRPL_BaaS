@@ -29,6 +29,7 @@ import {
   getTxConfirmQueue,
   getXrplPool,
 } from '../queues.ts';
+import { applyAgentGrantOutcome, applyDelegationRevocationOutcome } from './txConfirmer.ts';
 
 /**
  * XRPL engine result codes that indicate a sequence-number problem.
@@ -247,6 +248,32 @@ export async function processTxSubmitJob(job: Job<TxSubmitJobData>): Promise<voi
         delay: 4000,
       },
     );
+    return;
+  }
+
+  // 12. Rejected at submit (tem* / tef* / tel* / ter* / tec* — anything
+  // not tesSUCCESS). The tx will NEVER reach a validated ledger from
+  // this submission, so the txConfirmer's terminal-state hooks will
+  // never fire. For agent-launcher SignerListSet flows that means a
+  // grantPermission failure leaves the agent stuck in 'pending', or a
+  // revokePermission failure leaves the agent stuck in 'pending_
+  // revocation=true'. Fire the same hooks here, with isSuccess=false,
+  // so the agent rows reach a terminal state on the next dashboard
+  // poll instead of waiting for the orphan reconciler. The hooks
+  // self-filter on requestBody.op — calling both is safe and a no-op
+  // for non-agent SignerListSet txs.
+  //
+  // Best-effort: a hook throw must not abort the submit job. Log and
+  // move on — the orphan reconciler is the safety net.
+  try {
+    await applyAgentGrantOutcome(txId, false, log);
+  } catch (err) {
+    log.warn({ err }, 'applyAgentGrantOutcome failed after submit-reject (non-fatal)');
+  }
+  try {
+    await applyDelegationRevocationOutcome(txId, false, log);
+  } catch (err) {
+    log.warn({ err }, 'applyDelegationRevocationOutcome failed after submit-reject (non-fatal)');
   }
 }
 
