@@ -1,12 +1,31 @@
 import { useState } from 'react';
-import { ApiError, login } from '../api.ts';
+import { ApiError, login, signup } from '../api.ts';
+
+type Mode = 'signin' | 'signup';
 
 export function LoginForm({ onLoggedIn }: { onLoggedIn: () => void }) {
+  const [mode, setMode] = useState<Mode>('signin');
   const [apiKey, setApiKey] = useState('');
+  const [email, setEmail] = useState('');
+  const [name, setName] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // After a successful signup we surface the raw key once so the user can
+  // copy it before the page transitions. Auto-login happens regardless.
+  const [mintedKey, setMintedKey] = useState<string | null>(null);
 
-  const submit = async (e: React.FormEvent) => {
+  const formatError = (err: unknown): string => {
+    if (err instanceof ApiError) {
+      if (err.status === 401) return 'Invalid or revoked API key.';
+      if (err.status === 404) return 'Signup is disabled on this server.';
+      if (err.status === 400) return 'Invalid email or name.';
+      return `API error ${err.status}.`;
+    }
+    if (err instanceof Error) return err.message;
+    return 'Unknown error.';
+  };
+
+  const submitSignin = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
     setSubmitting(true);
@@ -14,16 +33,34 @@ export function LoginForm({ onLoggedIn }: { onLoggedIn: () => void }) {
       await login(apiKey.trim());
       onLoggedIn();
     } catch (err) {
-      if (err instanceof ApiError) {
-        setError(err.status === 401 ? 'Invalid or revoked API key.' : `API error ${err.status}.`);
-      } else if (err instanceof Error) {
-        setError(err.message);
-      } else {
-        setError('Unknown error.');
-      }
+      setError(formatError(err));
     } finally {
       setSubmitting(false);
     }
+  };
+
+  const submitSignup = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError(null);
+    setSubmitting(true);
+    try {
+      const result = await signup(email.trim(), name.trim());
+      setMintedKey(result.api_key);
+      // Auto-login with the freshly minted key. The user still sees the
+      // key once on screen so they can stash it elsewhere if they want.
+      await login(result.api_key);
+      // Brief pause so the user can see the key before the page swaps.
+      setTimeout(() => onLoggedIn(), 1500);
+    } catch (err) {
+      setError(formatError(err));
+      setSubmitting(false);
+    }
+  };
+
+  const switchMode = (next: Mode) => {
+    setMode(next);
+    setError(null);
+    setMintedKey(null);
   };
 
   return (
@@ -38,7 +75,7 @@ export function LoginForm({ onLoggedIn }: { onLoggedIn: () => void }) {
       }}
     >
       <form
-        onSubmit={submit}
+        onSubmit={mode === 'signin' ? submitSignin : submitSignup}
         style={{
           background: '#fff',
           padding: 32,
@@ -50,30 +87,88 @@ export function LoginForm({ onLoggedIn }: { onLoggedIn: () => void }) {
       >
         <h1 style={{ margin: '0 0 8px', fontSize: 20 }}>RailForge Dashboard</h1>
         <p style={{ margin: '0 0 24px', color: '#64748b', fontSize: 14 }}>
-          Paste an API key to start a session.
+          {mode === 'signin'
+            ? 'Paste an API key to start a session.'
+            : 'Create a dev account and a testnet API key.'}
         </p>
 
-        <label htmlFor="api-key" style={{ display: 'block', fontSize: 13, marginBottom: 6 }}>
-          API key
-        </label>
-        <input
-          id="api-key"
-          type="password"
-          autoComplete="off"
-          spellCheck={false}
-          value={apiKey}
-          onChange={(e) => setApiKey(e.target.value)}
-          placeholder="rf_test_..."
-          style={{
-            width: '100%',
-            padding: '8px 10px',
-            borderRadius: 6,
-            border: '1px solid #cbd5e1',
-            fontFamily: 'ui-monospace, Menlo, monospace',
-            fontSize: 13,
-            boxSizing: 'border-box',
-          }}
-        />
+        {mode === 'signin' ? (
+          <>
+            <label htmlFor="api-key" style={{ display: 'block', fontSize: 13, marginBottom: 6 }}>
+              API key
+            </label>
+            <input
+              id="api-key"
+              type="password"
+              autoComplete="off"
+              spellCheck={false}
+              value={apiKey}
+              onChange={(e) => setApiKey(e.target.value)}
+              placeholder="rf_test_..."
+              style={{
+                width: '100%',
+                padding: '8px 10px',
+                borderRadius: 6,
+                border: '1px solid #cbd5e1',
+                fontFamily: 'ui-monospace, Menlo, monospace',
+                fontSize: 13,
+                boxSizing: 'border-box',
+              }}
+            />
+          </>
+        ) : (
+          <>
+            <label
+              htmlFor="signup-name"
+              style={{ display: 'block', fontSize: 13, marginBottom: 6 }}
+            >
+              Name
+            </label>
+            <input
+              id="signup-name"
+              type="text"
+              autoComplete="name"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder="Acme Dev"
+              style={{
+                width: '100%',
+                padding: '8px 10px',
+                borderRadius: 6,
+                border: '1px solid #cbd5e1',
+                fontSize: 13,
+                boxSizing: 'border-box',
+              }}
+            />
+            <label
+              htmlFor="signup-email"
+              style={{
+                display: 'block',
+                fontSize: 13,
+                marginTop: 12,
+                marginBottom: 6,
+              }}
+            >
+              Email
+            </label>
+            <input
+              id="signup-email"
+              type="email"
+              autoComplete="email"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              placeholder="dev@example.com"
+              style={{
+                width: '100%',
+                padding: '8px 10px',
+                borderRadius: 6,
+                border: '1px solid #cbd5e1',
+                fontSize: 13,
+                boxSizing: 'border-box',
+              }}
+            />
+          </>
+        )}
 
         {error && (
           <div
@@ -91,9 +186,39 @@ export function LoginForm({ onLoggedIn }: { onLoggedIn: () => void }) {
           </div>
         )}
 
+        {mintedKey && (
+          <div
+            style={{
+              marginTop: 12,
+              padding: '10px 12px',
+              background: '#ecfdf5',
+              border: '1px solid #6ee7b7',
+              color: '#065f46',
+              borderRadius: 6,
+              fontSize: 12,
+            }}
+          >
+            <div style={{ fontWeight: 600, marginBottom: 4 }}>API key (copy now — shown once):</div>
+            <code
+              style={{
+                fontFamily: 'ui-monospace, Menlo, monospace',
+                wordBreak: 'break-all',
+                fontSize: 11,
+              }}
+            >
+              {mintedKey}
+            </code>
+          </div>
+        )}
+
         <button
           type="submit"
-          disabled={submitting || apiKey.trim().length === 0}
+          disabled={
+            submitting ||
+            (mode === 'signin'
+              ? apiKey.trim().length === 0
+              : email.trim().length === 0 || name.trim().length === 0)
+          }
           style={{
             marginTop: 16,
             width: '100%',
@@ -106,11 +231,57 @@ export function LoginForm({ onLoggedIn }: { onLoggedIn: () => void }) {
             fontWeight: 500,
           }}
         >
-          {submitting ? 'Signing in...' : 'Sign in'}
+          {submitting
+            ? mode === 'signin'
+              ? 'Signing in...'
+              : 'Creating account...'
+            : mode === 'signin'
+              ? 'Sign in'
+              : 'Create account'}
         </button>
 
         <p style={{ marginTop: 16, fontSize: 12, color: '#64748b' }}>
-          No key yet? Run <code>bun run scripts/seed-dev.ts</code> to mint one.
+          {mode === 'signin' ? (
+            <>
+              No key yet?{' '}
+              <button
+                type="button"
+                onClick={() => switchMode('signup')}
+                style={{
+                  background: 'transparent',
+                  border: 'none',
+                  padding: 0,
+                  color: '#2563eb',
+                  cursor: 'pointer',
+                  fontSize: 12,
+                  textDecoration: 'underline',
+                }}
+              >
+                Create one
+              </button>
+              .
+            </>
+          ) : (
+            <>
+              Already have a key?{' '}
+              <button
+                type="button"
+                onClick={() => switchMode('signin')}
+                style={{
+                  background: 'transparent',
+                  border: 'none',
+                  padding: 0,
+                  color: '#2563eb',
+                  cursor: 'pointer',
+                  fontSize: 12,
+                  textDecoration: 'underline',
+                }}
+              >
+                Sign in
+              </button>
+              .
+            </>
+          )}
         </p>
       </form>
     </div>

@@ -48,6 +48,36 @@ export async function login(apiKey: string): Promise<void> {
 }
 
 /**
+ * Dev-only: mint a fresh testnet client + API key from the login UI.
+ * The endpoint is hard-gated server-side on NODE_ENV !== 'production',
+ * so this returns 404 in prod. Returns the raw key once; callers should
+ * immediately POST it to /v1/dashboard/session via `login`.
+ */
+export interface SignupResult {
+  api_key: string;
+  client_id: string;
+  environment: 'testnet';
+}
+
+export async function signup(email: string, name: string): Promise<SignupResult> {
+  const res = await fetch(`${API_BASE}/v1/dashboard/signup`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email, name }),
+  });
+  if (!res.ok) {
+    let bodyText = '';
+    try {
+      bodyText = await res.text();
+    } catch {
+      /* ignore */
+    }
+    throw new ApiError(res.status, bodyText);
+  }
+  return (await res.json()) as SignupResult;
+}
+
+/**
  * Log out — clears the session cookie on the server. Does not revoke
  * the API key itself; the same key can be used to log in again.
  */

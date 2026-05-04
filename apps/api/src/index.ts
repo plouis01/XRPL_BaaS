@@ -17,6 +17,7 @@ import agentsRoute from './routes/agents.ts';
 import credentialsRoute from './routes/credentials.ts';
 import dashboardRoute from './routes/dashboard.ts';
 import dashboardSessionRoute from './routes/dashboardSession.ts';
+import dashboardSignupRoute from './routes/dashboardSignup.ts';
 import dexRoute from './routes/dex.ts';
 import domainsRoute from './routes/domains.ts';
 import paymentsRoute from './routes/payments.ts';
@@ -56,6 +57,24 @@ sessionRoot.use(
 sessionRoot.use('*', ipRateLimit);
 sessionRoot.route('/', dashboardSessionRoute);
 app.route('/v1/dashboard/session', sessionRoot);
+
+// Dev-only: POST /v1/dashboard/signup mints a fresh testnet client + API
+// key from the login UI. Hard-gated on NODE_ENV !== 'production' so the
+// route is literally not registered when shipped. A real signup flow
+// (email verification, captcha) is deferred.
+if (process.env.NODE_ENV !== 'production') {
+  const signupRoot = new Hono<AppEnv>();
+  signupRoot.use(
+    '*',
+    bodyLimit({
+      maxSize: 64 * 1024,
+      onError: (c) => c.json({ error: 'Request body too large' }, 413),
+    }),
+  );
+  signupRoot.use('*', ipRateLimit);
+  signupRoot.route('/', dashboardSignupRoute);
+  app.route('/v1/dashboard/signup', signupRoot);
+}
 
 // All /v1/* routes are authenticated, rate-limited, and idempotency-aware.
 //
