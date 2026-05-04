@@ -1,7 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
 
+const loggerErrorMock = vi.fn();
 vi.mock('../logger.ts', () => ({
-  logger: { error: vi.fn(), warn: vi.fn(), info: vi.fn() },
+  logger: { error: loggerErrorMock, warn: vi.fn(), info: vi.fn() },
 }));
 
 const { errorHandler } = await import('./errorHandler.ts');
@@ -40,5 +41,45 @@ describe('errorHandler', () => {
     errorHandler(new Error(''), c);
     expect(json).toHaveBeenCalledWith({ error: 'Internal server error' }, 500);
     process.env.NODE_ENV = original;
+  });
+
+  it('surfaces the pg cause fields when Drizzle wraps a DB error', () => {
+    // Drizzle wraps every db error in:
+    //   new Error(`Failed query: ${sql}\nparams: ${...}`)
+    // and sets `.cause = pgError` carrying the actually-useful .code /
+    // .detail / .constraint. The wrapper hides the discriminator unless
+    // the error handler unwraps cause explicitly.
+    loggerErrorMock.mockReset();
+    const pgError = Object.assign(new Error('column "amount_usd_cents" does not exist'), {
+      code: '42703',
+      column: 'amount_usd_cents',
+      table: 'transactions',
+    });
+    const wrapped = new Error('Failed query: insert into transactions … returning id');
+    (wrapped as { cause?: unknown }).cause = pgError;
+
+    const { c } = makeContext();
+    errorHandler(wrapped, c);
+
+    expect(loggerErrorMock).toHaveBeenCalledTimes(1);
+    const [logCtx, logMsg] = loggerErrorMock.mock.calls[0]!;
+    expect(logMsg).toBe('API error (DB-layer)');
+    expect(logCtx).toMatchObject({
+      pg: {
+        pgCode: '42703',
+        pgColumn: 'amount_usd_cents',
+        pgTable: 'transactions',
+      },
+    });
+  });
+
+  it('does NOT add a pg field for non-DB errors', () => {
+    loggerErrorMock.mockReset();
+    const { c } = makeContext();
+    errorHandler(new Error('regular service error'), c);
+    expect(loggerErrorMock).toHaveBeenCalledTimes(1);
+    const [logCtx, logMsg] = loggerErrorMock.mock.calls[0]!;
+    expect(logMsg).toBe('API error');
+    expect(logCtx).not.toHaveProperty('pg');
   });
 });
