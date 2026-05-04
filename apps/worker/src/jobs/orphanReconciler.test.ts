@@ -36,11 +36,26 @@ interface RecordedUpdate {
 }
 const recordedUpdates: RecordedUpdate[] = [];
 
+// FIFO queue of select results. The reconciler now does two distinct
+// transactions selects per sweep: the original 'queued' scan, then the
+// 'submitting' scan added for stranded-rows recovery. Tests push one or
+// both result sets; an empty fallback covers the second call when the
+// test only cares about the first. The counter lives at module scope so
+// beforeEach can reset it between tests.
+const submittingSelectResults: Array<Array<Record<string, unknown>>> = [];
+const selectCallCount = { current: 0 };
+
 vi.mock('@railforge/db', () => {
   const select = vi.fn(() => ({
     from: vi.fn(() => ({
       where: vi.fn(() => ({
-        limit: vi.fn(async () => staleSelectResults.current),
+        limit: vi.fn(async () => {
+          selectCallCount.current += 1;
+          // First call per sweep = the 'queued' scan (existing behavior).
+          // Second call = the 'submitting' scan (new, defaults to []).
+          if (selectCallCount.current === 1) return staleSelectResults.current;
+          return submittingSelectResults.shift() ?? [];
+        }),
       })),
     })),
   }));
@@ -105,6 +120,8 @@ let processOrphanReconcileSweep: typeof import('./orphanReconciler.ts').processO
 beforeEach(async () => {
   vi.resetModules();
   staleSelectResults.current = [];
+  submittingSelectResults.length = 0;
+  selectCallCount.current = 0;
   transactionsClaimQueue.length = 0;
   accountsDeleteQueue.length = 0;
   recordedUpdates.length = 0;
@@ -124,6 +141,7 @@ describe('processOrphanReconcileSweep', () => {
       orphanedCount: 0,
       accountsSoftDeleted: 0,
       hsmOrphansSoftDeleted: 0,
+      submittingOrphanedCount: 0,
     });
     // HIGH-09: the HSM pre-funding sweep runs unconditionally at the end.
     // With no matching rows it still records one accounts UPDATE.
@@ -142,6 +160,7 @@ describe('processOrphanReconcileSweep', () => {
       orphanedCount: 1,
       accountsSoftDeleted: 1,
       hsmOrphansSoftDeleted: 0,
+      submittingOrphanedCount: 0,
     });
 
     // Three updates: transactions (mark failed), accounts (soft-delete),
@@ -174,6 +193,7 @@ describe('processOrphanReconcileSweep', () => {
       orphanedCount: 1,
       accountsSoftDeleted: 0,
       hsmOrphansSoftDeleted: 0,
+      submittingOrphanedCount: 0,
     });
     // Both per-orphan UPDATEs + the HIGH-09 HSM pre-funding sweep = 3.
     expect(recordedUpdates).toHaveLength(3);
@@ -196,6 +216,7 @@ describe('processOrphanReconcileSweep', () => {
       orphanedCount: 1,
       accountsSoftDeleted: 1,
       hsmOrphansSoftDeleted: 0,
+      submittingOrphanedCount: 0,
     });
     // Updates recorded: tx-3 claim attempt (returned []), tx-4 claim
     // (returned id), accounts soft-delete (returned id), + the HIGH-09
@@ -219,6 +240,7 @@ describe('processOrphanReconcileSweep', () => {
       orphanedCount: 3,
       accountsSoftDeleted: 2,
       hsmOrphansSoftDeleted: 0,
+      submittingOrphanedCount: 0,
     });
     // 3 transactions UPDATEs + 3 per-orphan accounts UPDATEs + 1 HSM
     // pre-funding sweep at the end.
@@ -235,6 +257,7 @@ describe('processOrphanReconcileSweep', () => {
       orphanedCount: 0,
       accountsSoftDeleted: 0,
       hsmOrphansSoftDeleted: 0,
+      submittingOrphanedCount: 0,
     });
   });
 
@@ -254,9 +277,54 @@ describe('processOrphanReconcileSweep', () => {
       orphanedCount: 0,
       accountsSoftDeleted: 0,
       hsmOrphansSoftDeleted: 1,
+      submittingOrphanedCount: 0,
     });
     expect(recordedUpdates).toHaveLength(1);
     expect(recordedUpdates[0]?.table).toBe('accounts');
     expect(recordedUpdates[0]?.set).toHaveProperty('deletedAt');
+  });
+
+  it('marks a stranded-submitting tx failed past the submitting grace window', async () => {
+    // Closes the gap left by HIGH-08's claim-once gate: a tx claimed
+    // (queued → submitting) but never submitted is stranded forever
+    // because BullMQ retries refuse to re-claim non-'queued' rows. The
+    // sweep finds it past SUBMITTING_GRACE_PERIOD_MS and marks it
+    // failed so a fresh idempotency-keyed retry can take over.
+    staleSelectResults.current = []; // No 'queued' orphans.
+    submittingSelectResults.push([
+      { id: 'tx-stranded', txType: 'SignerListSet', sourceAddress: 'rParent' },
+    ]);
+    transactionsClaimQueue.push([{ id: 'tx-stranded' }]);
+
+    const result = await processOrphanReconcileSweep();
+
+    expect(result).toEqual({
+      orphanedCount: 0,
+      accountsSoftDeleted: 0,
+      hsmOrphansSoftDeleted: 0,
+      submittingOrphanedCount: 1,
+    });
+    // The HSM accounts UPDATE always runs unconditionally + the
+    // stranded-submitting transactions UPDATE = 2 total.
+    expect(recordedUpdates).toHaveLength(2);
+    const txUpdate = recordedUpdates.find((u) => u.table === 'transactions');
+    expect(txUpdate?.set).toMatchObject({
+      status: 'failed',
+      resultCode: 'STRANDED_SUBMITTING',
+    });
+    expect(txUpdate?.set.errorMessage).toMatch(/never reached rippled/i);
+  });
+
+  it('skips a stranded-submitting row when the claim returns zero (concurrent sweep won)', async () => {
+    staleSelectResults.current = [];
+    submittingSelectResults.push([{ id: 'tx-stranded', txType: 'Payment', sourceAddress: 'rA' }]);
+    transactionsClaimQueue.push([]); // Lost the claim race.
+
+    const result = await processOrphanReconcileSweep();
+
+    expect(result.submittingOrphanedCount).toBe(0);
+    // One transactions UPDATE (the claim attempt that returned []) +
+    // the unconditional HSM accounts UPDATE.
+    expect(recordedUpdates).toHaveLength(2);
   });
 });

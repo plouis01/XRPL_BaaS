@@ -41,6 +41,19 @@ const ORPHAN_RECONCILER_QUEUE = 'railforge-orphan-reconciler';
 // wondering why their tx is still pending for hours.
 const GRACE_PERIOD_MS = 10 * 60 * 1000;
 
+// Rows in 'submitting' state older than this are eligible for orphan
+// cleanup. The HIGH-08 claim-once gate (txSubmitter.ts) flips the row
+// queued → submitting before any external call. If the submitter then
+// crashes mid-call (Redis blip in sequencer, transient pool error,
+// process kill), the row is stranded — the gate refuses to re-claim
+// non-'queued' rows, so BullMQ retries no-op and the row never
+// progresses. Fix-0 wraps the sequencer call in markFailed, which
+// closes the most common path; this sweep is the safety net for
+// every other path that could be added later. Longer than the
+// 'queued' grace because a normal submit→confirm cycle can legitimately
+// sit in 'submitting' for up to ~15s under load.
+const SUBMITTING_GRACE_PERIOD_MS = 30 * 60 * 1000;
+
 // Cap each sweep so a backlog can't tie up the worker concurrency slot
 // for an unbounded duration. If there's more than this in one sweep,
 // the next scheduled run picks up the rest.
@@ -64,6 +77,14 @@ export interface OrphanReconcileResult {
    * so fundingTxId is NULL and the tx-based sweep can't reach them).
    */
   hsmOrphansSoftDeleted: number;
+  /**
+   * Count of `transactions` rows stranded in 'submitting' past
+   * SUBMITTING_GRACE_PERIOD_MS that this sweep marked 'failed'. Closes
+   * the gap left by the HIGH-08 claim-once gate (txSubmitter.ts):
+   * BullMQ retries refuse to re-claim non-'queued' rows, so a crash
+   * mid-submit would otherwise strand the row indefinitely.
+   */
+  submittingOrphanedCount: number;
 }
 
 /**
@@ -194,16 +215,77 @@ export async function processOrphanReconcileSweep(
     );
   }
 
+  // Stranded-'submitting' sweep. The HIGH-08 claim-once gate flips a
+  // tx 'queued' → 'submitting' before any external call. Most failure
+  // paths from there call markFailed (fix-0 closed the
+  // getNextSequence gap). This sweep is the safety net for any future
+  // gap or for a hard process kill between the claim and the first
+  // external call. We use a longer grace than the 'queued' sweep
+  // because a normal submit→confirm cycle can sit in 'submitting' for
+  // ~10s under load, and we don't want to race a slow-but-progressing
+  // submission. The same per-row claim guard prevents double-marks
+  // under concurrent sweeps.
+  const submittingCutoff = new Date(Date.now() - SUBMITTING_GRACE_PERIOD_MS);
+  const stuckSubmitting = await db
+    .select({
+      id: schema.transactions.id,
+      txType: schema.transactions.txType,
+      sourceAddress: schema.transactions.sourceAddress,
+    })
+    .from(schema.transactions)
+    .where(
+      and(
+        eq(schema.transactions.status, 'submitting'),
+        lt(schema.transactions.createdAt, submittingCutoff),
+      ),
+    )
+    .limit(BATCH_SIZE);
+
+  let submittingOrphanedCount = 0;
+  for (const row of stuckSubmitting) {
+    const claim = await db
+      .update(schema.transactions)
+      .set({
+        status: 'failed',
+        resultCode: 'STRANDED_SUBMITTING',
+        errorMessage:
+          'Transaction was claimed by the submitter but never reached rippled — likely a worker crash between claim and submit. Retry with a new idempotency key.',
+        submittedAt: new Date(),
+      })
+      .where(and(eq(schema.transactions.id, row.id), eq(schema.transactions.status, 'submitting')))
+      .returning({ id: schema.transactions.id });
+    if (claim.length === 0) {
+      log.debug({ txId: row.id }, 'stranded-submitting claim lost race, skipping');
+      continue;
+    }
+    submittingOrphanedCount++;
+    log.warn(
+      {
+        txId: row.id,
+        txType: row.txType,
+        sourceAddress: row.sourceAddress,
+      },
+      'stranded-submitting transaction marked failed',
+    );
+  }
+
   log.info(
     {
       orphanedCount,
       accountsSoftDeleted,
       hsmOrphansSoftDeleted,
+      submittingOrphanedCount,
       scannedCount: stale.length,
+      scannedSubmittingCount: stuckSubmitting.length,
     },
     'orphan reconciliation sweep complete',
   );
-  return { orphanedCount, accountsSoftDeleted, hsmOrphansSoftDeleted };
+  return {
+    orphanedCount,
+    accountsSoftDeleted,
+    hsmOrphansSoftDeleted,
+    submittingOrphanedCount,
+  };
 }
 
 /**
