@@ -232,14 +232,24 @@ describe('buildSignerListSet', () => {
     ).toThrow(/>= 0/);
   });
 
-  it('accepts quorum=0 + empty entries (signer list delete)', () => {
+  it('quorum=0 + empty entries OMITS SignerEntries entirely (signer list delete)', () => {
+    // Per the XRPL spec, deleting a signer list requires SignerQuorum=0
+    // AND no SignerEntries field. Sending SignerEntries: [] yields
+    // temMALFORMED at rippled before the tx reaches a ledger — which
+    // bit revokePermission for any agent that was the parent's last
+    // remaining delegate. The fix omits the field; this test guards
+    // against the regression by asserting the property is absent
+    // (NOT empty array).
     const tx = buildSignerListSet({
       account: ACCOUNT_A,
       signerQuorum: 0,
       signerEntries: [],
     });
     expect(tx.SignerQuorum).toBe(0);
-    expect(tx.SignerEntries).toEqual([]);
+    expect(tx).not.toHaveProperty('SignerEntries');
+    // Encode round-trip confirms the wire format also omits it.
+    const rt = roundTrip(tx);
+    expect(rt).not.toHaveProperty('SignerEntries');
   });
 });
 

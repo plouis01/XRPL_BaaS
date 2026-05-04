@@ -156,6 +156,24 @@ export function buildSignerListSet(input: BuildSignerListSetInput): SignerListSe
     throw new Error(`SignerQuorum must be >= 0, got ${input.signerQuorum}`);
   }
 
+  // Delete-signer-list path: per the XRPL spec
+  // (https://xrpl.org/signerlistset.html), to remove a signer list the tx
+  // must carry `SignerQuorum: 0` AND OMIT `SignerEntries` entirely. Sending
+  // `SignerEntries: []` is `temMALFORMED` and rippled rejects locally
+  // before the tx ever reaches a ledger. This bites every revokePermission
+  // call that strips the parent's last remaining delegate — the symptom
+  // is a SignerListSet stuck in 'submitting' / 'submitted' with engine
+  // result temMALFORMED and an agent stuck in `pending_revocation=true`
+  // because applyDelegationRevocationOutcome only flips state on a
+  // validated terminal outcome.
+  if (input.signerQuorum === 0 && input.signerEntries.length === 0) {
+    return {
+      TransactionType: 'SignerListSet',
+      Account: input.account,
+      SignerQuorum: 0,
+    } as SignerListSet;
+  }
+
   const entries: SignerEntry[] = input.signerEntries.map((e) => ({
     SignerEntry: {
       Account: e.address,
@@ -163,8 +181,6 @@ export function buildSignerListSet(input: BuildSignerListSetInput): SignerListSe
     },
   }));
 
-  // SignerQuorum = 0 + empty entries = delete the signer list.
-  // Any other combination sets/updates it.
   const tx: SignerListSet = {
     TransactionType: 'SignerListSet',
     Account: input.account,
