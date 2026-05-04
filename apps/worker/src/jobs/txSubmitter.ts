@@ -121,9 +121,21 @@ export async function processTxSubmitJob(job: Job<TxSubmitJobData>): Promise<voi
     return;
   }
 
-  // 4. Fetch the next Sequence. Throws SequenceLockTimeout on contention —
-  // we let that propagate so BullMQ retries with backoff.
-  const sequence = await sequencer.getNextSequence(sourceAddress);
+  // 4. Fetch the next Sequence. Wrapped in markFailed because anything
+  // that throws here would otherwise leave the row in 'submitting'
+  // forever — the claim-once gate above refuses to re-claim non-'queued'
+  // rows on retry, and the orphan reconciler (today) only sweeps
+  // 'queued'. Common throws: SequenceLockTimeout (Redis contention),
+  // pool errors fetching `account_info` for the seed value, transient
+  // rippled disconnects propagated through the shared XRPL client.
+  let sequence: number;
+  try {
+    sequence = await sequencer.getNextSequence(sourceAddress);
+  } catch (err) {
+    log.error({ err }, 'getNextSequence failed before submit');
+    await markFailed(txId, 'SEQUENCER_ERROR', 'Failed to acquire sequence number');
+    throw err; // let BullMQ retry — on retry, claim-once gate sees 'failed', no-ops cleanly
+  }
 
   // 5. Fetch current ledger_index and set LastLedgerSequence.
   //

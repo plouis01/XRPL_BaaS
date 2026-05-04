@@ -338,6 +338,31 @@ describe('processTxSubmitJob', () => {
     expect(update.resultCode).toBe('tecUNFUNDED_PAYMENT');
   });
 
+  it('getNextSequence failure: marks tx failed before BullMQ retry (no stuck submitting row)', async () => {
+    // The previous code let getNextSequence throws propagate without
+    // markFailed — leaving status='submitting' forever. The claim-once
+    // gate then refused to re-claim on retry, stranding the row.
+    // Regression guard for the fix in txSubmitter.ts that wraps the
+    // sequencer call in markFailed.
+    stubs.sequencerNext.mockRejectedValue(new Error('SequenceLockTimeout'));
+
+    await expect(processTxSubmitJob(makeJob(baseJobData()))).rejects.toThrow(/SequenceLockTimeout/);
+
+    // Sequence cache wasn't advanced (the throw happened mid-fetch).
+    expect(stubs.sequencerInvalidate).not.toHaveBeenCalled();
+
+    // ledger_current was never reached — submit path never started.
+    const ledgerCall = stubs.clientRequest.mock.calls.find(
+      (c) => c[0].command === 'ledger_current',
+    );
+    expect(ledgerCall).toBeUndefined();
+
+    // DB row marked failed with SEQUENCER_ERROR so retries no-op cleanly.
+    const update = dbUpdateCalls[0]!.set as Record<string, unknown>;
+    expect(update.status).toBe('failed');
+    expect(update.resultCode).toBe('SEQUENCER_ERROR');
+  });
+
   it('ledger_current failure: invalidates sequencer (rolls back consumed seq) and rethrows', async () => {
     // ledger_current is fetched AFTER getNextSequence, so a failure here
     // means the cache has been advanced but no tx will be sent. Without
