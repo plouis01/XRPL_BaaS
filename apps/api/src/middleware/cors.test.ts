@@ -45,6 +45,38 @@ describe('CORS middleware', () => {
     await expect(import('./cors.ts')).rejects.toThrow('DASHBOARD_ORIGIN must be set in production');
   });
 
+  it('echoes the matching origin when DASHBOARD_ORIGIN is a comma-separated list', async () => {
+    process.env.DASHBOARD_ORIGIN =
+      'https://dashboard.railforge.dev, https://railforge-dashboard.pages.dev';
+    process.env.NODE_ENV = 'test';
+    const { corsMiddleware } = await import('./cors.ts');
+    const app = new Hono();
+    app.use('*', corsMiddleware);
+    app.get('/test', (c) => c.json({ ok: true }));
+
+    for (const origin of [
+      'https://dashboard.railforge.dev',
+      'https://railforge-dashboard.pages.dev',
+    ]) {
+      const res = await app.request('/test', { headers: { Origin: origin } });
+      expect(res.headers.get('access-control-allow-origin')).toBe(origin);
+    }
+  });
+
+  it('rejects an origin not in the DASHBOARD_ORIGIN list', async () => {
+    process.env.DASHBOARD_ORIGIN = 'https://dashboard.railforge.dev';
+    process.env.NODE_ENV = 'test';
+    const { corsMiddleware } = await import('./cors.ts');
+    const app = new Hono();
+    app.use('*', corsMiddleware);
+    app.get('/test', (c) => c.json({ ok: true }));
+
+    const res = await app.request('/test', {
+      headers: { Origin: 'https://evil.example.com' },
+    });
+    expect(res.headers.get('access-control-allow-origin')).toBeNull();
+  });
+
   it('responds to OPTIONS preflight with allowed methods', async () => {
     process.env.DASHBOARD_ORIGIN = 'https://dash.test';
     process.env.NODE_ENV = 'test';
