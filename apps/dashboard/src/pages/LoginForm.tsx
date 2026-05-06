@@ -1,10 +1,15 @@
 import { useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { ApiError, login, signup } from '../api.ts';
 
 type Mode = 'signin' | 'signup';
 
 export function LoginForm({ onLoggedIn }: { onLoggedIn: () => void }) {
-  const [mode, setMode] = useState<Mode>('signin');
+  // Honor `?mode=signup` so the Landing page CTA can deep-link straight
+  // into the create-account form. Anything else falls back to sign-in.
+  const [searchParams] = useSearchParams();
+  const initialMode: Mode = searchParams.get('mode') === 'signup' ? 'signup' : 'signin';
+  const [mode, setMode] = useState<Mode>(initialMode);
   const [apiKey, setApiKey] = useState('');
   const [email, setEmail] = useState('');
   const [name, setName] = useState('');
