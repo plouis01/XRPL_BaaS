@@ -5,7 +5,9 @@ import { Agents } from './pages/Agents.tsx';
 import { ApiKeys } from './pages/ApiKeys.tsx';
 import { Credentials } from './pages/Credentials.tsx';
 import { Domains } from './pages/Domains.tsx';
+import { Landing } from './pages/Landing.tsx';
 import { LoginForm } from './pages/LoginForm.tsx';
+import { QuickStart } from './pages/QuickStart.tsx';
 import { Tokens } from './pages/Tokens.tsx';
 import { Transactions } from './pages/Transactions.tsx';
 import type { Network } from './types.ts';
@@ -60,7 +62,18 @@ export function App() {
   }
 
   if (authState === 'anon') {
-    return <LoginForm onLoggedIn={() => setAuthState('authed')} />;
+    // Anon flow has its own router so a visitor can land on `/`
+    // (Landing) and click through to `/login` without the authed
+    // sidebar mounting. Any other path bounces back to the landing.
+    return (
+      <BrowserRouter>
+        <Routes>
+          <Route path="/" element={<Landing />} />
+          <Route path="/login" element={<LoginForm onLoggedIn={() => setAuthState('authed')} />} />
+          <Route path="*" element={<Navigate to="/" replace />} />
+        </Routes>
+      </BrowserRouter>
+    );
   }
 
   return (
@@ -113,6 +126,18 @@ export function App() {
           </div>
 
           <ul style={{ listStyle: 'none', padding: 0, margin: 0, flex: 1 }}>
+            <li style={{ marginBottom: 8 }}>
+              <NavLink
+                to="/quickstart"
+                style={({ isActive }) => ({
+                  textDecoration: 'none',
+                  color: isActive ? '#2563eb' : '#334155',
+                  fontWeight: isActive ? 600 : 400,
+                })}
+              >
+                Quick start
+              </NavLink>
+            </li>
             <li style={{ marginBottom: 8 }}>
               <NavLink
                 to="/keys"
@@ -227,13 +252,16 @@ export function App() {
 
         <main style={{ flex: 1, padding: 32 }}>
           <Routes>
+            <Route path="/quickstart" element={<QuickStart network={network} />} />
             <Route path="/keys" element={<ApiKeys network={network} />} />
             <Route path="/transactions" element={<Transactions network={network} />} />
             <Route path="/tokens" element={<Tokens network={network} />} />
             <Route path="/credentials" element={<Credentials network={network} />} />
             <Route path="/domains" element={<Domains network={network} />} />
             <Route path="/agents" element={<Agents network={network} />} />
-            <Route path="*" element={<Navigate to="/keys" replace />} />
+            {/* Default to /quickstart so a freshly-signed-up developer
+                lands on actionable first-tx steps, not an empty key list. */}
+            <Route path="*" element={<Navigate to="/quickstart" replace />} />
           </Routes>
         </main>
       </div>
