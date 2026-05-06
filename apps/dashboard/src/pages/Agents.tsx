@@ -118,6 +118,14 @@ export function Agents({ network }: { network: Network }) {
   const [seedToShowOnce, setSeedToShowOnce] = useState<{
     seed: string;
     agentId: string;
+    /**
+     * Scope-bound API key auto-minted right after provision so the user
+     * doesn't have to bounce through /keys for the common path. Optional:
+     * if the auto-mint call fails (network blip, race against agent
+     * status), the banner falls back to a "mint on API Keys" hint.
+     */
+    apiKey?: string;
+    apiKeyError?: string;
   } | null>(null);
   // Revoked agents are kept in the system for audit but cluttering the
   // active-management view doesn't help anyone. Hidden by default; the
@@ -230,8 +238,30 @@ export function Agents({ network }: { network: Network }) {
           network={network}
           onCreated={(seed, agentId) => {
             setShowCreate(false);
+            // Show the seed banner immediately, then auto-mint a scope-
+            // bound API key in the background and patch it into the
+            // banner state when it lands. We deliberately don't block the
+            // banner on the mint — the seed is the irrecoverable secret;
+            // the key can always be minted later on /keys if this fails.
             setSeedToShowOnce({ seed, agentId });
             void fetchAgents();
+            void (async () => {
+              try {
+                const minted = await api<{ key: string }>('/v1/dashboard/keys', {
+                  method: 'POST',
+                  body: { environment: network, agent_id: agentId },
+                });
+                setSeedToShowOnce((prev) =>
+                  prev && prev.agentId === agentId ? { ...prev, apiKey: minted.key } : prev,
+                );
+              } catch (err) {
+                setSeedToShowOnce((prev) =>
+                  prev && prev.agentId === agentId
+                    ? { ...prev, apiKeyError: errorMessage(err) }
+                    : prev,
+                );
+              }
+            })();
           }}
         />
       )}
@@ -240,6 +270,8 @@ export function Agents({ network }: { network: Network }) {
         <SeedOnceBanner
           seed={seedToShowOnce.seed}
           agentId={seedToShowOnce.agentId}
+          apiKey={seedToShowOnce.apiKey}
+          apiKeyError={seedToShowOnce.apiKeyError}
           onDismiss={() => setSeedToShowOnce(null)}
         />
       )}
@@ -786,27 +818,41 @@ function Field({
   );
 }
 
-// Banner shown immediately after a successful POST /v1/agents. Surfaces the
-// `agent_seed` ONCE — there is no recovery path. Dismissing clears it from
-// React state so a hot reload or back-nav doesn't leak it.
+// Banner shown immediately after a successful POST /v1/agents. Surfaces
+// two one-shot secrets:
+//
+//   1. The scope-bound API key, auto-minted right after provision. This
+//      is what most users actually paste into their agent code — the
+//      common path doesn't require ever touching the seed.
+//   2. The XRPL delegate seed, returned by /v1/agents itself. Optional:
+//      only needed for non-custodial signing flows. Power users keep it.
+//
+// Dismissing clears both from React state so a hot reload or back-nav
+// doesn't leak them. There is no recovery path for the seed; the API
+// key can be re-minted from the API Keys page if lost.
 function SeedOnceBanner({
   seed,
   agentId,
+  apiKey,
+  apiKeyError,
   onDismiss,
 }: {
   seed: string;
   agentId: string;
+  apiKey?: string;
+  apiKeyError?: string;
   onDismiss: () => void;
 }) {
-  const [copied, setCopied] = useState(false);
-  const copy = async () => {
+  const [seedCopied, setSeedCopied] = useState(false);
+  const [keyCopied, setKeyCopied] = useState(false);
+  const copy = async (text: string, setter: (v: boolean) => void): Promise<void> => {
     try {
-      await navigator.clipboard.writeText(seed);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1500);
+      await navigator.clipboard.writeText(text);
+      setter(true);
+      setTimeout(() => setter(false), 1500);
     } catch {
       // clipboard API can fail in non-secure contexts; user can still
-      // select the seed text manually.
+      // select the text manually.
     }
   };
   return (
@@ -819,58 +865,129 @@ function SeedOnceBanner({
         borderRadius: 6,
       }}
     >
-      <div style={{ fontWeight: 600, marginBottom: 8, color: '#92400e' }}>
-        Agent provisioned, copy the seed now (shown only once)
+      <div style={{ fontWeight: 600, marginBottom: 4, color: '#92400e' }}>
+        Agent provisioned. Copy the secrets below, shown only once.
       </div>
-      <div style={{ fontSize: 12, color: '#92400e', marginBottom: 8 }}>
-        Agent <code>{agentId}</code>. Save the seed in your agent runtime or password manager.
-        RailForge can't display it again.
+      <div style={{ fontSize: 12, color: '#92400e', marginBottom: 12 }}>
+        Agent <code>{agentId}</code>.
       </div>
-      <div
+
+      {/* API key — primary block. Most users only need this. */}
+      <div style={{ marginBottom: 12 }}>
+        <div
+          style={{
+            fontSize: 12,
+            color: '#92400e',
+            marginBottom: 4,
+            fontWeight: 600,
+          }}
+        >
+          Scope-bound API key, paste into your agent's environment
+        </div>
+        {apiKey ? (
+          <div
+            style={{
+              display: 'flex',
+              gap: 8,
+              alignItems: 'center',
+              padding: '8px 12px',
+              background: '#fef3c7',
+              borderRadius: 4,
+              fontFamily: 'monospace',
+              fontSize: 13,
+              wordBreak: 'break-all',
+            }}
+          >
+            <span style={{ flex: 1 }}>{apiKey}</span>
+            <button
+              type="button"
+              onClick={() => void copy(apiKey, setKeyCopied)}
+              style={{
+                padding: '4px 10px',
+                background: '#d97706',
+                color: '#fff',
+                border: 'none',
+                borderRadius: 4,
+                cursor: 'pointer',
+                fontSize: 12,
+              }}
+            >
+              {keyCopied ? 'Copied!' : 'Copy'}
+            </button>
+          </div>
+        ) : apiKeyError ? (
+          <div style={{ fontSize: 12, color: '#92400e' }}>
+            Auto-mint failed: {apiKeyError}. You can mint one manually on the API Keys page (pick
+            this agent in the Bind-to-agent dropdown).
+          </div>
+        ) : (
+          <div style={{ fontSize: 12, color: '#92400e', fontStyle: 'italic' }}>Minting key…</div>
+        )}
+      </div>
+
+      {/* Seed — secondary block. Only relevant for non-custodial signing. */}
+      <details style={{ marginBottom: 12 }}>
+        <summary
+          style={{
+            cursor: 'pointer',
+            fontSize: 12,
+            color: '#92400e',
+            fontWeight: 600,
+          }}
+        >
+          XRPL delegate seed (advanced: non-custodial signing)
+        </summary>
+        <div style={{ fontSize: 11, color: '#92400e', margin: '6px 0' }}>
+          Only needed if you'll sign agent transactions yourself rather than through RailForge. Save
+          it in a password manager, there's no recovery path.
+        </div>
+        <div
+          style={{
+            display: 'flex',
+            gap: 8,
+            alignItems: 'center',
+            padding: '8px 12px',
+            background: '#fef3c7',
+            borderRadius: 4,
+            fontFamily: 'monospace',
+            fontSize: 13,
+            wordBreak: 'break-all',
+          }}
+        >
+          <span style={{ flex: 1 }}>{seed}</span>
+          <button
+            type="button"
+            onClick={() => void copy(seed, setSeedCopied)}
+            style={{
+              padding: '4px 10px',
+              background: '#d97706',
+              color: '#fff',
+              border: 'none',
+              borderRadius: 4,
+              cursor: 'pointer',
+              fontSize: 12,
+            }}
+          >
+            {seedCopied ? 'Copied!' : 'Copy'}
+          </button>
+        </div>
+      </details>
+
+      <button
+        type="button"
+        onClick={onDismiss}
         style={{
-          display: 'flex',
-          gap: 8,
-          alignItems: 'center',
-          padding: '8px 12px',
-          background: '#fef3c7',
+          padding: '4px 12px',
+          background: 'transparent',
+          color: '#92400e',
+          border: '1px solid #d97706',
           borderRadius: 4,
-          fontFamily: 'monospace',
-          fontSize: 13,
-          wordBreak: 'break-all',
+          cursor: 'pointer',
+          fontSize: 12,
         }}
       >
-        <span style={{ flex: 1 }}>{seed}</span>
-        <button
-          type="button"
-          onClick={() => void copy()}
-          style={{
-            padding: '4px 10px',
-            background: '#d97706',
-            color: '#fff',
-            border: 'none',
-            borderRadius: 4,
-            cursor: 'pointer',
-            fontSize: 12,
-          }}
-        >
-          {copied ? 'Copied!' : 'Copy'}
-        </button>
-        <button
-          type="button"
-          onClick={onDismiss}
-          style={{
-            padding: '4px 10px',
-            background: 'transparent',
-            color: '#92400e',
-            border: '1px solid #d97706',
-            borderRadius: 4,
-            cursor: 'pointer',
-            fontSize: 12,
-          }}
-        >
-          Dismiss
-        </button>
-      </div>
+        Dismiss
+      </button>
     </div>
   );
 }
@@ -1399,8 +1516,8 @@ function SpendCapEditor({
       </div>
       <div style={{ fontSize: 11, color: '#94a3b8' }}>
         Caps are USD-denominated. XRP txs convert via the live CoinGecko rate (60s cache); RLUSD =
-        $1 (no oracle round-trip). Changes apply immediately — lowering the daily cap below today's
-        already- spent amount locks the client out until the 24h window rolls over.
+        $1 (no oracle round-trip). Changes apply immediately, lowering the daily cap below today's
+        already-spent amount locks the client out until the 24h window rolls over.
       </div>
       {error && <div style={{ fontSize: 12, color: '#991b1b' }}>{error}</div>}
       <div style={{ display: 'flex', gap: 8 }}>
@@ -1496,7 +1613,7 @@ function AgentTxHistory({
         <span style={{ fontSize: 12, color: '#94a3b8' }}>Loading…</span>
       ) : rows.length === 0 ? (
         <span style={{ fontSize: 12, color: '#94a3b8' }}>
-          No transactions yet — this agent hasn't submitted any payments.
+          No transactions yet, this agent hasn't submitted any payments.
         </span>
       ) : (
         <table style={{ width: '100%', borderCollapse: 'collapse' }}>

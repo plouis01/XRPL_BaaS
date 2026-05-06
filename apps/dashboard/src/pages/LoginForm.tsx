@@ -227,7 +227,7 @@ export function LoginForm({ onLoggedIn }: { onLoggedIn: () => void }) {
                 marginBottom: 6,
               }}
             >
-              <span style={{ fontWeight: 600 }}>API key (shown once — copy it now):</span>
+              <span style={{ fontWeight: 600 }}>API key (shown once, copy it now):</span>
               <button
                 type="button"
                 onClick={() => void copyKey()}

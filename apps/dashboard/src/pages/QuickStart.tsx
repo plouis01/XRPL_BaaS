@@ -1,88 +1,117 @@
 // Authed quick-start page. The first thing a freshly-signed-up developer
-// should land on after creating an API key. Walks through three concrete
-// curl steps (account → payment → webhook) so they ship a tx before
-// closing the tab.
+// should land on after creating their first key.
 //
-// We deliberately tell the user to mint the key themselves on the API
-// Keys page rather than echoing one back here — minted keys are shown
-// once, and showing a key on a route that anyone can navigate back to
-// would invite "wait, where did I leave that key open" leaks.
+// The shape of the realistic onboarding flow drives this page:
+//   - Step 1 (curl): create the parent account once. The dashboard
+//     doesn't yet have an account-creation UI, so this stays curl.
+//   - Step 2 (dashboard): provision the agent. The Agents page now
+//     auto-mints a scope-bound API key as part of the New-agent flow
+//     and surfaces it in the one-time success banner — no separate
+//     trip to /keys required for the common case.
+//   - Step 3 (curl): the tx the agent itself runs. This is the snippet
+//     the developer pastes into their agent code — the only curl that
+//     survives past onboarding.
+//   - Step 4 (curl): backend webhook subscription, also developer code.
+//
+// A collapsible "Provisioning agents from code" section preserves the
+// fully-scripted flow for multi-tenant platforms that mint an agent
+// per end-user — that's a real audience but a narrower one.
 
 import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import type { Network } from '../types.ts';
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? 'http://localhost:3000';
+const DOCS_URL = 'http://localhost:4321';
 
 export function QuickStart({ network }: { network: Network }) {
   return (
     <div style={{ maxWidth: 760 }}>
       <h1 style={{ margin: '0 0 8px', fontSize: 24 }}>Quick start</h1>
       <p style={{ margin: '0 0 32px', color: '#475569', fontSize: 14 }}>
-        Three curl commands and you've created an XRPL account, sent a payment, and seen a signed
-        webhook.{' '}
+        Four steps to put an autonomous payment agent on XRPL. One click in this dashboard, three
+        short shell snippets, most for the agent's own code, not yours.{' '}
         {network === 'testnet'
-          ? 'Testnet only.'
-          : 'Mainnet version.'}
+          ? 'Testnet only, no real value moves.'
+          : 'Mainnet, real funds will move.'}
       </p>
 
       <Step
         n={1}
-        title="Mint an API key"
+        title="Create the parent account"
+        kind="shell"
         body={
           <>
             <p style={{ margin: '0 0 12px', color: '#475569', fontSize: 14 }}>
-              Head to{' '}
-              <Link to="/keys" style={{ color: '#2563eb' }}>
-                API Keys
-              </Link>{' '}
-              and click <em>Create key</em>. Copy the raw key — <code style={code}>rf_test_…</code>{' '}
-              — and export it as a shell variable. The dashboard cannot show it again.
-            </p>
-            <Snippet text={'export RF_KEY=rf_test_paste_your_key_here'} />
-          </>
-        }
-      />
-
-      <Step
-        n={2}
-        title="Create your first XRPL account"
-        body={
-          <>
-            <p style={{ margin: '0 0 12px', color: '#475569', fontSize: 14 }}>
-              RailForge generates a wallet, holds the master key in HSM, and funds it from the
-              testnet faucet. The response includes the XRPL classic address.
+              The parent account holds the funds the agent will spend from. The master key sits in
+              the HSM; the testnet faucet funds it. Save the returned classic address, the dashboard
+              reads it on the next step.
             </p>
             <Snippet
-              text={`curl -X POST ${API_BASE}/v1/accounts \\
+              text={`# Mint a tenant key on the API Keys page first, then:
+export RF_KEY=rf_${network === 'mainnet' ? 'live' : 'test'}_paste_your_tenant_key
+
+curl -X POST ${API_BASE}/v1/accounts \\
   -H "X-API-Key: $RF_KEY" \\
   -H "Idempotency-Key: $(uuidgen)" \\
   -H "Content-Type: application/json" \\
-  -d '{"label":"my-first-account"}'`}
+  -d '{"label":"agent-parent"}'`}
             />
           </>
         }
       />
 
       <Step
-        n={3}
-        title="Send a payment"
+        n={2}
+        title="Provision the agent"
+        kind="dashboard"
         body={
           <>
             <p style={{ margin: '0 0 12px', color: '#475569', fontSize: 14 }}>
-              Submit drops (1 XRP = 1,000,000 drops) from one funded account to any classic address.
-              The response gives you a tx id; status flips to <code style={code}>confirmed</code>{' '}
-              after the next ledger close.
+              On the{' '}
+              <Link to="/agents" style={{ color: '#2563eb' }}>
+                Agents
+              </Link>{' '}
+              page, click <strong>New agent</strong>. Pick the{' '}
+              <code style={code}>payment-agent</code> preset, set the parent address from step 1,
+              set a daily spend cap, and add destination addresses to the allowlist. Those
+              constraints are enforced server-side <em>before</em> the tx is built, no
+              prompt-injected agent can override them.
+            </p>
+            <p style={{ margin: '0 0 12px', color: '#475569', fontSize: 14 }}>
+              On success the dashboard shows a one-time banner with the agent's{' '}
+              <strong>scope-bound API key</strong> already minted. Copy it, that's what step 3
+              needs.
+            </p>
+            <DashboardCTA to="/agents" label="Open Agents →" />
+          </>
+        }
+      />
+
+      <Step
+        n={3}
+        title="Hand the key to your agent code"
+        kind="shell"
+        body={
+          <>
+            <p style={{ margin: '0 0 12px', color: '#475569', fontSize: 14 }}>
+              Paste the agent's key into your agent's environment. From here on the agent calls{' '}
+              <code style={code}>/v1/payments</code> directly. A non-allowlisted destination or an
+              over-cap amount comes back as <code style={code}>403</code> before the tx is ever
+              signed.
             </p>
             <Snippet
-              text={`curl -X POST ${API_BASE}/v1/payments \\
-  -H "X-API-Key: $RF_KEY" \\
+              text={`export RF_AGENT_KEY=rf_${network === 'mainnet' ? 'live' : 'test'}_paste_agent_key
+
+# What your agent's code does on each payment:
+curl -X POST ${API_BASE}/v1/payments \\
+  -H "X-API-Key: $RF_AGENT_KEY" \\
   -H "Idempotency-Key: $(uuidgen)" \\
   -H "Content-Type: application/json" \\
   -d '{
-    "from": "rYourSourceAddressFromStep2",
-    "to":   "rDestinationClassicAddress",
-    "amount": { "type": "xrp", "value_drops": "10000000" }
+    "from":   "rParentAddressFromStep1",
+    "to":     "rAllowlistedDestination",
+    "amount": { "type": "xrp", "value_drops": "1000000" }
   }'`}
             />
           </>
@@ -91,13 +120,13 @@ export function QuickStart({ network }: { network: Network }) {
 
       <Step
         n={4}
-        title="Listen for webhooks"
+        title="Subscribe your backend to webhooks"
+        kind="shell"
         body={
           <>
             <p style={{ margin: '0 0 12px', color: '#475569', fontSize: 14 }}>
-              Register a webhook endpoint and RailForge pushes signed events on every validated tx.
-              Verify the
-              <code style={code}>X-RailForge-Signature</code> header by HMAC-SHA256 over{' '}
+              Register a webhook so your backend gets notified when the agent's tx settles. Verify
+              the <code style={code}>X-RailForge-Signature</code> header by HMAC-SHA256 over{' '}
               <code style={code}>timestamp + "." + body</code> using the endpoint secret returned at
               registration.
             </p>
@@ -114,6 +143,56 @@ export function QuickStart({ network }: { network: Network }) {
           </>
         }
       />
+
+      <details
+        style={{
+          marginTop: 8,
+          marginBottom: 32,
+          padding: 20,
+          background: '#fff',
+          border: '1px solid #e2e8f0',
+          borderRadius: 10,
+        }}
+      >
+        <summary
+          style={{
+            cursor: 'pointer',
+            fontSize: 14,
+            fontWeight: 600,
+            color: '#0f172a',
+          }}
+        >
+          Provisioning agents from code
+        </summary>
+        <p style={{ margin: '12px 0', color: '#475569', fontSize: 13 }}>
+          For multi-tenant platforms that mint a fresh agent per end-user, steps 2 and 3 are also
+          REST endpoints. The whole flow becomes one script:
+        </p>
+        <Snippet
+          text={`# 1. Provision the agent.
+curl -X POST ${API_BASE}/v1/agents \\
+  -H "X-API-Key: $RF_KEY" \\
+  -H "Idempotency-Key: $(uuidgen)" \\
+  -H "Content-Type: application/json" \\
+  -d '{
+    "preset": "payment-agent",
+    "parent_address": "'$PARENT'",
+    "label": "tenant-42-bot",
+    "spend_policy": { "daily_limit_usd_cents": "10000" },
+    "allowlist": [
+      { "entry_type": "destination", "entry_value": "'$DEST'" }
+    ]
+  }'
+
+# 2. Mint a scope-bound API key for the new agent.
+export AGENT_ID=ag_returned_id
+curl -X POST ${API_BASE}/v1/dashboard/keys \\
+  -H "X-API-Key: $RF_KEY" \\
+  -H "Idempotency-Key: $(uuidgen)" \\
+  -H "Content-Type: application/json" \\
+  -d '{"environment":"${network}","agent_id":"'$AGENT_ID'"}'`}
+        />
+      </details>
 
       <div
         style={{
@@ -135,6 +214,20 @@ export function QuickStart({ network }: { network: Network }) {
           }}
         >
           <li>
+            Manage agents →{' '}
+            <Link to="/agents" style={{ color: '#2563eb' }}>
+              Agents
+            </Link>{' '}
+            — edit allowlists, raise/lower spend caps, revoke on-chain
+          </li>
+          <li>
+            Audit agent activity →{' '}
+            <Link to="/transactions" style={{ color: '#2563eb' }}>
+              Transactions
+            </Link>{' '}
+            — every tx is tagged with the agent that signed it
+          </li>
+          <li>
             Issue a token →{' '}
             <Link to="/tokens" style={{ color: '#2563eb' }}>
               Tokens
@@ -149,16 +242,9 @@ export function QuickStart({ network }: { network: Network }) {
             (XLS-70, third-party issuer marketplace)
           </li>
           <li>
-            Spin up a payment agent →{' '}
-            <Link to="/agents" style={{ color: '#2563eb' }}>
-              Agents
-            </Link>{' '}
-            (delegated, scope-bound API keys)
-          </li>
-          <li>
             Full reference at{' '}
             <a
-              href="http://localhost:4321"
+              href={DOCS_URL}
               target="_blank"
               rel="noopener noreferrer"
               style={{ color: '#2563eb' }}
@@ -184,11 +270,20 @@ function Step({
   n,
   title,
   body,
+  kind,
 }: {
   n: number;
   title: string;
   body: React.ReactNode;
+  // `dashboard` steps are click-throughs (no curl). `shell` steps run on
+  // the developer's machine or the agent's runtime. The badge color makes
+  // the distinction obvious at a glance so a reader knows whether to
+  // click or open a terminal.
+  kind: 'dashboard' | 'shell';
 }) {
+  const badge = kind === 'dashboard' ? 'IN DASHBOARD' : 'IN YOUR SHELL';
+  const badgeBg = kind === 'dashboard' ? '#ecfdf5' : '#f1f5f9';
+  const badgeFg = kind === 'dashboard' ? '#065f46' : '#475569';
   return (
     <section style={{ marginBottom: 28 }}>
       <h2
@@ -198,6 +293,7 @@ function Step({
           display: 'flex',
           alignItems: 'center',
           gap: 10,
+          flexWrap: 'wrap',
         }}
       >
         <span
@@ -217,9 +313,42 @@ function Step({
           {n}
         </span>
         {title}
+        <span
+          style={{
+            fontSize: 10,
+            fontWeight: 600,
+            letterSpacing: 0.5,
+            background: badgeBg,
+            color: badgeFg,
+            padding: '2px 7px',
+            borderRadius: 4,
+          }}
+        >
+          {badge}
+        </span>
       </h2>
       <div style={{ marginLeft: 36 }}>{body}</div>
     </section>
+  );
+}
+
+function DashboardCTA({ to, label }: { to: string; label: string }) {
+  return (
+    <Link
+      to={to}
+      style={{
+        display: 'inline-block',
+        background: '#2563eb',
+        color: '#fff',
+        padding: '8px 14px',
+        borderRadius: 6,
+        textDecoration: 'none',
+        fontSize: 13,
+        fontWeight: 500,
+      }}
+    >
+      {label}
+    </Link>
   );
 }
 

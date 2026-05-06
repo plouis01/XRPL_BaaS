@@ -104,7 +104,7 @@ export function Landing() {
             }}
           >
             One REST API for accounts, tokens, payments, and scope-bound agents on XRPL. Mint a
-            wallet for an AI agent, cap its daily spend, and revoke it on-chain — all without
+            wallet for an AI agent, cap its daily spend, and revoke it on-chain, all without
             touching xrpl.js, keys, or reserves.
           </p>
           <div
@@ -163,7 +163,7 @@ export function Landing() {
           />
           <FeatureCard
             title="Spend policies built in"
-            body="Per-agent XRP daily limits, non-XRP op ceilings, and a destination allowlist enforced before signing. Stop runaways before they reach the ledger — not after."
+            body="Per-agent XRP daily limits, non-XRP op ceilings, and a destination allowlist enforced before signing. Stop runaways before they reach the ledger, not after."
           />
           <FeatureCard
             title="Accounts & HSM signing"
@@ -171,7 +171,7 @@ export function Landing() {
           />
           <FeatureCard
             title="Payments & webhooks"
-            body="Idempotent XRP and token payments, escrow, cross-currency. HMAC-SHA256-signed webhooks fire on every validated ledger close — perfect for agents that react to settlement."
+            body="Idempotent XRP and token payments, escrow, cross-currency. HMAC-SHA256-signed webhooks fire on every validated ledger close, perfect for agents that react to settlement."
           />
           <FeatureCard
             title="MPTs by default"
@@ -179,7 +179,7 @@ export function Landing() {
           />
           <FeatureCard
             title="Compliance primitives"
-            body="On-chain credentials (XLS-70), permissioned domains (XLS-80), permissioned DEX (XLS-81), and delegated permissions (XLS-75) — for regulated agents and gated marketplaces."
+            body="On-chain credentials (XLS-70), permissioned domains (XLS-80), permissioned DEX (XLS-81), and delegated permissions (XLS-75), for regulated agents and gated marketplaces."
           />
         </section>
 
@@ -212,11 +212,11 @@ export function Landing() {
           >
             <AudienceCard
               tag="AUTONOMOUS AGENTS"
-              title="Give your agent a wallet — and a leash."
+              title="Give your agent a wallet, and a leash."
               bullets={[
                 'Provision a payment agent: its own XRPL address, scope-bound API key, daily spend cap, destination allowlist.',
                 'Constraints enforced server-side before signing. The agent literally cannot exceed its policy, no matter how creative its prompt.',
-                'Revoke the delegate on-chain (XLS-75) the moment behavior drifts — no key rotation drama.',
+                'Revoke the delegate on-chain (XLS-75) the moment behavior drifts, no key rotation drama.',
                 'Settlement webhooks let the agent react to confirmed txs in real time.',
               ]}
             />
@@ -224,9 +224,9 @@ export function Landing() {
               tag="FINTECHS & ISSUERS"
               title="Ship XRPL products without the integration tax."
               bullets={[
-                'Issue stablecoins or RWAs as MPTs. Freeze, clawback, transfer fees — all behind clean REST endpoints.',
+                'Issue stablecoins or RWAs as MPTs. Freeze, clawback, transfer fees, all behind clean REST endpoints.',
                 'Cross-currency payments, escrow, and HMAC-signed webhooks out of the box. Idempotency keys on every state change.',
-                'Compliance primitives — credentials, permissioned domains, permissioned DEX — when the regulator asks.',
+                'Compliance primitives: credentials, permissioned domains, permissioned DEX, when the regulator asks.',
                 "Sandbox on testnet from the first request. Mainnet is a flag flip when you're ready.",
               ]}
             />
