@@ -1,0 +1,36 @@
+# RailForge indexer — subscribes to rippled `ledger` stream, persists
+# transactions to Postgres.  Private — no public services.
+# Deploy:  fly deploy -c apps/indexer/fly.toml
+
+app            = "railforge-indexer"
+primary_region = "cdg"
+
+[build]
+  dockerfile = "../../Dockerfile.fly"
+
+  [build.args]
+    APP_NAME = "indexer"
+
+[env]
+  NODE_ENV     = "production"
+  XRPL_NETWORK = "testnet"
+  XRPL_WS_URL  = "wss://s.altnet.rippletest.net:51233"
+  # DATABASE_URL via fly secrets.
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "256mb"
+  cpus = 1
+
+# CRITICAL: indexer holds a long-lived WebSocket subscription.  If Fly stops
+# the machine, ledger gaps appear and processed_transactions misses txs
+# until the indexer reconnects.
+[deploy]
+  strategy = "immediate"   # rolling would briefly run two subscribers
+
+[[services]]
+  internal_port = 0
+  protocol      = "tcp"
+  auto_stop_machines  = "off"
+  auto_start_machines = false
+  min_machines_running = 1

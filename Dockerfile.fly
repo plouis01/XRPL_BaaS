@@ -1,0 +1,42 @@
+# Single image used by all three Fly apps (api, worker, indexer).
+# Per-app fly.toml sets [build.args] APP_NAME and [build] dockerfile = "../../Dockerfile.fly".
+
+FROM oven/bun:1.1.38-slim AS base
+WORKDIR /app
+
+# pkcs11js (worker) needs build tooling on Linux for the native binding.
+# Install once in base; cheap relative to bun install.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 make g++ ca-certificates \
+  && rm -rf /var/lib/apt/lists/*
+
+# ── deps stage ──────────────────────────────────────────────────────────
+# Copy only manifests + lockfile so bun install is cached when source changes.
+FROM base AS deps
+COPY package.json bun.lock turbo.json biome.json ./
+COPY apps/api/package.json           apps/api/package.json
+COPY apps/worker/package.json        apps/worker/package.json
+COPY apps/indexer/package.json       apps/indexer/package.json
+COPY apps/dashboard/package.json     apps/dashboard/package.json
+COPY apps/docs/package.json          apps/docs/package.json
+COPY packages/db/package.json        packages/db/package.json
+COPY packages/jobs/package.json      packages/jobs/package.json
+COPY packages/logger/package.json    packages/logger/package.json
+COPY packages/sdk/package.json       packages/sdk/package.json
+COPY packages/xrpl-core/package.json packages/xrpl-core/package.json
+RUN bun install --frozen-lockfile
+
+# ── runtime stage ───────────────────────────────────────────────────────
+FROM deps AS runtime
+COPY apps     apps
+COPY packages packages
+
+ARG APP_NAME=api
+ENV APP_NAME=$APP_NAME
+ENV NODE_ENV=production
+
+# API is the only public service; worker/indexer ignore this.
+EXPOSE 3000
+
+# Shell form so $APP_NAME expands at container start.
+CMD bun run --filter "@railforge/$APP_NAME" start

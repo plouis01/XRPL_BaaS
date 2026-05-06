@@ -1,0 +1,34 @@
+**/node_modules
+**/dist
+**/.turbo
+**/coverage
+.git
+.github
+.claude
+.vscode
+.idea
+.DS_Store
+
+# Secrets must never be baked into the image — Fly secrets inject at runtime.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
+hsm-*
+
+# Test + dev-only
+**/vitest.config.ts
+**/vitest.integration.config.ts
+scripts/k6
+docker-compose.yml
+
+# Docs site builds independently on Cloudflare Pages
+apps/docs
+apps/dashboard
+
+# Docs / planning
+*.md
+!CLAUDE.md
+log.txt

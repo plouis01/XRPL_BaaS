@@ -1,0 +1,46 @@
+# RailForge API — public Hono service.
+# Deploy from the repo root:  fly deploy -c apps/api/fly.toml
+
+app            = "railforge-api"
+primary_region = "cdg"   # Paris — close to XRPL Commons + EU users
+
+[build]
+  dockerfile = "../../Dockerfile.fly"
+
+  [build.args]
+    APP_NAME = "api"
+
+[env]
+  API_PORT     = "3000"
+  NODE_ENV     = "production"
+  XRPL_NETWORK = "testnet"
+  # All other config (DATABASE_URL, REDIS_URL, API_KEY_SALT,
+  # WEBHOOK_SIGNING_SECRET, TREASURY_*, TRUSTED_PROXY_IPS) injected via
+  # `fly secrets set` — never put secrets in fly.toml (it's checked in).
+
+[http_service]
+  internal_port       = 3000
+  force_https         = true
+  auto_stop_machines  = "stop"   # OK for the API — cold start ~1s
+  auto_start_machines = true
+  min_machines_running = 0
+  processes           = ["app"]
+
+  [http_service.concurrency]
+    type       = "requests"
+    soft_limit = 200
+    hard_limit = 250
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"
+  cpus = 1
+
+# Health check — Hono exposes / which returns 200 with a banner.
+[[services.http_checks]]
+  grace_period  = "10s"
+  interval      = "30s"
+  method        = "get"
+  path          = "/"
+  protocol      = "http"
+  timeout       = "5s"
