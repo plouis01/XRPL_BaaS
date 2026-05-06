@@ -15,7 +15,12 @@ assertMainnetHsmInvariant();
 
 const redisUrl = process.env.REDIS_URL ?? 'redis://localhost:6379';
 const workerRedis = new Redis(redisUrl, {
+  // BullMQ requires `maxRetriesPerRequest: null` — its blocking commands
+  // would otherwise be canceled mid-poll. `enableReadyCheck: false` avoids
+  // the post-connect INFO probe, which Upstash's free tier sometimes fails
+  // and which adds a needless extra round-trip on every reconnect.
   maxRetriesPerRequest: null,
+  enableReadyCheck: false,
 });
 
 // Treasury wallet loading (Sprint 3).

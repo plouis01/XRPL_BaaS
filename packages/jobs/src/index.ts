@@ -146,6 +146,9 @@ export function getJobsRedis(): Redis {
     // BullMQ requires this — blocking commands are its core scheduling
     // mechanism and get confused by the default retry behavior.
     maxRetriesPerRequest: null,
+    // Upstash free-tier quirk: post-connect INFO probe sometimes hangs.
+    // Skipping it removes a needless round-trip on every reconnect anyway.
+    enableReadyCheck: false,
   });
   return redisConnection;
 }

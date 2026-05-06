@@ -20,7 +20,16 @@ const redisUrl = process.env.REDIS_URL ?? 'redis://localhost:6379';
 
 // Redis for the high-water mark. Separate from the BullMQ Redis in the
 // worker — the indexer is a standalone process with its own lifecycle.
-const redis = new Redis(redisUrl);
+//
+// Both options match the worker / jobs / api configurations:
+//   - `maxRetriesPerRequest: null` → long-lived process should never give up
+//     on a transient blip; failures bubble up to the caller, not ioredis.
+//   - `enableReadyCheck: false`    → Upstash free tier sometimes stalls on
+//     the post-connect INFO probe.
+const redis = new Redis(redisUrl, {
+  maxRetriesPerRequest: null,
+  enableReadyCheck: false,
+});
 
 initStore(redis);
 
