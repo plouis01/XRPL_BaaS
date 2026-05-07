@@ -93,6 +93,21 @@ export function App() {
             background: '#f8fafc',
             display: 'flex',
             flexDirection: 'column',
+            // Stick the nav to the viewport so RailForge / Quickstart / etc.
+            // and the Documentation + Logout buttons at the bottom stay
+            // visible regardless of how far the right column scrolls.
+            // `alignSelf: flex-start` is the load-bearing bit: flex children
+            // default to `align-self: stretch`, which pins the nav's height
+            // to the parent and breaks `position: sticky`. Setting it to
+            // flex-start lets the nav use its own intrinsic height (100vh).
+            position: 'sticky',
+            top: 0,
+            alignSelf: 'flex-start',
+            height: '100vh',
+            // Safety net: if the link list ever grows past a short viewport
+            // (zoomed-in laptops), let the nav scroll internally instead of
+            // hiding the bottom buttons offscreen.
+            overflowY: 'auto',
           }}
         >
           <h2 style={{ margin: '0 0 24px', fontSize: 18 }}>RailForge</h2>
