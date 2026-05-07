@@ -1,11 +1,15 @@
 // Route-level HTTP tests for POST /v1/dashboard/signup.
 //
-// The endpoint is dev-only (gated in apps/api/src/index.ts on NODE_ENV !==
-// 'production'). These tests verify the route's own behavior:
-//   1. valid body → 201 + { api_key starting with rf_test_, client_id }
+// The endpoint is gated in apps/api/src/index.ts (non-prod by default; opt-in
+// via RAILFORGE_ALLOW_SIGNUP=1 in production). These tests verify the route's
+// own behavior:
+//   1. valid body → 201 + { api_key starting with rf_test_, client_id,
+//      parent_address: null when treasury isn't configured }
 //   2. invalid body → 400 (Zod rejection, no DB write)
 //   3. existing email → reuses the client row (no duplicate insert)
 //   4. DB failure → 503 (matches the session route's fail-closed posture)
+//   5. parent_address is always present in the response shape (null fallback
+//      is fine — the dashboard handles both)
 
 import { Hono } from 'hono';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -97,11 +101,20 @@ describe('POST /signup (dev signup)', () => {
       api_key: string;
       client_id: string;
       environment: string;
+      parent_address: string | null;
     };
     expect(body.api_key).toMatch(/^rf_test_[A-Za-z0-9_-]+$/);
     expect(body.client_id).toBe('client-new');
     expect(body.environment).toBe('testnet');
-    // Two inserts: clients row, then apiKeys row.
+    // The response shape always carries parent_address; null is fine when the
+    // treasury isn't configured (the test env doesn't set TREASURY_ADDRESS,
+    // so createAccount throws AccountServiceError('treasury_not_configured')
+    // and the signup handler swallows it). The dashboard handles both forms.
+    expect(body).toHaveProperty('parent_address');
+    expect(body.parent_address).toBeNull();
+    // Two inserts: clients row, then apiKeys row. createAccount short-circuits
+    // before touching `db` because the treasury env-var check fails first, so
+    // the signup write count is unchanged.
     expect(insertValuesMock).toHaveBeenCalledTimes(2);
     const apiKeyInsertArgs = insertValuesMock.mock.calls[1]![0] as {
       clientId: string;

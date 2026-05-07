@@ -48,15 +48,25 @@ export async function login(apiKey: string): Promise<void> {
 }
 
 /**
- * Dev-only: mint a fresh testnet client + API key from the login UI.
- * The endpoint is hard-gated server-side on NODE_ENV !== 'production',
- * so this returns 404 in prod. Returns the raw key once; callers should
- * immediately POST it to /v1/dashboard/session via `login`.
+ * Mint a fresh testnet client + API key from the login UI. Gated server-
+ * side: registered in non-production by default, or in production when
+ * `RAILFORGE_ALLOW_SIGNUP=1` is set. Returns 404 when the gate is closed.
+ *
+ * The response also includes an auto-created `parent_address` (or null if
+ * treasury funding is unavailable). Callers should immediately POST the
+ * key to /v1/dashboard/session via `login`.
  */
 export interface SignupResult {
   api_key: string;
   client_id: string;
   environment: 'testnet';
+  /**
+   * Auto-created "parent" XRPL account address for the new client. May be
+   * null if treasury funding is not configured on the API or the
+   * account-creation enqueue failed — signup itself still succeeds and
+   * the user can mint a parent account manually later.
+   */
+  parent_address: string | null;
 }
 
 export async function signup(email: string, name: string): Promise<SignupResult> {

@@ -7,11 +7,20 @@
 // when the gate is closed, so callers see a 404. A real signup flow
 // (email verification, captcha, plan selection) is still deferred.
 //
-//   POST /v1/dashboard/signup    { email, name } → { api_key, client_id, environment }
+//   POST /v1/dashboard/signup    { email, name }
+//     → { api_key, client_id, environment, parent_address }
 //
 // The endpoint returns the raw key once, in the response body — there is
 // no persistent server-side stash. The caller is expected to immediately
 // POST it to /v1/dashboard/session to set the httpOnly session cookie.
+//
+// As a convenience, signup also auto-creates a "parent" XRPL account for
+// the new client and enqueues the treasury-funded payment. The address is
+// returned in `parent_address` (or `null` if account creation failed —
+// e.g. treasury not configured). Funding is asynchronous; the dashboard
+// can poll GET /v1/accounts/:address until isFunded flips true (~4s on
+// testnet). This removes step 1 (a manual curl) from the QuickStart for
+// new sign-ups.
 //
 // Security posture:
 //  - 404 when the gate is closed (production without RAILFORGE_ALLOW_SIGNUP).
@@ -26,6 +35,7 @@ import { Hono } from 'hono';
 import { z } from 'zod';
 import { logger } from '../logger.ts';
 import { hashApiKey } from '../middleware/auth.ts';
+import { AccountServiceError, createAccount } from '../services/account.service.ts';
 import type { AppEnv } from '../types.ts';
 
 const signup = new Hono<AppEnv>();
@@ -90,11 +100,43 @@ signup.post('/', async (c) => {
     'dashboard signup created client + testnet key',
   );
 
+  // Auto-create a "parent" XRPL account so the new dev doesn't have to run
+  // step 1 of the QuickStart by hand. Best-effort — if the treasury isn't
+  // configured (worker hasn't loaded TREASURY_SEED) or any other error
+  // occurs, surface parent_address: null and let signup itself succeed.
+  // The user can still create accounts via POST /v1/accounts later.
+  let parentAddress: string | null = null;
+  try {
+    const parent = await createAccount({
+      clientId,
+      label: 'parent',
+    });
+    parentAddress = parent.address;
+    logger.info(
+      { clientId, parentAddress },
+      'signup auto-created parent account (funding enqueued)',
+    );
+  } catch (err) {
+    if (err instanceof AccountServiceError) {
+      // Known failure modes (treasury_not_configured, enqueue_failed, etc.)
+      // are non-fatal: log + continue with null. The dashboard surfaces
+      // this to the user as "no parent yet — create one from /v1/accounts".
+      logger.warn(
+        { clientId, code: err.code, message: err.message },
+        'signup parent account creation skipped',
+      );
+    } else {
+      // Unexpected error — log loud but still don't fail signup.
+      logger.error({ err, clientId }, 'signup parent account creation failed unexpectedly');
+    }
+  }
+
   return c.json(
     {
       api_key: rawKey,
       client_id: clientId,
       environment: 'testnet' as const,
+      parent_address: parentAddress,
     },
     201,
   );

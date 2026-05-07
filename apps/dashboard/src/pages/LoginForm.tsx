@@ -20,6 +20,7 @@ export function LoginForm({ onLoggedIn }: { onLoggedIn: () => void }) {
   // we never auto-redirect, because the key is shown ONCE and a too-short
   // timeout means a user who blinked has to revoke + reseed.
   const [mintedKey, setMintedKey] = useState<string | null>(null);
+  const [parentAddress, setParentAddress] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
 
   const formatError = (err: unknown): string => {
@@ -58,6 +59,7 @@ export function LoginForm({ onLoggedIn }: { onLoggedIn: () => void }) {
       // explicitly continues — no race with a copy-paste.
       await login(result.api_key);
       setMintedKey(result.api_key);
+      setParentAddress(result.parent_address);
     } catch (err) {
       setError(formatError(err));
     } finally {
@@ -81,6 +83,7 @@ export function LoginForm({ onLoggedIn }: { onLoggedIn: () => void }) {
     setMode(next);
     setError(null);
     setMintedKey(null);
+    setParentAddress(null);
     setCopied(false);
   };
 
@@ -258,6 +261,38 @@ export function LoginForm({ onLoggedIn }: { onLoggedIn: () => void }) {
             <div style={{ marginTop: 6, color: '#047857', fontSize: 11 }}>
               Stash it in a password manager — the dashboard cannot show it again. You can mint
               another from API Keys after continuing.
+            </div>
+          </div>
+        )}
+
+        {mintedKey && parentAddress && (
+          <div
+            style={{
+              marginTop: 8,
+              padding: '10px 12px',
+              background: '#eff6ff',
+              border: '1px solid #93c5fd',
+              color: '#1e3a8a',
+              borderRadius: 6,
+              fontSize: 12,
+            }}
+          >
+            <div style={{ fontWeight: 600, marginBottom: 4 }}>
+              Parent account (funding on testnet…):
+            </div>
+            <code
+              style={{
+                fontFamily: 'ui-monospace, Menlo, monospace',
+                wordBreak: 'break-all',
+                fontSize: 11,
+                userSelect: 'all',
+              }}
+            >
+              {parentAddress}
+            </code>
+            <div style={{ marginTop: 6, fontSize: 11, color: '#1e40af' }}>
+              Auto-created at signup. The treasury is funding it now (~4s). Your QuickStart can skip
+              step 1.
             </div>
           </div>
         )}
