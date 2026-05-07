@@ -81,11 +81,12 @@ describe('POST /session (login)', () => {
     expect(setCookie).toContain('Path=/');
   });
 
-  it('returns 204 with SameSite=None + Secure in production (cross-site Cloudflare→Fly)', async () => {
-    // Production sets the cookie with SameSite=None + Secure so the deployed
-    // dashboard (`*.workers.dev`) can carry the cookie on requests to the API
-    // (`*.fly.dev`). Both hosts are on the Public Suffix List, so without
-    // SameSite=None the browser refuses to attach the cookie at all.
+  it('returns 204 with SameSite=Strict + Secure in production (same-origin proxy)', async () => {
+    // Production also uses SameSite=Strict because the dashboard's
+    // Cloudflare Worker proxies /v1/* to the Fly API (apps/dashboard/
+    // worker/index.ts). From the browser's POV every dashboard→API call
+    // is same-origin, so the cookie is first-party and Strict works.
+    // Secure is added on top so HTTPS is enforced.
     const previous = process.env.NODE_ENV;
     process.env.NODE_ENV = 'production';
     try {
@@ -100,8 +101,7 @@ describe('POST /session (login)', () => {
       const setCookie = res.headers.get('set-cookie');
       expect(setCookie).toBeTruthy();
       expect(setCookie).toContain('HttpOnly');
-      expect(setCookie).toContain('SameSite=None');
-      // Browsers reject SameSite=None without Secure; both must be present.
+      expect(setCookie).toContain('SameSite=Strict');
       expect(setCookie).toContain('Secure');
     } finally {
       process.env.NODE_ENV = previous;

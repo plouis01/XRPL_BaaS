@@ -83,46 +83,39 @@ session.post('/', async (c) => {
   }
 
   const isProd = process.env.NODE_ENV === 'production';
-  // SameSite mode — environment-dependent because the dashboard and API
-  // sit on different sites in production but the same site in dev.
+  // SameSite=Strict — load-bearing for CSRF.
   //
-  // Dev:    dashboard on http://localhost:5173, API on http://localhost:3000.
-  //         Different ports but same eTLD+1 (`localhost`), so SameSite=Strict
-  //         still allows the cross-origin same-site fetch. We keep Strict
-  //         here for the strongest CSRF defense.
+  // Originally we tried `Strict` and hit a wall in production: dashboard
+  // (`*.workers.dev`) ↔ API (`*.fly.dev`) are different sites (both on the
+  // Public Suffix List), so the cookie became third-party and modern
+  // browsers' tracking protection refused to store it even with
+  // `SameSite=None; Secure`. We briefly relaxed to `None` and that worked
+  // in curl but failed in real browsers.
   //
-  // Prod (option 1, current):
-  //         dashboard on `*.pierrelouishaboury.workers.dev`, API on
-  //         `*.fly.dev`. Both `workers.dev` and `fly.dev` are on the Public
-  //         Suffix List, so these are entirely different sites — SameSite=
-  //         Strict (or even Lax) blocks the cookie on every dashboard→API
-  //         call, which 401s the whole authenticated UI. SameSite=None +
-  //         Secure is required to make the cross-site cookie work at all.
+  // The current production setup avoids the cross-site problem entirely:
+  // a Cloudflare Worker (apps/dashboard/worker/index.ts) proxies /v1/* to
+  // the Fly API, so from the browser's POV every dashboard→API request is
+  // same-origin. The Set-Cookie response then lands as a first-party
+  // cookie on the dashboard origin and SameSite=Strict works as designed.
   //
-  // CSRF mitigations that remain with SameSite=None in prod:
-  //   - CORS allowlist (`DASHBOARD_ORIGIN`) means the browser blocks
-  //     credentialed requests from any origin not on the list.
-  //   - The `Idempotency-Key` custom header is REQUIRED on every state-
-  //     changing /v1/* call, which forces a CORS preflight. The preflight
-  //     is rejected for non-allowlisted origins, so an attacker site
-  //     cannot drive POST/PUT/DELETE with the cookie even if it loaded.
-  //   - The session cookie is httpOnly, so XSS in the dashboard origin
-  //     cannot read it directly.
+  // CSRF defense — what's protecting state-changing endpoints:
+  //   1. SameSite=Strict (this) blocks the cookie on cross-site requests.
+  //   2. CORS allowlist (`DASHBOARD_ORIGIN`) blocks browsers from making
+  //      credentialed requests from non-allowlisted origins (defense in
+  //      depth — also useful for local dev where origins differ).
+  //   3. The `Idempotency-Key` custom header is REQUIRED on every state-
+  //      changing /v1/* call, which forces a CORS preflight an attacker
+  //      site cannot bypass.
+  //   4. The cookie is httpOnly — XSS in the dashboard origin cannot read
+  //      the API key from JS memory.
   //
-  // What's gone: defense-in-depth against a CORS misconfiguration. If the
-  // allowlist is ever widened to include an attacker-controlled origin,
-  // SameSite=None won't catch the mistake the way Strict would have.
-  //
-  // Option 2 (production-grade — TODO when a custom domain is in play):
-  //   Move both apps under a shared eTLD+1 — e.g. `dashboard.railforge.dev`
-  //   and `api.railforge.dev` — and flip this back to `Strict` (or `Lax`).
-  //   That restores the SameSite-as-CSRF-fence guarantee. Until then, we
-  //   rely on the CORS+preflight stack above.
+  // If you ever need a true cross-site flow (OAuth callback, IdP-initiated
+  // redirect, embedded iframe in a partner domain), downgrade to `Lax`
+  // (NOT `None`) and pair with a CSRF double-submit token on every state-
+  // changing /v1/dashboard/* call. Don't silently relax this.
   setCookie(c, SESSION_COOKIE_NAME, body.api_key, {
     httpOnly: true,
-    // None requires Secure (browsers reject `None` over plain HTTP). In
-    // dev we stay on Strict so localhost over HTTP keeps working.
-    sameSite: isProd ? 'None' : 'Strict',
+    sameSite: 'Strict',
     secure: isProd,
     path: '/',
     maxAge: SESSION_MAX_AGE_SECONDS,

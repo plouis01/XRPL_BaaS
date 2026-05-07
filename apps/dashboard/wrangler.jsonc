@@ -1,26 +1,37 @@
 {
-  // RailForge dashboard — static React SPA served via Cloudflare Workers
-  // Static Assets. No JS Worker logic; this is a pure static-host deploy.
+  // RailForge dashboard — React SPA + same-origin API proxy.
   //
   // Cloudflare project build settings:
   //   Build command:  bun install --frozen-lockfile && bun run --filter @railforge/dashboard build
   //   Deploy command: npx wrangler deploy --config apps/dashboard/wrangler.jsonc
   //
-  // Env var to set in the Cloudflare project (Settings → Variables):
-  //   VITE_API_BASE = https://railforge-api.fly.dev
-  //   (the dashboard's vite build inlines this into the bundle — see
-  //   apps/dashboard/src/api.ts and src/pages/QuickStart.tsx)
+  // Build env vars in the Cloudflare project (Settings → Build → Variables):
+  //   - VITE_DOCS_URL = https://railforge-docs.pierrelouishaboury.workers.dev
+  //   - VITE_API_BASE: leave UNSET (the dashboard now uses relative URLs in
+  //     production — `import.meta.env.DEV` switches between localhost in dev
+  //     and same-origin /v1/* in prod, see apps/dashboard/src/api.ts).
+  //
+  // Why a Worker (not just static assets):
+  //   Same-origin proxy for /v1/* → /fly.dev so the httpOnly session cookie
+  //   is first-party from the browser's POV. Cross-site cookies (workers.dev
+  //   ↔ fly.dev — both on the Public Suffix List) get blocked by every
+  //   modern browser's tracking protection, breaking the auth flow.
+  //   See apps/dashboard/worker/index.ts for the full reasoning.
 
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "railforge-dashboard",
   "compatibility_date": "2025-01-01",
+  "main": "./worker/index.ts",
   "assets": {
     // Path is resolved relative to this wrangler.jsonc file, so this points at
     // apps/dashboard/dist which is what Vite outputs.
     "directory": "./dist",
     // SPA fallback: any unmatched route returns /index.html so React Router
     // can handle client-side routing instead of 404-ing.
-    "not_found_handling": "single-page-application"
+    "not_found_handling": "single-page-application",
+    // Exposes the static-asset server to the Worker as `env.ASSETS.fetch()`.
+    // The Worker delegates to it for non-API paths.
+    "binding": "ASSETS"
   },
   "observability": {
     "enabled": true

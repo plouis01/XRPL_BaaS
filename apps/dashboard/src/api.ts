@@ -17,7 +17,17 @@
 // login form in the dashboard UI collects the key and calls `login`.
 // Creating new keys happens via the ApiKeys page after login.
 
-const API_BASE = import.meta.env.VITE_API_BASE ?? 'http://localhost:3000';
+// In dev, Vite serves the dashboard on :5173 and the API runs on :3000, so
+// we hit the API across origins (cookies still work — same site since both
+// are on `localhost`). In production the dashboard is served by a Cloudflare
+// Worker that proxies /v1/* and /health to the Fly-hosted API (see
+// apps/dashboard/worker/index.ts), so we use relative URLs and the request
+// is same-origin from the browser's POV — first-party cookies, no CORS.
+//
+// `import.meta.env.DEV` is a Vite built-in (true under `vite dev`, false
+// under `vite build`). This makes the build self-contained — no
+// VITE_API_BASE env var needed in the Cloudflare project.
+const API_BASE = import.meta.env.DEV ? 'http://localhost:3000' : '';
 
 /**
  * Log in by handing the server the API key. On success the server sets

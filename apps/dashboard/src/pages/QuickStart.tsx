@@ -21,7 +21,12 @@ import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import type { Network } from '../types.ts';
 
-const API_BASE = import.meta.env.VITE_API_BASE ?? 'http://localhost:3000';
+// API_BASE here is for display in the curl examples below (devs paste
+// these into their terminal, so a relative URL would be useless). The
+// dashboard's own fetches use relative URLs via the same-origin Worker
+// proxy — see apps/dashboard/src/api.ts and apps/dashboard/worker/index.ts.
+// Hardcoded to the production Fly host; update if a custom domain lands.
+const API_BASE = import.meta.env.DEV ? 'http://localhost:3000' : 'https://railforge-api.fly.dev';
 const DOCS_URL = import.meta.env.VITE_DOCS_URL ?? 'http://localhost:4321';
 
 export function QuickStart({ network }: { network: Network }) {
