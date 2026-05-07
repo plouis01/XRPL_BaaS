@@ -190,15 +190,15 @@ void checkMigrationDrift()
 // the trustedProxy helper to validate forwarded headers. On runtimes that
 // don't pass `server` (test harness), env.server is undefined and the
 // helper falls back to 'unknown' — conservative when the allowlist is on.
-// `hostname: '::'` is required for Fly.io: Fly's internal network is
-// IPv6-first and the proxy connects to the machine over a 6PN address.
-// Binding to '0.0.0.0' (IPv4-only) leaves Fly's proxy unable to reach
-// the server even though the machine started fine. The IPv6 wildcard
-// '::' on Linux dual-stack-listens (both v4 and v6) so local dev still
-// works on http://localhost:3000.
+// `hostname: '0.0.0.0'` is required on Fly.io: the platform's edge proxy
+// connects to the machine via the container's eth0 IPv4 address (172.x).
+// Bun's default bind is 127.0.0.1 (loopback only), which makes the machine
+// unreachable from outside the container — TCP-level "connection refused".
+// IPv6 ('::') doesn't dual-stack on Fly's container (bindv6only=1), so we
+// pick IPv4 explicitly. Local dev is unaffected.
 export default {
   port,
-  hostname: '::',
+  hostname: '0.0.0.0',
   // biome-ignore lint/suspicious/noExplicitAny: Bun runtime types aren't imported here
   fetch: (req: Request, server: any) => app.fetch(req, { server }),
 };
