@@ -5,7 +5,7 @@
 
 import { Link } from 'react-router-dom';
 
-const DOCS_URL = 'http://localhost:4321';
+const DOCS_URL = import.meta.env.VITE_DOCS_URL ?? 'http://localhost:4321';
 
 export function Landing() {
   return (

@@ -213,7 +213,7 @@ export function App() {
           </ul>
 
           <a
-            href="http://localhost:4321"
+            href={import.meta.env.VITE_DOCS_URL ?? 'http://localhost:4321'}
             target="_blank"
             rel="noopener noreferrer"
             style={{

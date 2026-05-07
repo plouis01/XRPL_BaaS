@@ -22,7 +22,7 @@ import { Link } from 'react-router-dom';
 import type { Network } from '../types.ts';
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? 'http://localhost:3000';
-const DOCS_URL = 'http://localhost:4321';
+const DOCS_URL = import.meta.env.VITE_DOCS_URL ?? 'http://localhost:4321';
 
 export function QuickStart({ network }: { network: Network }) {
   return (
