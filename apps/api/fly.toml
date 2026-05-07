@@ -36,15 +36,6 @@ primary_region = 'cdg'
     soft_limit = 200
     hard_limit = 250
 
-  # Health check via the modern http_service.checks (replaces the old
-  # [[services.http_checks]] which Fly will hard-fail validation on).
-  [[http_service.checks]]
-    grace_period = '10s'
-    interval     = '30s'
-    method       = 'GET'
-    path         = '/'
-    timeout      = '5s'
-
 [[vm]]
   size      = 'shared-cpu-1x'
   memory    = '512mb'
