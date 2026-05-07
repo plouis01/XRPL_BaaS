@@ -93,21 +93,26 @@ export function App() {
             background: '#f8fafc',
             display: 'flex',
             flexDirection: 'column',
-            // Stick the nav to the viewport so RailForge / Quickstart / etc.
-            // and the Documentation + Logout buttons at the bottom stay
-            // visible regardless of how far the right column scrolls.
-            // `alignSelf: flex-start` is the load-bearing bit: flex children
-            // default to `align-self: stretch`, which pins the nav's height
-            // to the parent and breaks `position: sticky`. Setting it to
-            // flex-start lets the nav use its own intrinsic height (100vh).
+            // Stick the nav to the viewport so the brand + nav links + bottom
+            // buttons stay anchored regardless of page scroll.
+            //
+            // `alignSelf: flex-start` is load-bearing: flex children default
+            // to `align-self: stretch`, which pins the nav's height to the
+            // parent and breaks `position: sticky`. Setting it to flex-start
+            // lets the nav use its own height (100vh).
+            //
+            // CRITICAL: do NOT put overflow on the <nav> itself. If the nav
+            // overflows, ALL of it scrolls together — RailForge title slides
+            // off the top OR the Logout button slides off the bottom, which
+            // is the bug we're fixing. Instead, the inner <ul> gets the
+            // overflow so the title at the top and buttons at the bottom
+            // both stay anchored, and only the link list scrolls when it
+            // genuinely needs to.
             position: 'sticky',
             top: 0,
             alignSelf: 'flex-start',
             height: '100vh',
-            // Safety net: if the link list ever grows past a short viewport
-            // (zoomed-in laptops), let the nav scroll internally instead of
-            // hiding the bottom buttons offscreen.
-            overflowY: 'auto',
+            overflow: 'hidden',
           }}
         >
           <h2 style={{ margin: '0 0 24px', fontSize: 18 }}>RailForge</h2>
@@ -140,7 +145,23 @@ export function App() {
             </select>
           </div>
 
-          <ul style={{ listStyle: 'none', padding: 0, margin: 0, flex: 1 }}>
+          <ul
+            style={{
+              listStyle: 'none',
+              padding: 0,
+              margin: 0,
+              flex: 1,
+              // `minHeight: 0` is the load-bearing bit: flex children default
+              // to `min-height: auto`, which prevents them from shrinking
+              // below their content height. Without this override, the ul
+              // would push the parent <nav> taller than 100vh and re-create
+              // the original "everything scrolls together" bug. With it set,
+              // the ul takes the leftover space and scrolls internally if
+              // the link list ever exceeds the available height.
+              minHeight: 0,
+              overflowY: 'auto',
+            }}
+          >
             <li style={{ marginBottom: 8 }}>
               <NavLink
                 to="/quickstart"
