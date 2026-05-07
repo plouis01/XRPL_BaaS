@@ -190,8 +190,14 @@ void checkMigrationDrift()
 // the trustedProxy helper to validate forwarded headers. On runtimes that
 // don't pass `server` (test harness), env.server is undefined and the
 // helper falls back to 'unknown' — conservative when the allowlist is on.
+// `hostname: '0.0.0.0'` is required for Fly.io: the platform's proxy
+// reaches the machine via 0.0.0.0:<internal_port>, not 127.0.0.1. Bun's
+// default bind is localhost, which makes the machine unreachable from
+// outside the container. This is harmless in local dev (still bound on
+// the loopback alias of 0.0.0.0).
 export default {
   port,
+  hostname: '0.0.0.0',
   // biome-ignore lint/suspicious/noExplicitAny: Bun runtime types aren't imported here
   fetch: (req: Request, server: any) => app.fetch(req, { server }),
 };
