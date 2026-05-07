@@ -23,6 +23,16 @@ primary_region = 'cdg'
 [deploy]
   strategy = 'rolling'
 
+# Restart policy. Default Fly behavior is on-failure with max 10 retries —
+# we hit that ceiling once when an early-day crash loop exhausted it, after
+# which the dead Bun process was never resurrected and the queue stalled
+# silently for ~30 min. `always` keeps trying; `max_retries = 0` means no
+# cap, so a transient Redis disconnect or unhandled exception 6 hours into
+# uptime doesn't permanently brick the worker.
+[[restart]]
+  policy      = 'always'
+  max_retries = 0
+
 # Machines without [http_service] or [[services]] run continuously by
 # default — that's what we want for a queue consumer.
 
