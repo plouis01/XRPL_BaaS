@@ -24,9 +24,11 @@ hsm-*
 scripts/k6
 docker-compose.yml
 
-# Docs site builds independently on Cloudflare Pages
-apps/docs
-apps/dashboard
+# Note: apps/dashboard and apps/docs are NOT excluded — bun's workspace
+# install requires every workspace's package.json to be present. Their
+# source ships in the image but is never executed (the Fly entrypoint
+# only runs --filter @railforge/{api,worker,indexer}). Both apps deploy
+# separately to Cloudflare Workers Static Assets.
 
 # Docs / planning
 *.md
