@@ -291,8 +291,7 @@ export function LoginForm({ onLoggedIn }: { onLoggedIn: () => void }) {
               {parentAddress}
             </code>
             <div style={{ marginTop: 6, fontSize: 11, color: '#1e40af' }}>
-              Auto-created at signup. The treasury is funding it now (~4s). Your QuickStart can skip
-              step 1.
+              Auto-created at signup. The treasury is funding it now (~4s).
             </div>
           </div>
         )}

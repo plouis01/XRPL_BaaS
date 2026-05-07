@@ -2,16 +2,17 @@
 // should land on after creating their first key.
 //
 // The shape of the realistic onboarding flow drives this page:
-//   - Step 1 (curl): create the parent account once. The dashboard
-//     doesn't yet have an account-creation UI, so this stays curl.
-//   - Step 2 (dashboard): provision the agent. The Agents page now
+//   - The parent account is auto-created at signup (see
+//     apps/api/src/routes/dashboardSignup.ts) and surfaced in the post-
+//     signup banner + the Accounts page. No curl needed for that.
+//   - Step 1 (dashboard): provision the agent. The Agents page now
 //     auto-mints a scope-bound API key as part of the New-agent flow
 //     and surfaces it in the one-time success banner — no separate
 //     trip to /keys required for the common case.
-//   - Step 3 (curl): the tx the agent itself runs. This is the snippet
+//   - Step 2 (curl): the tx the agent itself runs. This is the snippet
 //     the developer pastes into their agent code — the only curl that
 //     survives past onboarding.
-//   - Step 4 (curl): backend webhook subscription, also developer code.
+//   - Step 3 (curl): backend webhook subscription, also developer code.
 //
 // A collapsible "Provisioning agents from code" section preserves the
 // fully-scripted flow for multi-tenant platforms that mint an agent
@@ -34,8 +35,9 @@ export function QuickStart({ network }: { network: Network }) {
     <div style={{ maxWidth: 760 }}>
       <h1 style={{ margin: '0 0 8px', fontSize: 24 }}>Quick start</h1>
       <p style={{ margin: '0 0 32px', color: '#475569', fontSize: 14 }}>
-        Four steps to put an autonomous payment agent on XRPL. One click in this dashboard, three
-        short shell snippets, most for the agent's own code, not yours.{' '}
+        Three steps to put an autonomous payment agent on XRPL. One click in this dashboard, two
+        short shell snippets, both for the agent's own code, not yours. Your parent account was
+        auto-created at signup — find its address on the Accounts page.{' '}
         {network === 'testnet'
           ? 'Testnet only, no real value moves.'
           : 'Mainnet, real funds will move.'}
@@ -43,31 +45,6 @@ export function QuickStart({ network }: { network: Network }) {
 
       <Step
         n={1}
-        title="Create the parent account"
-        kind="shell"
-        body={
-          <>
-            <p style={{ margin: '0 0 12px', color: '#475569', fontSize: 14 }}>
-              The parent account holds the funds the agent will spend from. The master key sits in
-              the HSM; the testnet faucet funds it. Save the returned classic address, the dashboard
-              reads it on the next step.
-            </p>
-            <Snippet
-              text={`# Mint a tenant key on the API Keys page first, then:
-export RF_KEY=rf_${network === 'mainnet' ? 'live' : 'test'}_paste_your_tenant_key
-
-curl -X POST ${API_BASE}/v1/accounts \\
-  -H "X-API-Key: $RF_KEY" \\
-  -H "Idempotency-Key: $(uuidgen)" \\
-  -H "Content-Type: application/json" \\
-  -d '{"label":"agent-parent"}'`}
-            />
-          </>
-        }
-      />
-
-      <Step
-        n={2}
         title="Provision the agent"
         kind="dashboard"
         body={
@@ -78,14 +55,14 @@ curl -X POST ${API_BASE}/v1/accounts \\
                 Agents
               </Link>{' '}
               page, click <strong>New agent</strong>. Pick the{' '}
-              <code style={code}>payment-agent</code> preset, set the parent address from step 1,
-              set a daily spend cap, and add destination addresses to the allowlist. Those
-              constraints are enforced server-side <em>before</em> the tx is built, no
-              prompt-injected agent can override them.
+              <code style={code}>payment-agent</code> preset, set the parent address (auto-created
+              at signup, visible on the Accounts page), set a daily spend cap, and add destination
+              addresses to the allowlist. Those constraints are enforced server-side <em>before</em>{' '}
+              the tx is built, no prompt-injected agent can override them.
             </p>
             <p style={{ margin: '0 0 12px', color: '#475569', fontSize: 14 }}>
               On success the dashboard shows a one-time banner with the agent's{' '}
-              <strong>scope-bound API key</strong> already minted. Copy it, that's what step 3
+              <strong>scope-bound API key</strong> already minted. Copy it, that's what step 2
               needs.
             </p>
             <DashboardCTA to="/agents" label="Open Agents →" />
@@ -94,7 +71,7 @@ curl -X POST ${API_BASE}/v1/accounts \\
       />
 
       <Step
-        n={3}
+        n={2}
         title="Hand the key to your agent code"
         kind="shell"
         body={
@@ -114,7 +91,7 @@ curl -X POST ${API_BASE}/v1/payments \\
   -H "Idempotency-Key: $(uuidgen)" \\
   -H "Content-Type: application/json" \\
   -d '{
-    "from":   "rParentAddressFromStep1",
+    "from":   "rYourParentAddress",
     "to":     "rAllowlistedDestination",
     "amount": { "type": "xrp", "value_drops": "1000000" }
   }'`}
@@ -124,7 +101,7 @@ curl -X POST ${API_BASE}/v1/payments \\
       />
 
       <Step
-        n={4}
+        n={3}
         title="Subscribe your backend to webhooks"
         kind="shell"
         body={
@@ -133,10 +110,13 @@ curl -X POST ${API_BASE}/v1/payments \\
               Register a webhook so your backend gets notified when the agent's tx settles. Verify
               the <code style={code}>X-RailForge-Signature</code> header by HMAC-SHA256 over{' '}
               <code style={code}>timestamp + "." + body</code> using the endpoint secret returned at
-              registration.
+              registration. Use your tenant key here, not the scope-bound agent key from step 2.
             </p>
             <Snippet
-              text={`curl -X POST ${API_BASE}/v1/webhooks/endpoints \\
+              text={`# Use the tenant key from signup (scope-bound agent keys can't register webhooks):
+export RF_KEY=rf_${network === 'mainnet' ? 'live' : 'test'}_paste_your_tenant_key
+
+curl -X POST ${API_BASE}/v1/webhooks/endpoints \\
   -H "X-API-Key: $RF_KEY" \\
   -H "Idempotency-Key: $(uuidgen)" \\
   -H "Content-Type: application/json" \\
@@ -170,8 +150,8 @@ curl -X POST ${API_BASE}/v1/payments \\
           Provisioning agents from code
         </summary>
         <p style={{ margin: '12px 0', color: '#475569', fontSize: 13 }}>
-          For multi-tenant platforms that mint a fresh agent per end-user, steps 2 and 3 are also
-          REST endpoints. The whole flow becomes one script:
+          For multi-tenant platforms that mint a fresh agent per end-user, step 1 is also a REST
+          endpoint. The whole flow becomes one script:
         </p>
         <Snippet
           text={`# 1. Provision the agent.
