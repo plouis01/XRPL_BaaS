@@ -1,9 +1,11 @@
-// Dev-only dashboard signup endpoint.
+// Dashboard signup endpoint (testnet beta).
 //
 // Lets the login UI mint a fresh testnet client + API key without shelling
-// out to scripts/seed-dev.ts. Hard-gated on NODE_ENV !== 'production' so it
-// cannot accidentally ship as a public-signup oracle on mainnet. A real
-// signup flow (email verification, captcha, plan selection) is deferred.
+// out to scripts/seed-dev.ts. Gated by index.ts to non-prod by default; can
+// be opted into on a production deployment with `RAILFORGE_ALLOW_SIGNUP=1`
+// (testnet beta / early access). The route literally is not registered
+// when the gate is closed, so callers see a 404. A real signup flow
+// (email verification, captcha, plan selection) is still deferred.
 //
 //   POST /v1/dashboard/signup    { email, name } → { api_key, client_id, environment }
 //
@@ -12,7 +14,7 @@
 // POST it to /v1/dashboard/session to set the httpOnly session cookie.
 //
 // Security posture:
-//  - 404 in production. The route literally is not registered there.
+//  - 404 when the gate is closed (production without RAILFORGE_ALLOW_SIGNUP).
 //  - Pre-auth (no /v1 chain). Requests still hit the IP rate limiter.
 //  - testnet keys only. No way for a caller to mint a `rf_live_` key here.
 //  - HMAC scheme is the same as auth.ts (hashApiKey), so the seeded key

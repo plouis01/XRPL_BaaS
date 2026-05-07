@@ -58,11 +58,27 @@ sessionRoot.use('*', ipRateLimit);
 sessionRoot.route('/', dashboardSessionRoute);
 app.route('/v1/dashboard/session', sessionRoot);
 
-// Dev-only: POST /v1/dashboard/signup mints a fresh testnet client + API
-// key from the login UI. Hard-gated on NODE_ENV !== 'production' so the
-// route is literally not registered when shipped. A real signup flow
-// (email verification, captcha) is deferred.
-if (process.env.NODE_ENV !== 'production') {
+// POST /v1/dashboard/signup mints a fresh testnet client + API key from
+// the login UI. By default it's gated to non-production (so it can't ship
+// as a public-signup oracle on mainnet by accident), but it can be opted
+// into in production by setting `RAILFORGE_ALLOW_SIGNUP=1` — useful for
+// early-access / testnet beta deployments where we want anyone with the
+// dashboard URL to be able to mint a key.
+//
+// Even when enabled in production:
+//   - The route mints `rf_test_` keys ONLY (testnet, hardcoded). Mainnet
+//     access still requires manual provisioning.
+//   - The pre-auth IP rate limiter caps spam.
+//   - There's no email verification or captcha — accepting that surface
+//     for testnet is the trade-off; do not enable on mainnet without
+//     adding those defenses.
+//
+// A real signup flow (email verification, captcha, plan selection) is
+// still deferred — this is a beta-shaped feature flag, not a long-term
+// solution. Mirrors the `RAILFORGE_ALLOW_MAINNET` opt-in pattern.
+const signupEnabled =
+  process.env.NODE_ENV !== 'production' || process.env.RAILFORGE_ALLOW_SIGNUP === '1';
+if (signupEnabled) {
   const signupRoot = new Hono<AppEnv>();
   signupRoot.use(
     '*',
