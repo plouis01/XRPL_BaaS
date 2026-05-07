@@ -1,39 +1,34 @@
-# RailForge worker — BullMQ consumer (txSubmitter, txConfirmer, webhookDelivery,
-# credentialExpiry, orphanReconciler).  Private — no public services.
+# RailForge worker — BullMQ consumer (txSubmitter, txConfirmer,
+# webhookDelivery, credentialExpiry, orphanReconciler, accountSetup).
+# Private — no inbound services. Reachable from the API via Fly's 6PN
+# at railforge-worker.internal if ever needed.
 # Deploy:  fly deploy -c apps/worker/fly.toml
 
-app            = "railforge-worker"
-primary_region = "cdg"
+app            = 'railforge-worker'
+primary_region = 'cdg'
 
 [build]
-  dockerfile = "../../Dockerfile.fly"
+  dockerfile = '../../Dockerfile.fly'
 
   [build.args]
-    APP_NAME = "worker"
+    APP_NAME = 'worker'
 
 [env]
-  NODE_ENV     = "production"
-  XRPL_NETWORK = "testnet"
-  HSM_PROVIDER = "softhsm"   # CloudHSM is Phase 2/3 — see PLAN.md §7.2
-  # DATABASE_URL, REDIS_URL, TREASURY_*, WEBHOOK_SIGNING_SECRET via fly secrets.
+  HSM_PROVIDER = 'softhsm'   # CloudHSM is Phase 2/3 — see PLAN.md §7.2
+  NODE_ENV     = 'production'
+  XRPL_NETWORK = 'testnet'
 
-# No [http_service] — worker has no inbound traffic.
-# Reachable from the API via Fly's private 6PN network at
-# railforge-worker.internal if ever needed.
-
-[[vm]]
-  size = "shared-cpu-1x"
-  memory = "512mb"
-  cpus = 1
-
-# CRITICAL: must stay running.  Scaling to zero kills the BullMQ blocking
+# CRITICAL: must stay running. Scaling to zero kills the BullMQ blocking
 # poll and any in-flight tx confirmer waiting on LastLedgerSequence.
 [deploy]
-  strategy = "rolling"
+  strategy = 'rolling'
 
-[[services]]
-  internal_port = 0
-  protocol      = "tcp"
-  auto_stop_machines  = "off"
-  auto_start_machines = false
-  min_machines_running = 1
+# Machines without [http_service] or [[services]] run continuously by
+# default — that's what we want for a queue consumer.
+
+[[vm]]
+  size      = 'shared-cpu-1x'
+  memory    = '512mb'
+  cpu_kind  = 'shared'
+  cpus      = 1
+  memory_mb = 512
