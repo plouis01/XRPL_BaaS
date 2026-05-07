@@ -132,6 +132,17 @@ await credentialExpiryScheduleQueue.add(
   },
 );
 
+// REVIEW.md LOW-09: log only the Redis host, never the full URL. A
+// `rediss://default:<token>@host:port` (Upstash) landed here verbatim
+// would leak the token into every startup log line. `new URL(...).host`
+// keeps the identifying bit (which Redis, which port) without credentials.
+let redisHost: string;
+try {
+  redisHost = new URL(redisUrl).host;
+} catch {
+  redisHost = '<unparseable>';
+}
+
 logger.info(
   {
     queues: [
@@ -142,7 +153,7 @@ logger.info(
       'orphan-reconciler',
       'account-setup',
     ],
-    redis: redisUrl,
+    redisHost,
     network: process.env.XRPL_NETWORK ?? 'testnet',
     treasuryLoaded: !!treasurySeed,
   },
