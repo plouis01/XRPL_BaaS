@@ -112,6 +112,13 @@ export function App() {
             top: 0,
             alignSelf: 'flex-start',
             height: '100vh',
+            // `boxSizing: border-box` is non-negotiable here. Default
+            // `content-box` adds the 24px top + 24px bottom padding ON TOP OF
+            // height: 100vh, so the nav renders 48px taller than the viewport
+            // and the Logout button at the bottom sits below the fold. With
+            // border-box, padding lives inside the 100vh height and the whole
+            // nav fits.
+            boxSizing: 'border-box',
             overflow: 'hidden',
           }}
         >
