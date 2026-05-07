@@ -136,6 +136,25 @@ export interface AccountSetupJobData {
 }
 
 // ── Redis connection singleton ─────────────────────────────────────────────
+//
+// IMPORTANT: this connection is for PRODUCERS ONLY (BullMQ `Queue` instances
+// + the worker-side TxSequencer). Consumer-side `Worker` instances open
+// their own connection in apps/worker/src/index.ts (`workerRedis`) without
+// `commandTimeout`, because BullMQ's BLPOP/BRPOPLPUSH calls legitimately
+// block for minutes and a command timeout would cancel them mid-poll.
+//
+// Why fast-fail matters here: the API process calls `enqueueTxSubmit` etc.
+// inside the request hot path. If the Upstash TCP connection wedges
+// (NAT/middlebox dropped FIN/RST, Upstash node restart, etc.), `queue.add()`
+// blocks forever waiting for a reply that will never come — the request
+// never returns and the dashboard sees an infinite loading spinner. A 5s
+// commandTimeout converts that into a clean error the route handler can
+// surface; the orphan reconciler then sweeps any tx row whose enqueue
+// failed (10 min grace).
+//
+// Note: `Queue.add` is non-blocking (LPUSH + ZADD), so a 5s ceiling never
+// trips during healthy operation — it only catches the wedge case. Same
+// for the TxSequencer (SET NX EX + a small Lua block).
 
 let redisConnection: Redis | null = null;
 
@@ -143,12 +162,52 @@ export function getJobsRedis(): Redis {
   if (redisConnection) return redisConnection;
   const url = process.env.REDIS_URL ?? 'redis://localhost:6379';
   redisConnection = new Redis(url, {
-    // BullMQ requires this — blocking commands are its core scheduling
-    // mechanism and get confused by the default retry behavior.
+    // BullMQ requires `maxRetriesPerRequest: null` on every connection it
+    // touches (Queue, Worker, QueueEvents) — the default retry behavior
+    // collides with BullMQ's own scheduling. Independent of commandTimeout.
     maxRetriesPerRequest: null,
     // Upstash free-tier quirk: post-connect INFO probe sometimes hangs.
     // Skipping it removes a needless round-trip on every reconnect anyway.
     enableReadyCheck: false,
+    // Load-bearing fix: half-open TCP → command hangs forever → request
+    // hangs forever. 5s is generous for LPUSH/ZADD/EVAL on Upstash but
+    // tight enough that the API recovers in seconds, not minutes.
+    commandTimeout: 5000,
+    // Fail synchronously when the connection is down rather than queueing
+    // commands until reconnect. The route handler's try/catch path is
+    // already wired for this (see apps/api/src/services/*.ts — every
+    // enqueue call is logged-and-tolerated, with the orphan reconciler
+    // as the safety net).
+    enableOfflineQueue: false,
+    // TCP keepalive every 30s so a dead connection surfaces as a real
+    // error within ~1 min instead of silently hanging.
+    keepAlive: 30000,
+    // Widen reconnect triggers to the network-level disconnect patterns
+    // we've actually seen in prod (in addition to ioredis's defaults).
+    reconnectOnError(err: Error) {
+      const msg = err.message ?? '';
+      return /READONLY|CLUSTERDOWN|EPIPE|ECONNRESET|ETIMEDOUT|broken pipe/i.test(msg);
+    },
+    // Cap reconnect backoff at 2s so we don't stay disconnected for
+    // minutes after a transient blip.
+    retryStrategy(times) {
+      if (times > 10) return null;
+      return Math.min(times * 500, 2000);
+    },
+  });
+  // Without an 'error' listener, ioredis emits 'unhandled error' and Node
+  // crashes the process on a transient disconnect. We log and let the
+  // built-in reconnect loop do its thing.
+  redisConnection.on('error', (err: Error) => {
+    // eslint-disable-next-line no-console — this package has no logger dep
+    console.warn(
+      JSON.stringify({
+        level: 'warn',
+        component: 'jobs-redis',
+        msg: 'redis connection error',
+        err: err.message ?? String(err),
+      }),
+    );
   });
   return redisConnection;
 }
