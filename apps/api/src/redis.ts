@@ -1,14 +1,46 @@
-// Shared Redis client. Single connection used by middleware (rate limit,
-// idempotency cache) and queues. Created lazily so unit tests can construct
-// the app without a live Redis.
+// Shared Redis client for API middleware (ipRateLimit, rateLimit,
+// idempotency, spendPolicy). NOT used by BullMQ — that lives in
+// `packages/jobs/src/index.ts` with a separate connection because
+// BullMQ requires `maxRetriesPerRequest: null` for blocking polls,
+// which is incompatible with the fast-fail posture we want here.
 //
-// REVIEW.md M-5 fix: `lazyConnect: true` defers the TCP connection until
-// the first command is issued, so getRedis() never throws at construction
-// time. If Redis is unreachable, each middleware (ipRateLimit, rateLimit,
-// idempotency, spendPolicy) already wraps Redis calls in try/catch and
-// falls back to degraded behavior. The `retryStrategy` caps at 3 attempts
-// with 500ms backoff so the client doesn't hang indefinitely if the server
-// comes back mid-request.
+// Created lazily so unit tests can construct the app without a live
+// Redis. Each middleware wraps Redis calls in try/catch and falls
+// back to degraded behavior when an op fails — so the priority here
+// is "fail fast and let the middleware fall back" rather than "retry
+// forever and hang the request."
+//
+// Resilience knobs (post-incident hardening):
+//
+//   - `commandTimeout: 3000` is the load-bearing fix. Without it, a
+//     half-open TCP connection (NAT/middlebox dropped the flow without
+//     FIN/RST, Upstash node restart, etc.) leaves in-flight commands
+//     hanging forever. The API process keeps accepting requests, all
+//     the middleware Redis calls hang, and Bun never writes a response
+//     — Fly's edge proxy logs `connection closed before message
+//     completed` and the dashboard sees an infinite loading spinner.
+//     3s × maxRetriesPerRequest=1 = ~6s worst-case per Redis op, which
+//     trips the middleware's try/catch and degrades cleanly.
+//
+//   - `enableOfflineQueue: false` makes commands fail synchronously
+//     when the connection is down rather than queueing. Pairs with the
+//     middleware's per-request try/catch — failing fast is what we want.
+//
+//   - `keepAlive: 30000` tells the kernel to send a TCP keepalive
+//     probe every 30s. A dead connection surfaces as a real error
+//     within a minute or two instead of silently hanging.
+//
+//   - `reconnectOnError` widens the auto-reconnect trigger to include
+//     network-level disconnect patterns (EPIPE, ECONNRESET, ETIMEDOUT)
+//     in addition to ioredis's defaults. ioredis still reconnects in
+//     the background; this just makes more failure modes trip it.
+//
+//   - `maxRetriesPerRequest: 1` — one retry per command, then give up.
+//     The default is 20, which is wildly too high for a request-path
+//     middleware connection.
+//
+//   - `retryStrategy` caps the reconnect backoff at 2s so we don't
+//     stay disconnected forever after a transient blip.
 
 import Redis from 'ioredis';
 import { logger } from './logger.ts';
@@ -21,11 +53,18 @@ export function getRedis(): Redis {
   }
   const url = process.env.REDIS_URL ?? 'redis://localhost:6379';
   client = new Redis(url, {
-    maxRetriesPerRequest: null,
+    commandTimeout: 3000,
+    enableOfflineQueue: false,
     enableReadyCheck: false,
     lazyConnect: true,
+    keepAlive: 30000,
+    maxRetriesPerRequest: 1,
+    reconnectOnError(err: Error) {
+      const msg = err.message ?? '';
+      return /READONLY|CLUSTERDOWN|EPIPE|ECONNRESET|ETIMEDOUT|broken pipe/i.test(msg);
+    },
     retryStrategy(times) {
-      if (times > 3) return null;
+      if (times > 5) return null;
       return Math.min(times * 500, 2000);
     },
   });
