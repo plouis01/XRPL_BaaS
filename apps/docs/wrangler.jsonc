@@ -1,0 +1,22 @@
+{
+  // RailForge docs — Astro Starlight static site served via Cloudflare Workers
+  // Static Assets. No JS Worker logic.
+  //
+  // Cloudflare project build settings:
+  //   Build command:  bun install --frozen-lockfile && bun run --filter @railforge/docs build
+  //   Deploy command: npx wrangler deploy --config apps/docs/wrangler.jsonc
+
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "railforge-docs",
+  "compatibility_date": "2025-01-01",
+  "assets": {
+    // Astro outputs to apps/docs/dist by default.
+    "directory": "./dist",
+    // Starlight emits a /404.html that should be served on unmatched routes.
+    // SPA fallback would be wrong for a multi-page static site.
+    "not_found_handling": "404-page"
+  },
+  "observability": {
+    "enabled": true
+  }
+}

@@ -1,0 +1,28 @@
+{
+  // RailForge dashboard — static React SPA served via Cloudflare Workers
+  // Static Assets. No JS Worker logic; this is a pure static-host deploy.
+  //
+  // Cloudflare project build settings:
+  //   Build command:  bun install --frozen-lockfile && bun run --filter @railforge/dashboard build
+  //   Deploy command: npx wrangler deploy --config apps/dashboard/wrangler.jsonc
+  //
+  // Env var to set in the Cloudflare project (Settings → Variables):
+  //   VITE_API_BASE = https://railforge-api.fly.dev
+  //   (the dashboard's vite build inlines this into the bundle — see
+  //   apps/dashboard/src/api.ts and src/pages/QuickStart.tsx)
+
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "railforge-dashboard",
+  "compatibility_date": "2025-01-01",
+  "assets": {
+    // Path is resolved relative to this wrangler.jsonc file, so this points at
+    // apps/dashboard/dist which is what Vite outputs.
+    "directory": "./dist",
+    // SPA fallback: any unmatched route returns /index.html so React Router
+    // can handle client-side routing instead of 404-ing.
+    "not_found_handling": "single-page-application"
+  },
+  "observability": {
+    "enabled": true
+  }
+}
