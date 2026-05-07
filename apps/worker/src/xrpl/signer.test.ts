@@ -165,18 +165,41 @@ describe('DevSigner', () => {
 });
 
 describe('DevSigner production guard', () => {
-  let originalEnv: string | undefined;
+  let originalNodeEnv: string | undefined;
+  let originalXrplNetwork: string | undefined;
 
   beforeEach(() => {
-    originalEnv = process.env.NODE_ENV;
+    originalNodeEnv = process.env.NODE_ENV;
+    originalXrplNetwork = process.env.XRPL_NETWORK;
   });
   afterEach(() => {
-    process.env.NODE_ENV = originalEnv;
+    process.env.NODE_ENV = originalNodeEnv;
+    process.env.XRPL_NETWORK = originalXrplNetwork;
   });
 
-  it('refuses to construct in production (forces a deliberate HsmSigner choice)', () => {
+  it('refuses to construct in production when XRPL_NETWORK is unset', () => {
     process.env.NODE_ENV = 'production';
-    expect(() => new DevSigner()).toThrow(/refuses to start in production/);
+    // biome-ignore lint/performance/noDelete: must remove the var, not set to "undefined"
+    delete process.env.XRPL_NETWORK;
+    expect(() => new DevSigner()).toThrow(/NODE_ENV=production unless XRPL_NETWORK=testnet/);
+  });
+
+  it('refuses to construct in production+mainnet (the dangerous combination)', () => {
+    process.env.NODE_ENV = 'production';
+    process.env.XRPL_NETWORK = 'mainnet';
+    expect(() => new DevSigner()).toThrow();
+  });
+
+  it('allows production+testnet (cloud testnet deploy on Fly etc.)', () => {
+    process.env.NODE_ENV = 'production';
+    process.env.XRPL_NETWORK = 'testnet';
+    expect(() => new DevSigner()).not.toThrow();
+  });
+
+  it('case-insensitive XRPL_NETWORK=Testnet still allowed in production', () => {
+    process.env.NODE_ENV = 'production';
+    process.env.XRPL_NETWORK = 'Testnet';
+    expect(() => new DevSigner()).not.toThrow();
   });
 
   it('constructs normally in development', () => {

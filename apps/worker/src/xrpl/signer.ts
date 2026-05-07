@@ -23,6 +23,26 @@ export interface SignedTransaction {
 }
 
 /**
+ * Centralized check used by the DevSigner constructor and its dev-only
+ * dual-purpose methods (`generateWalletWithSeed`, `loadFromSeed`). Refuses
+ * any production execution unless XRPL_NETWORK is explicitly 'testnet' —
+ * matches PLAN.md §7.2 (testnet keeps DevSigner; mainnet requires HsmSigner).
+ *
+ * Single source of truth so the constructor and the dev-only methods can't
+ * drift out of sync.
+ */
+function refuseIfProductionAndNotTestnet(callerName: string): void {
+  if (
+    process.env.NODE_ENV === 'production' &&
+    (process.env.XRPL_NETWORK ?? '').toLowerCase() !== 'testnet'
+  ) {
+    throw new Error(
+      `DevSigner.${callerName}() refuses to run in NODE_ENV=production unless XRPL_NETWORK=testnet. Use HsmSigner for mainnet. See ARCHITECTURE.md §5.1.`,
+    );
+  }
+}
+
+/**
  * Sanitized signer error. Carries a category but never the original tx
  * payload or wallet material. Callers can match on `.category` to drive
  * retry logic without parsing strings.
@@ -79,18 +99,30 @@ export interface Signer {
  * In-memory dev signer. Sprint 1 default. Stores xrpl.js Wallet instances
  * keyed by classic address. Suitable for testnet only.
  *
- * Production deployments must replace this with HsmSigner. The constructor
- * refuses to start when NODE_ENV === 'production' to make accidental
- * production deploys impossible.
+ * Production deployments to mainnet must replace this with HsmSigner.
+ * Testnet is allowed in NODE_ENV=production (e.g. cloud testnet on Fly)
+ * because PLAN.md §7.2 deliberately keeps DevSigner/SoftHSM for testnet —
+ * mainnet is the only network gated on Phase 2/3 HSM integration.
+ *
+ * Two layered guards:
+ *   1. NODE_ENV === 'production' AND XRPL_NETWORK !== 'testnet'
+ *      → refuses mainnet AND any unset/ambiguous network in production.
+ *      Production with XRPL_NETWORK explicitly set to 'testnet' is the
+ *      ONLY production-mode path that constructs a DevSigner.
+ *   2. XRPL_NETWORK === 'mainnet' (LOW-11) → defense-in-depth at the
+ *      signer boundary even if NODE_ENV is 'development' or unset.
  */
 export class DevSigner implements Signer {
   private wallets = new Map<string, Wallet>();
 
   constructor() {
-    if (process.env.NODE_ENV === 'production') {
+    if (
+      process.env.NODE_ENV === 'production' &&
+      (process.env.XRPL_NETWORK ?? '').toLowerCase() !== 'testnet'
+    ) {
       throw new Error(
-        'DevSigner refuses to start in production. Use HsmSigner instead. ' +
-          'See ARCHITECTURE.md §5.1 (Key vault).',
+        'DevSigner refuses to start in NODE_ENV=production unless XRPL_NETWORK=testnet. ' +
+          'Use HsmSigner for mainnet. See ARCHITECTURE.md §5.1 (Key vault).',
       );
     }
     // REVIEW.md LOW-11: defense-in-depth — refuse to construct when the
@@ -143,14 +175,13 @@ export class DevSigner implements Signer {
    * `generateInHsm(): { address, keyHandle }` instead, where keyHandle is
    * an opaque CloudHSM reference that NEVER leaves the HSM boundary.
    *
-   * The constructor refuses to start DevSigner when NODE_ENV=production,
-   * so this method is unreachable in prod by design. But we also guard it
-   * explicitly as belt-and-braces.
+   * Belt-and-braces guard: refuses production+mainnet (and production with
+   * an unset/ambiguous network). Mirrors the constructor's two-layer guard
+   * so a direct `new DevSigner(); s.generateWalletWithSeed()` call in a
+   * code path that bypassed the factory still fails closed.
    */
   generateWalletWithSeed(): { address: string; seed: string } {
-    if (process.env.NODE_ENV === 'production') {
-      throw new Error('generateWalletWithSeed() is dev-only and unreachable in production');
-    }
+    refuseIfProductionAndNotTestnet('generateWalletWithSeed');
     const wallet = Wallet.generate();
     if (!wallet.seed) {
       throw new Error('xrpl.js Wallet.generate() returned no seed (should never happen)');
@@ -167,9 +198,7 @@ export class DevSigner implements Signer {
    * as generateWalletWithSeed().
    */
   loadFromSeed(seed: string): { address: string } {
-    if (process.env.NODE_ENV === 'production') {
-      throw new Error('loadFromSeed() is dev-only and unreachable in production');
-    }
+    refuseIfProductionAndNotTestnet('loadFromSeed');
     const wallet = Wallet.fromSeed(seed);
     this.registerWallet(wallet);
     return { address: wallet.classicAddress };
