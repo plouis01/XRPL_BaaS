@@ -179,3 +179,36 @@ async function shutdown(signal: string): Promise<void> {
 
 process.on('SIGTERM', () => void shutdown('SIGTERM'));
 process.on('SIGINT', () => void shutdown('SIGINT'));
+
+// Process-level safety net for stale-socket exceptions from postgres-js.
+// Mirrors apps/api/src/index.ts — same root cause (Neon scale-to-zero
+// closes our TCP socket; postgres-js v3 throws synchronously from
+// `nextWrite` mid-query, outside any user-land try/catch). On the worker
+// this manifested as: tx validated fine, then the next DB UPDATE inside
+// applyAgentGrantOutcome crashed Bun mid-job, agents.status never flipped
+// from pending → active.
+//
+// Narrowly tolerate stale-socket throws and let the BullMQ worker keep
+// running. Anything else uncaught is a real crash.
+process.on('uncaughtException', (err: Error) => {
+  const msg = err?.message ?? '';
+  const stack = err?.stack ?? '';
+  const isStaleSocket =
+    /socket\.write|null is not an object.*socket\.write|Connection ended/i.test(msg) ||
+    /postgres\/src\/connection\.js/.test(stack);
+  if (isStaleSocket) {
+    logger.warn(
+      { err: msg, stack: stack.split('\n').slice(0, 4).join(' | ') },
+      'tolerating stale postgres socket — connection will be recycled',
+    );
+    return;
+  }
+  logger.error({ err: msg, stack }, 'uncaughtException — crashing');
+  throw err;
+});
+process.on('unhandledRejection', (reason) => {
+  logger.error(
+    { reason: reason instanceof Error ? reason.message : String(reason) },
+    'unhandledRejection',
+  );
+});
