@@ -36,6 +36,16 @@ primary_region = 'cdg'
     soft_limit = 200
     hard_limit = 250
 
+# Restart policy. Default Fly behavior is on-failure with max 10 retries —
+# we hit that ceiling once on the worker after a crash loop, after which
+# the dead Bun process was never resurrected. `always` + `max_retries=0`
+# keeps trying forever, so a transient postgres socket crash (or any other
+# unrecoverable in-flight error 6 hours into uptime) doesn't permanently
+# brick the API.
+[[restart]]
+  policy      = 'always'
+  max_retries = 0
+
 [[vm]]
   size      = 'shared-cpu-1x'
   memory    = '512mb'

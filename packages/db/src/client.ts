@@ -23,7 +23,37 @@ function initialize(): DrizzleDb {
       'DATABASE_URL is required to use @railforge/db. Set it in .env or process.env before the first DB call.',
     );
   }
-  postgresClient = postgres(url, { max: 10 });
+  // Connection-staleness defenses (post-incident hardening, May 2026).
+  //
+  // Neon's serverless compute scales to zero after a few minutes of idle.
+  // When it does, our TCP socket goes half-open: the kernel still sees an
+  // ESTABLISHED connection, but the next write fails with the underlying
+  // socket being null. postgres-js v3 doesn't gracefully recover from
+  // that — it throws synchronously inside `nextWrite` and Bun crashes the
+  // whole process with `TypeError: null is not an object (evaluating
+  // 'socket.write')`.
+  //
+  // The fix layers:
+  //   - `idle_timeout: 30` — close any pooled connection that's been idle
+  //     30s. Neon's idle window is ~5 min, so 30s is well inside the
+  //     guaranteed-alive zone. Cost: a fresh handshake on the first query
+  //     after a quiet stretch (~50ms vs Upstash). Worth it.
+  //   - `max_lifetime: 1800` — recycle every 30 min even on busy
+  //     connections, so we never keep a single socket open long enough to
+  //     hit middlebox NAT TTLs (~hours typically; cheaper to be safe).
+  //   - `connect_timeout: 10` — bound the cold-start handshake; better
+  //     than the default 30s for our request budget.
+  //
+  // Note: these timeouts apply to the producer pool. They don't touch the
+  // process-level uncaughtException handler in apps/api/src/index.ts —
+  // that's the belt to this suspenders. If a stale socket somehow slips
+  // past the timeouts, the handler logs and tolerates instead of crashing.
+  postgresClient = postgres(url, {
+    max: 10,
+    idle_timeout: 30,
+    max_lifetime: 60 * 30,
+    connect_timeout: 10,
+  });
   drizzleClient = drizzle(postgresClient, { schema });
   return drizzleClient;
 }
