@@ -1,20 +1,39 @@
-// Drizzle DB client. Single connection pool shared across worker/api/indexer.
+// Drizzle DB client backed by Neon's HTTP driver.
 //
-// Lazy initialization: we DO NOT create the postgres client at module import
-// time. That would force every test, schema generation, and tooling import to
-// have a live DATABASE_URL — including imports that only need the schema
-// shapes (auth tests, validators, etc.). Instead, the client is created on
-// first access via the proxy below. The first time anything reads from `db`,
-// it pulls DATABASE_URL from the env and connects.
+// Why HTTP and not the postgres-js TCP pool: Neon's compute scales to zero
+// after ~5 min of idle, and the path Fly→Neon goes through middleboxes that
+// silently drop idle TCP flows. With long-lived TCP, a half-open socket
+// causes postgres-js to either throw `null is not an object (evaluating
+// 'socket.write')` (which crashes Bun) or — worse — hang forever waiting
+// for a reply that never arrives. That manifested as Cloudflare 502s and
+// infinite dashboard spinners on every other agent provision.
+//
+// HTTP avoids the whole class of bug. Each query is a fresh HTTPS request
+// to Neon's serverless gateway: open, send, receive, close. There's no
+// connection state to go stale, no pool to poison, no TCP keepalive to
+// argue about with NAT TTLs. Cold-start latency adds ~10–30ms vs raw TCP,
+// which is acceptable here.
+//
+// Transactions: drizzle's `db.transaction(cb)` API works on neon-http —
+// the entire transaction is serialized into a single HTTP request that
+// Neon executes server-side as `BEGIN ... COMMIT`. Constraint: you cannot
+// `await` non-DB work inside a transaction (network I/O, etc.) because the
+// whole tx is one HTTP call. Our existing transactions only do DB ops, so
+// this is a non-change.
+//
+// Migrations: drizzle-kit (`bun run db:migrate`) uses its own driver and
+// is unaffected by this change.
+//
+// Lazy initialization preserved so tests and tooling that import schema
+// shapes don't need DATABASE_URL.
 
-import { drizzle } from 'drizzle-orm/postgres-js';
-import postgres, { type Sql } from 'postgres';
+import { neon } from '@neondatabase/serverless';
+import { drizzle } from 'drizzle-orm/neon-http';
 import * as schema from './schema.ts';
 
 type DrizzleDb = ReturnType<typeof drizzle<typeof schema>>;
 
 let drizzleClient: DrizzleDb | null = null;
-let postgresClient: Sql | null = null;
 
 function initialize(): DrizzleDb {
   const url = process.env.DATABASE_URL;
@@ -23,59 +42,8 @@ function initialize(): DrizzleDb {
       'DATABASE_URL is required to use @railforge/db. Set it in .env or process.env before the first DB call.',
     );
   }
-  // Connection-staleness defenses (May 2026 incident hardening).
-  //
-  // Neon scales the compute to zero after ~5 min idle. When it suspends, our
-  // TCP sockets go half-open — the kernel sees ESTABLISHED but writes either
-  // throw `null is not an object (evaluating 'socket.write')` or silently
-  // hang waiting for a response. The hang case is the worse of the two: the
-  // request handler awaits forever, the route never returns, Fly's edge
-  // proxy reports `connection closed before message completed`, and the
-  // dashboard renders a Cloudflare 502.
-  //
-  // Defense layers, working outside-in:
-  //   - aggressive pool recycling (idle/max_lifetime) so connections rarely
-  //     live long enough to be NAT-killed;
-  //   - server-side `statement_timeout` so even queries on a stuck socket
-  //     return an error instead of hanging;
-  //   - `[[restart]] policy='always'` in fly.toml so an actual crash
-  //     recovers in <1 s.
-  //
-  // We deliberately do NOT swallow uncaughtException at the process level —
-  // tolerating the throw keeps the broken pool alive and every subsequent
-  // query lands on a dead connection. See apps/api/src/index.ts and
-  // apps/worker/src/index.ts for the diagnostic-only handlers.
-  postgresClient = postgres(url, {
-    max: 10,
-    // Aggressive recycling: 30s idle and 5min lifetime. Why both:
-    //   - idle_timeout closes pooled connections that aren't in use, so
-    //     they don't sit long enough for a NAT/middlebox to silently drop
-    //     them.
-    //   - max_lifetime force-rotates connections that stay hot — even busy
-    //     ones eventually accumulate latent socket issues. 5 min is much
-    //     shorter than typical NAT TTLs but long enough that we're not
-    //     paying the handshake cost on every other request.
-    idle_timeout: 30,
-    max_lifetime: 300,
-    connect_timeout: 10,
-    // Server-side statement timeout. Critical: this is what saves us when
-    // the TCP socket has gone half-open and writes silently disappear into
-    // the void. Without it, postgres-js will await a query response
-    // indefinitely, the route handler hangs, the request never returns,
-    // Fly's edge proxy times out (`connection closed before message
-    // completed`), and the dashboard sees a Cloudflare 502.
-    //
-    // 8s is well above our typical query latency (~50ms p99) but tight
-    // enough that a wedged connection gets recycled in <10s. Postgres
-    // returns `57014: canceling statement due to statement timeout` — the
-    // postgres-js driver throws cleanly, the route handler's try/catch
-    // path runs, the request returns 5xx, and the bad connection gets
-    // dropped from the pool on the next acquire.
-    connection: {
-      statement_timeout: 8000,
-    },
-  });
-  drizzleClient = drizzle(postgresClient, { schema });
+  const sql = neon(url);
+  drizzleClient = drizzle(sql, { schema });
   return drizzleClient;
 }
 
@@ -93,15 +61,12 @@ export const db = new Proxy({} as DrizzleDb, {
 });
 
 /**
- * Test/teardown helper. Closes the underlying postgres connection pool so
- * vitest doesn't hang on open handles.
+ * Test/teardown helper. The HTTP driver doesn't hold a long-lived socket so
+ * there's nothing to close — we just drop the singleton so the next call
+ * to `db.<anything>` re-initializes (useful for tests that swap DATABASE_URL).
  */
 export async function disconnectDb(): Promise<void> {
-  if (postgresClient) {
-    await postgresClient.end({ timeout: 5 });
-    postgresClient = null;
-    drizzleClient = null;
-  }
+  drizzleClient = null;
 }
 
 /**
@@ -152,10 +117,13 @@ export async function checkMigrationDrift(): Promise<MigrationDriftResult> {
   // the schema (it's drizzle-internal).
   const real = drizzleClient ?? initialize();
   const { sql } = await import('drizzle-orm');
+  // neon-http's execute() returns a NeonHttpQueryResult — rows live on
+  // `.rows`. The previous postgres-js driver returned the array directly.
   const result = await real.execute<{ count: string }>(
     sql`SELECT COUNT(*)::text AS count FROM drizzle.__drizzle_migrations`,
   );
-  const appliedCount = Number.parseInt(result[0]?.count ?? '0', 10);
+  const rows = (result as unknown as { rows?: Array<{ count: string }> }).rows ?? [];
+  const appliedCount = Number.parseInt(rows[0]?.count ?? '0', 10);
 
   if (journalCount === appliedCount) {
     return { journalCount, appliedCount, drift: false };
