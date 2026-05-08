@@ -171,10 +171,16 @@ export function Agents({ network }: { network: Network }) {
   // and triggers a list refresh on a status flip — but it only mounts when
   // the user expands a row. Fresh agents land in the table collapsed, so
   // without this hook the badge sits at "pending" until manual refresh.
-  // Poll the list every 3 s while any row is in flight (pending grant or
-  // pending revocation) and stop once everything has reached a terminal
-  // state. 3 s mirrors xrpld ledger close cadence — faster wastes round
-  // trips, slower makes the UX feel broken.
+  // Poll the list while any row is in flight (pending grant or pending
+  // revocation) and stop once everything has reached a terminal state.
+  //
+  // Cadence: 10 s. xrpld closes ledgers every ~4 s and a SignerListSet
+  // typically validates within 5–10 s, so 10 s gives near-realtime feedback
+  // without hammering Redis on every dashboard tab. Previously 3 s — each
+  // poll runs 4–6 Redis ops through the API (rate limit, idempotency cache,
+  // revocation, etc.) and a single open tab burned ~7K ops/hour on this
+  // hook alone. 10 s is ~3× cheaper and still under the typical settle
+  // time, so a refresh almost always lands on a terminal state.
   const anyInFlight = agents.some(
     (a) => a.status === 'pending' || a.status === 'submitting' || a.pending_revocation === true,
   );
@@ -182,7 +188,7 @@ export function Agents({ network }: { network: Network }) {
     if (!anyInFlight) return;
     const interval = setInterval(() => {
       void fetchAgents({ silent: true });
-    }, 3_000);
+    }, 10_000);
     return () => clearInterval(interval);
   }, [anyInFlight, fetchAgents]);
 
@@ -504,6 +510,10 @@ function AgentDetail({
   //   - status='pending' → SignerListSet for grant is validating
   //   - pending_revocation=true → SignerListSet for revoke is validating
   // Stop polling once both reach a terminal state.
+  //
+  // Cadence: 10 s. Was 4 s — the user only sees this view when they've
+  // expanded a row, but a SignerListSet validates in 5–10 s anyway, so
+  // sub-10 s polling mostly just burns Redis ops on no-change replies.
   useEffect(() => {
     if (!agent) return;
     const inFlight =
@@ -513,7 +523,7 @@ function AgentDetail({
     if (!inFlight) return;
     const t = setInterval(() => {
       void fetchDetail();
-    }, 4000);
+    }, 10_000);
     return () => clearInterval(t);
   }, [agent, fetchDetail]);
 
