@@ -26,39 +26,28 @@ import tokensRoute from './routes/tokens.ts';
 import webhooksRoute from './routes/webhooks.ts';
 import type { AppEnv } from './types.ts';
 
-// Process-level safety net for stale-socket exceptions from postgres-js.
+// Process-level diagnostics. We intentionally do NOT swallow uncaughtException
+// — letting the process crash is the right recovery, because:
+//   1. fly.toml has `[[restart]] policy='always' max_retries=0`, so a fresh
+//      Bun comes up in <1 s.
+//   2. Tolerating the throw keeps the broken postgres pool alive in memory.
+//      Subsequent requests then hand-out the same dead connections, queries
+//      hang server-side, and the request handler never returns — which
+//      manifests as Cloudflare 502s + dashboard infinite spinners. We
+//      learned this the hard way (see git log around May 8 2026).
+//   3. The defenses against the stale-socket case live deeper:
+//        - server-side `statement_timeout: 8000` in packages/db/src/client.ts
+//          (queries return cleanly instead of hanging),
+//        - aggressive `idle_timeout: 30` + `max_lifetime: 300` (sockets get
+//          rotated before they go stale),
+//        - `[[restart]]` (if a hard crash slips through, we recover fast).
 //
-// postgres-js v3 throws synchronously from `nextWrite` when the underlying
-// TCP socket has been closed by the peer (Neon's scale-to-zero, idle middle-
-// box, etc.). The throw happens inside the driver's internal write loop,
-// outside any user-land try/catch, so it surfaces here as `uncaughtException`
-// and Bun terminates the whole process — which Cloudflare/Fly's edge then
-// reports as a 502 to the user mid-request.
-//
-// We can't catch it at the call site (the throw is in a different async
-// context). The `idle_timeout` + `max_lifetime` settings in
-// packages/db/src/client.ts close stale sockets BEFORE they're used, which
-// covers the common case. This handler is the belt-and-suspenders: if one
-// somehow slips through, we log it and let the request error out cleanly
-// (the next request gets a fresh connection from the pool).
-//
-// We deliberately scope this narrowly. Anything else uncaught is a real
-// crash and should kill the process as usual — silent failure is worse
-// than a fast restart.
+// All this handler does now is log the crash so we can see what hit.
 process.on('uncaughtException', (err: Error) => {
-  const msg = err?.message ?? '';
-  const stack = err?.stack ?? '';
-  const isStaleSocket =
-    /socket\.write|null is not an object.*socket\.write|Connection ended/i.test(msg) ||
-    /postgres\/src\/connection\.js/.test(stack);
-  if (isStaleSocket) {
-    logger.warn(
-      { err: msg, stack: stack.split('\n').slice(0, 4).join(' | ') },
-      'tolerating stale postgres socket — connection will be recycled',
-    );
-    return;
-  }
-  logger.error({ err: msg, stack }, 'uncaughtException — crashing');
+  logger.error(
+    { err: err?.message ?? String(err), stack: err?.stack },
+    'uncaughtException — process will exit',
+  );
   throw err;
 });
 process.on('unhandledRejection', (reason) => {

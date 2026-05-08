@@ -23,36 +23,57 @@ function initialize(): DrizzleDb {
       'DATABASE_URL is required to use @railforge/db. Set it in .env or process.env before the first DB call.',
     );
   }
-  // Connection-staleness defenses (post-incident hardening, May 2026).
+  // Connection-staleness defenses (May 2026 incident hardening).
   //
-  // Neon's serverless compute scales to zero after a few minutes of idle.
-  // When it does, our TCP socket goes half-open: the kernel still sees an
-  // ESTABLISHED connection, but the next write fails with the underlying
-  // socket being null. postgres-js v3 doesn't gracefully recover from
-  // that — it throws synchronously inside `nextWrite` and Bun crashes the
-  // whole process with `TypeError: null is not an object (evaluating
-  // 'socket.write')`.
+  // Neon scales the compute to zero after ~5 min idle. When it suspends, our
+  // TCP sockets go half-open — the kernel sees ESTABLISHED but writes either
+  // throw `null is not an object (evaluating 'socket.write')` or silently
+  // hang waiting for a response. The hang case is the worse of the two: the
+  // request handler awaits forever, the route never returns, Fly's edge
+  // proxy reports `connection closed before message completed`, and the
+  // dashboard renders a Cloudflare 502.
   //
-  // The fix layers:
-  //   - `idle_timeout: 30` — close any pooled connection that's been idle
-  //     30s. Neon's idle window is ~5 min, so 30s is well inside the
-  //     guaranteed-alive zone. Cost: a fresh handshake on the first query
-  //     after a quiet stretch (~50ms vs Upstash). Worth it.
-  //   - `max_lifetime: 1800` — recycle every 30 min even on busy
-  //     connections, so we never keep a single socket open long enough to
-  //     hit middlebox NAT TTLs (~hours typically; cheaper to be safe).
-  //   - `connect_timeout: 10` — bound the cold-start handshake; better
-  //     than the default 30s for our request budget.
+  // Defense layers, working outside-in:
+  //   - aggressive pool recycling (idle/max_lifetime) so connections rarely
+  //     live long enough to be NAT-killed;
+  //   - server-side `statement_timeout` so even queries on a stuck socket
+  //     return an error instead of hanging;
+  //   - `[[restart]] policy='always'` in fly.toml so an actual crash
+  //     recovers in <1 s.
   //
-  // Note: these timeouts apply to the producer pool. They don't touch the
-  // process-level uncaughtException handler in apps/api/src/index.ts —
-  // that's the belt to this suspenders. If a stale socket somehow slips
-  // past the timeouts, the handler logs and tolerates instead of crashing.
+  // We deliberately do NOT swallow uncaughtException at the process level —
+  // tolerating the throw keeps the broken pool alive and every subsequent
+  // query lands on a dead connection. See apps/api/src/index.ts and
+  // apps/worker/src/index.ts for the diagnostic-only handlers.
   postgresClient = postgres(url, {
     max: 10,
+    // Aggressive recycling: 30s idle and 5min lifetime. Why both:
+    //   - idle_timeout closes pooled connections that aren't in use, so
+    //     they don't sit long enough for a NAT/middlebox to silently drop
+    //     them.
+    //   - max_lifetime force-rotates connections that stay hot — even busy
+    //     ones eventually accumulate latent socket issues. 5 min is much
+    //     shorter than typical NAT TTLs but long enough that we're not
+    //     paying the handshake cost on every other request.
     idle_timeout: 30,
-    max_lifetime: 60 * 30,
+    max_lifetime: 300,
     connect_timeout: 10,
+    // Server-side statement timeout. Critical: this is what saves us when
+    // the TCP socket has gone half-open and writes silently disappear into
+    // the void. Without it, postgres-js will await a query response
+    // indefinitely, the route handler hangs, the request never returns,
+    // Fly's edge proxy times out (`connection closed before message
+    // completed`), and the dashboard sees a Cloudflare 502.
+    //
+    // 8s is well above our typical query latency (~50ms p99) but tight
+    // enough that a wedged connection gets recycled in <10s. Postgres
+    // returns `57014: canceling statement due to statement timeout` — the
+    // postgres-js driver throws cleanly, the route handler's try/catch
+    // path runs, the request returns 5xx, and the bad connection gets
+    // dropped from the pool on the next acquire.
+    connection: {
+      statement_timeout: 8000,
+    },
   });
   drizzleClient = drizzle(postgresClient, { schema });
   return drizzleClient;

@@ -180,30 +180,18 @@ async function shutdown(signal: string): Promise<void> {
 process.on('SIGTERM', () => void shutdown('SIGTERM'));
 process.on('SIGINT', () => void shutdown('SIGINT'));
 
-// Process-level safety net for stale-socket exceptions from postgres-js.
-// Mirrors apps/api/src/index.ts — same root cause (Neon scale-to-zero
-// closes our TCP socket; postgres-js v3 throws synchronously from
-// `nextWrite` mid-query, outside any user-land try/catch). On the worker
-// this manifested as: tx validated fine, then the next DB UPDATE inside
-// applyAgentGrantOutcome crashed Bun mid-job, agents.status never flipped
-// from pending → active.
-//
-// Narrowly tolerate stale-socket throws and let the BullMQ worker keep
-// running. Anything else uncaught is a real crash.
+// Process-level diagnostics. Same shape as apps/api/src/index.ts — we
+// intentionally do NOT swallow uncaughtException. Letting the process
+// crash is the right recovery: fly.toml has `[[restart]] policy='always'`,
+// so a fresh Bun is back in <1 s and BullMQ resumes the in-flight job from
+// Redis. Tolerating throws keeps the broken postgres pool alive and causes
+// every subsequent query to hang on dead connections (learned the hard way
+// May 8 2026 — see git log).
 process.on('uncaughtException', (err: Error) => {
-  const msg = err?.message ?? '';
-  const stack = err?.stack ?? '';
-  const isStaleSocket =
-    /socket\.write|null is not an object.*socket\.write|Connection ended/i.test(msg) ||
-    /postgres\/src\/connection\.js/.test(stack);
-  if (isStaleSocket) {
-    logger.warn(
-      { err: msg, stack: stack.split('\n').slice(0, 4).join(' | ') },
-      'tolerating stale postgres socket — connection will be recycled',
-    );
-    return;
-  }
-  logger.error({ err: msg, stack }, 'uncaughtException — crashing');
+  logger.error(
+    { err: err?.message ?? String(err), stack: err?.stack },
+    'uncaughtException — process will exit',
+  );
   throw err;
 });
 process.on('unhandledRejection', (reason) => {
