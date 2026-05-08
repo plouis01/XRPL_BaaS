@@ -1,39 +1,55 @@
-// Drizzle DB client backed by Neon's HTTP driver.
+// Drizzle DB client backed by Neon's WebSocket Pool (neon-serverless).
 //
-// Why HTTP and not the postgres-js TCP pool: Neon's compute scales to zero
-// after ~5 min of idle, and the path Fly→Neon goes through middleboxes that
-// silently drop idle TCP flows. With long-lived TCP, a half-open socket
-// causes postgres-js to either throw `null is not an object (evaluating
-// 'socket.write')` (which crashes Bun) or — worse — hang forever waiting
-// for a reply that never arrives. That manifested as Cloudflare 502s and
-// infinite dashboard spinners on every other agent provision.
+// Why this driver and not raw postgres-js or the HTTP driver:
 //
-// HTTP avoids the whole class of bug. Each query is a fresh HTTPS request
-// to Neon's serverless gateway: open, send, receive, close. There's no
-// connection state to go stale, no pool to poison, no TCP keepalive to
-// argue about with NAT TTLs. Cold-start latency adds ~10–30ms vs raw TCP,
-// which is acceptable here.
+//   - postgres-js (TCP pool): the path Fly→Neon goes through middleboxes
+//     that silently drop idle TCP flows. Long-lived sockets go half-open;
+//     postgres-js then either throws `null is not an object (evaluating
+//     'socket.write')` (crashes Bun) or hangs forever waiting for a reply.
+//     That manifested as Cloudflare 502s and infinite dashboard spinners.
 //
-// Transactions: drizzle's `db.transaction(cb)` API works on neon-http —
-// the entire transaction is serialized into a single HTTP request that
-// Neon executes server-side as `BEGIN ... COMMIT`. Constraint: you cannot
-// `await` non-DB work inside a transaction (network I/O, etc.) because the
-// whole tx is one HTTP call. Our existing transactions only do DB ops, so
-// this is a non-change.
+//   - neon-http: each query is a fresh HTTPS request, so no socket
+//     staleness — but it has no transaction support (drizzle throws
+//     "No transactions support in neon-http driver" on `db.transaction()`).
+//     We use transactions in 13 places (agent provisioning, account create,
+//     etc.) so this driver is a non-starter.
 //
-// Migrations: drizzle-kit (`bun run db:migrate`) uses its own driver and
-// is unaffected by this change.
+// neon-serverless Pool is the right answer:
+//   - WebSocket protocol with built-in ping/pong frames keeps the
+//     connection alive across NAT/middlebox TTLs.
+//   - `pg`-compatible client → drizzle's full `db.transaction(cb)`
+//     semantics work normally (BEGIN ... COMMIT, intermediate `.returning()`
+//     results visible mid-tx, etc.).
+//   - Pool transparently reconnects on transient WebSocket errors.
+//
+// Bun runtime note: neon-serverless needs a WebSocket constructor. Bun's
+// global `WebSocket` works directly — no `ws` package shim required.
+//
+// Migrations: drizzle-kit (`bun run db:migrate`) uses its own driver via
+// drizzle.config.ts and is unaffected by this change.
 //
 // Lazy initialization preserved so tests and tooling that import schema
 // shapes don't need DATABASE_URL.
 
-import { neon } from '@neondatabase/serverless';
-import { drizzle } from 'drizzle-orm/neon-http';
+import { Pool, neonConfig } from '@neondatabase/serverless';
+import { drizzle } from 'drizzle-orm/neon-serverless';
 import * as schema from './schema.ts';
+
+// Bun ships a spec-compliant global WebSocket. neonConfig defaults to
+// looking for `ws` (the npm package), which we don't need or want. Setting
+// it explicitly avoids a "ws not found" import error at first query.
+if (
+  typeof globalThis !== 'undefined' &&
+  typeof (globalThis as { WebSocket?: unknown }).WebSocket === 'function'
+) {
+  // biome-ignore lint/suspicious/noExplicitAny: neonConfig.webSocketConstructor types don't perfectly match Bun/native WS but are runtime-compatible
+  neonConfig.webSocketConstructor = (globalThis as any).WebSocket;
+}
 
 type DrizzleDb = ReturnType<typeof drizzle<typeof schema>>;
 
 let drizzleClient: DrizzleDb | null = null;
+let pool: Pool | null = null;
 
 function initialize(): DrizzleDb {
   const url = process.env.DATABASE_URL;
@@ -42,8 +58,17 @@ function initialize(): DrizzleDb {
       'DATABASE_URL is required to use @railforge/db. Set it in .env or process.env before the first DB call.',
     );
   }
-  const sql = neon(url);
-  drizzleClient = drizzle(sql, { schema });
+  // Pool sizing: 10 is fine for our throughput (single Fly VM, < 200 RPS).
+  // The WebSocket protocol carries its own keepalive frames, but we still
+  // recycle on idle as a defensive belt-and-suspenders against any
+  // middlebox that ignores those frames.
+  pool = new Pool({
+    connectionString: url,
+    max: 10,
+    idleTimeoutMillis: 30_000,
+    connectionTimeoutMillis: 10_000,
+  });
+  drizzleClient = drizzle(pool, { schema });
   return drizzleClient;
 }
 
@@ -61,11 +86,15 @@ export const db = new Proxy({} as DrizzleDb, {
 });
 
 /**
- * Test/teardown helper. The HTTP driver doesn't hold a long-lived socket so
- * there's nothing to close — we just drop the singleton so the next call
- * to `db.<anything>` re-initializes (useful for tests that swap DATABASE_URL).
+ * Test/teardown helper. Closes the underlying WebSocket pool so vitest
+ * doesn't hang on open handles. Resets the singleton so a fresh client is
+ * created on next use.
  */
 export async function disconnectDb(): Promise<void> {
+  if (pool) {
+    await pool.end();
+    pool = null;
+  }
   drizzleClient = null;
 }
 
