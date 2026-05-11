@@ -8,6 +8,7 @@
 //   2. ledger expand fetch  → parseTransaction per tx → persistTransaction
 //                              (Postgres dedup + UPSERTs)
 
+import { resolveRedisFamily } from '@railforge/jobs';
 import { Redis } from 'ioredis';
 import { logger } from './logger.ts';
 import { parseLedgerClose, parseTransaction } from './parser.ts';
@@ -27,6 +28,8 @@ const redisUrl = process.env.REDIS_URL ?? 'redis://localhost:6379';
 //   - `enableReadyCheck: false`    → Upstash free tier sometimes stalls on
 //     the post-connect INFO probe.
 const redis = new Redis(redisUrl, {
+  // family: 6 when REDIS_URL points at a Fly internal hostname (AAAA-only).
+  family: resolveRedisFamily(redisUrl),
   maxRetriesPerRequest: null,
   enableReadyCheck: false,
 });

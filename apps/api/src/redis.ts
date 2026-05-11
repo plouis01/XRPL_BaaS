@@ -42,6 +42,7 @@
 //   - `retryStrategy` caps the reconnect backoff at 2s so we don't
 //     stay disconnected forever after a transient blip.
 
+import { resolveRedisFamily } from '@railforge/jobs';
 import Redis from 'ioredis';
 import { logger } from './logger.ts';
 
@@ -53,6 +54,7 @@ export function getRedis(): Redis {
   }
   const url = process.env.REDIS_URL ?? 'redis://localhost:6379';
   client = new Redis(url, {
+    family: resolveRedisFamily(url),
     commandTimeout: 3000,
     enableOfflineQueue: false,
     enableReadyCheck: false,

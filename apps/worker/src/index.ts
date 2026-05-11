@@ -1,3 +1,4 @@
+import { resolveRedisFamily } from '@railforge/jobs';
 import { Queue } from 'bullmq';
 import { Redis } from 'ioredis';
 import { startAccountSetupWorker } from './jobs/accountSetup.ts';
@@ -15,6 +16,9 @@ assertMainnetHsmInvariant();
 
 const redisUrl = process.env.REDIS_URL ?? 'redis://localhost:6379';
 const workerRedis = new Redis(redisUrl, {
+  // family: 6 when REDIS_URL points at a Fly internal hostname (AAAA-only).
+  // See resolveRedisFamily docstring for the full rationale.
+  family: resolveRedisFamily(redisUrl),
   // BullMQ requires `maxRetriesPerRequest: null` — its blocking commands
   // would otherwise be canceled mid-poll. `enableReadyCheck: false` avoids
   // the post-connect INFO probe, which Upstash's free tier sometimes fails

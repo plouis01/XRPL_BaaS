@@ -156,12 +156,34 @@ export interface AccountSetupJobData {
 // trips during healthy operation — it only catches the wedge case. Same
 // for the TxSequencer (SET NX EX + a small Lua block).
 
+/**
+ * Pick the DNS family ioredis should use for a given REDIS_URL.
+ *
+ * Fly's private 6PN network exposes app-to-app DNS only via AAAA records
+ * (`<app>.internal` → IPv6). ioredis defaults to ioredis's own dns.lookup
+ * call which on Bun/Node prefers IPv4 — so a URL like
+ * `redis://...@railforge-redis.internal:6379` resolves to nothing and
+ * fails with ECONNREFUSED. Forcing `family: 6` for Fly internal/flycast
+ * hostnames fixes it. Public hostnames (Upstash, localhost, IP literals)
+ * keep the default behavior.
+ */
+export function resolveRedisFamily(url: string): 6 | undefined {
+  try {
+    const host = new URL(url).hostname;
+    if (host.endsWith('.internal') || host.endsWith('.flycast')) return 6;
+  } catch {
+    // Malformed URL — let ioredis surface the error itself.
+  }
+  return undefined;
+}
+
 let redisConnection: Redis | null = null;
 
 export function getJobsRedis(): Redis {
   if (redisConnection) return redisConnection;
   const url = process.env.REDIS_URL ?? 'redis://localhost:6379';
   redisConnection = new Redis(url, {
+    family: resolveRedisFamily(url),
     // BullMQ requires `maxRetriesPerRequest: null` on every connection it
     // touches (Queue, Worker, QueueEvents) — the default retry behavior
     // collides with BullMQ's own scheduling. Independent of commandTimeout.
