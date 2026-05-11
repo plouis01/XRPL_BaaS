@@ -28,6 +28,9 @@ export function LoginForm({ onLoggedIn }: { onLoggedIn: () => void }) {
       if (err.status === 401) return 'Invalid or revoked API key.';
       if (err.status === 404) return 'Signup is disabled on this server.';
       if (err.status === 400) return 'Invalid email or name.';
+      if (err.status === 409) {
+        return 'An account with this email already exists. Sign in with your API key instead.';
+      }
       return `API error ${err.status}.`;
     }
     if (err instanceof Error) return err.message;

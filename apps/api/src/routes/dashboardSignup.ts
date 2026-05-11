@@ -58,6 +58,13 @@ signup.post('/', async (c) => {
   const keyHash = hashApiKey(rawKey);
   const keyPrefix = rawKey.slice(0, 8);
 
+  // CRITICAL: if the email already maps to a client, REJECT the request.
+  // The earlier behavior silently minted a fresh API key for the existing
+  // client row, which meant anyone who knew a registered email could take
+  // over that tenant (and access every agent + key it owned). The trade-
+  // off here is the email-enumeration oracle this 409 creates — acceptable
+  // for testnet beta, but mainnet signup will need a real account-recovery
+  // flow (magic link) instead of this branch.
   let clientId: string;
   try {
     const existing = await db
@@ -67,19 +74,25 @@ signup.post('/', async (c) => {
       .limit(1);
 
     if (existing[0]) {
-      clientId = existing[0].id;
-    } else {
-      const inserted = await db
-        .insert(schema.clients)
-        .values({ name: body.name, email: body.email, plan: 'free' })
-        .returning({ id: schema.clients.id });
-      const insertedId = inserted[0]?.id;
-      if (!insertedId) {
-        logger.error({ email: body.email }, 'dashboard signup client insert returned no id');
-        return c.json({ error: 'Service unavailable' }, 503);
-      }
-      clientId = insertedId;
+      logger.warn({ email: body.email }, 'dashboard signup rejected: email already registered');
+      return c.json(
+        {
+          error: 'An account with this email already exists. Please sign in instead.',
+        },
+        409,
+      );
     }
+
+    const inserted = await db
+      .insert(schema.clients)
+      .values({ name: body.name, email: body.email, plan: 'free' })
+      .returning({ id: schema.clients.id });
+    const insertedId = inserted[0]?.id;
+    if (!insertedId) {
+      logger.error({ email: body.email }, 'dashboard signup client insert returned no id');
+      return c.json({ error: 'Service unavailable' }, 503);
+    }
+    clientId = insertedId;
 
     await db.insert(schema.apiKeys).values({
       clientId,

@@ -6,7 +6,7 @@
 //   1. valid body → 201 + { api_key starting with rf_test_, client_id,
 //      parent_address: null when treasury isn't configured }
 //   2. invalid body → 400 (Zod rejection, no DB write)
-//   3. existing email → reuses the client row (no duplicate insert)
+//   3. existing email → 409 (account takeover guard — no inserts performed)
 //   4. DB failure → 503 (matches the session route's fail-closed posture)
 //   5. parent_address is always present in the response shape (null fallback
 //      is fine — the dashboard handles both)
@@ -126,7 +126,10 @@ describe('POST /signup (dev signup)', () => {
     expect(apiKeyInsertArgs.isActive).toBe(true);
   });
 
-  it('reuses the existing client row when the email is known', async () => {
+  it('rejects with 409 when the email is already registered', async () => {
+    // Account-takeover guard: the previous behavior minted a fresh API key
+    // for the existing client, which gave anyone who knew an email full
+    // access to that tenant's accounts + agents.
     selectLimitMock.mockResolvedValueOnce([{ id: 'client-existing' }]);
     const app = makeApp();
     const res = await app.request('/signup', {
@@ -134,11 +137,11 @@ describe('POST /signup (dev signup)', () => {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ email: 'known@dev.local', name: 'Dev User' }),
     });
-    expect(res.status).toBe(201);
-    const body = (await res.json()) as { client_id: string };
-    expect(body.client_id).toBe('client-existing');
-    // Only one insert (the api_keys one) — no clients insert when reusing.
-    expect(insertValuesMock).toHaveBeenCalledTimes(1);
+    expect(res.status).toBe(409);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toMatch(/already exists/i);
+    // No DB writes — the route bails before touching clients or apiKeys.
+    expect(insertValuesMock).not.toHaveBeenCalled();
     expect(insertReturningMock).not.toHaveBeenCalled();
   });
 
