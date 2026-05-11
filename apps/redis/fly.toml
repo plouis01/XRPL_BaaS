@@ -1,0 +1,51 @@
+# RailForge Redis — self-hosted BullMQ backend, private to the org.
+#
+# No public IP, no [http_service], no [[services]] — reachable ONLY via
+# Fly's 6PN private network at `railforge-redis.internal:6379` from
+# railforge-api and railforge-worker (same org, same primary region).
+#
+# Deploy:  fly deploy -c apps/redis/fly.toml
+#
+# Before the first deploy:
+#   1.  fly apps create railforge-redis
+#   2.  fly volumes create redis_data --region cdg --size 1 -a railforge-redis
+#   3.  fly secrets set REDIS_PASSWORD=<openssl rand -hex 32> -a railforge-redis
+#   4.  fly deploy -c apps/redis/fly.toml
+# Then on api + worker:
+#   5.  fly secrets set REDIS_URL='redis://default:<password>@railforge-redis.internal:6379' -a railforge-api
+#   6.  fly secrets set REDIS_URL='redis://default:<password>@railforge-redis.internal:6379' -a railforge-worker
+#   7.  fly deploy -c apps/api/fly.toml && fly deploy -c apps/worker/fly.toml
+
+app            = 'railforge-redis'
+primary_region = 'cdg'
+
+[build]
+  dockerfile = 'Dockerfile'
+
+# Persistent storage for AOF. The volume is created once via
+# `fly volumes create redis_data --region cdg --size 1 -a railforge-redis`
+# and survives across deploys + machine restarts. 1 GB is plenty for our
+# BullMQ working set (job state is tiny) and leaves headroom for the AOF
+# file to grow between rewrites.
+[[mounts]]
+  source      = 'redis_data'
+  destination = '/data'
+
+# Restart policy mirrors the worker — `always` with no retry cap. A Redis
+# crash mid-flight would silently brick the entire BullMQ pipeline if Fly
+# stopped retrying; we'd rather have it loop than give up.
+[[restart]]
+  policy      = 'always'
+  max_retries = 0
+
+# Single-machine, single-region. No replication. For testnet beta the
+# trade-off is acceptable: durability is AOF, recovery from a hardware
+# failure is "Fly relocates the machine and replays AOF". If we ever
+# need HA, switch to a managed provider — don't try to operate Redis
+# Sentinel ourselves.
+[[vm]]
+  size      = 'shared-cpu-1x'
+  memory    = '256mb'
+  cpu_kind  = 'shared'
+  cpus      = 1
+  memory_mb = 256
