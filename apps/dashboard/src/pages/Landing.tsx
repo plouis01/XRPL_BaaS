@@ -159,27 +159,27 @@ export function Landing() {
         >
           <FeatureCard
             title="Agent provisioning"
-            body="One POST mints an agent: its own XRPL wallet, a scope-bound API key, daily spend caps, and a destination allowlist. Hand the key to an AI agent or external service; revoke it on-chain in one call."
+            body="Mint an API key with its own XRPL wallet, daily spend caps, and an address allowlist."
           />
           <FeatureCard
             title="Spend policies built in"
-            body="Per-agent XRP daily limits, non-XRP op ceilings, and a destination allowlist enforced before signing. Stop runaways before they reach the ledger, not after."
+            body="Per-agent daily limits, op ceilings, and an address allowlist."
           />
           <FeatureCard
             title="Accounts & HSM signing"
-            body="Spin up a funded XRPL account with one POST. Master keys never leave the HSM boundary; clients hold a regular key for day-to-day ops."
+            body="Master keys never leave the HSM boundary; users hold a regular key for day-to-day ops."
           />
           <FeatureCard
             title="Payments & webhooks"
-            body="Idempotent XRP and token payments, escrow, cross-currency. HMAC-SHA256-signed webhooks fire on every validated ledger close, perfect for agents that react to settlement."
+            body="Idempotent XRP and token payments, escrow, cross-currency."
           />
           <FeatureCard
             title="MPTs by default"
-            body="Issue stablecoins and RWAs as Multi-Purpose Tokens. Trust lines are still available as an explicit opt-in when you need DEX depth."
+            body="Issue stablecoins and RWAs as Multi-Purpose Tokens."
           />
           <FeatureCard
             title="Compliance primitives"
-            body="On-chain credentials (XLS-70), permissioned domains (XLS-80), permissioned DEX (XLS-81), and delegated permissions (XLS-75), for regulated agents and gated marketplaces."
+            body="On-chain credentials, permissioned domains, permissioned DEX, and delegated permissions."
           />
         </section>
 
@@ -214,20 +214,18 @@ export function Landing() {
               tag="AUTONOMOUS AGENTS"
               title="Give your agent a wallet, and a leash."
               bullets={[
-                'Provision a payment agent: its own XRPL address, scope-bound API key, daily spend cap, destination allowlist.',
-                'Constraints enforced server-side before signing. The agent literally cannot exceed its policy, no matter how creative its prompt.',
-                'Revoke the delegate on-chain (XLS-75) the moment behavior drifts, no key rotation drama.',
-                'Settlement webhooks let the agent react to confirmed txs in real time.',
+                'Provision a payment agent with specific rules.',
+                'Constraints prevent prompt injection.',
+                'Settlement webhooks let the agent react in real time.',
               ]}
             />
             <AudienceCard
               tag="FINTECHS & ISSUERS"
               title="Ship XRPL products without the integration tax."
               bullets={[
-                'Issue stablecoins or RWAs as MPTs. Freeze, clawback, transfer fees, all behind clean REST endpoints.',
-                'Cross-currency payments, escrow, and HMAC-signed webhooks out of the box. Idempotency keys on every state change.',
-                'Compliance primitives: credentials, permissioned domains, permissioned DEX, when the regulator asks.',
-                "Sandbox on testnet from the first request. Mainnet is a flag flip when you're ready.",
+                'Issue customisable stablecoins or RWAs.',
+                'Cross-currency payments, escrow, and HMAC-signed webhooks.',
+                'Compliance primitives.',
               ]}
             />
           </div>
@@ -242,7 +240,7 @@ export function Landing() {
             textAlign: 'center',
           }}
         >
-          <h2 style={{ fontSize: 22, margin: '0 0 8px' }}>One curl from your first transaction</h2>
+          <h2 style={{ fontSize: 22, margin: '0 0 8px' }}>One click from your first transaction</h2>
           <p style={{ color: '#64748b', margin: '0 0 20px', fontSize: 14 }}>
             Sign up to get a testnet key, then send your first payment or spin up your first agent
             in under a minute.
