@@ -261,6 +261,62 @@ export function Landing() {
             Get started
           </Link>
         </section>
+
+        <section style={{ marginTop: 64 }}>
+          <h2
+            style={{
+              fontSize: 24,
+              margin: '0 0 8px',
+              textAlign: 'center',
+            }}
+          >
+            FAQ
+          </h2>
+          <p
+            style={{
+              color: '#64748b',
+              fontSize: 14,
+              textAlign: 'center',
+              margin: '0 0 32px',
+            }}
+          >
+            The questions developers ask before signing up.
+          </p>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+            <FaqItem
+              q="What is RailForge?"
+              a="A REST API that wraps XRPL-native primitives (accounts, MPTs, payments, credentials, permissioned domains) so you can ship without writing xrpl.js, managing keys, or tracking reserves."
+            />
+            <FaqItem
+              q="Do I need to know XRPL to use it?"
+              a="No. Endpoints are designed around REST resources (accounts, tokens, payments, agents). The XRPL details: sequence numbers, LastLedgerSequence, reserves, trust lines vs MPTs are handled server-side."
+            />
+            <FaqItem
+              q="How are keys stored?"
+              a="Semi-custodial by default: master keys live in an HSM and never leave the boundary. Clients receive a regular key for day-to-day ops. Fully non-custodial mode is opt-in: you bring the keypair, we orchestrate."
+            />
+            <FaqItem
+              q="What's an agent, exactly?"
+              a="A scope-bound API key tied to its own XRPL wallet, with daily spend caps, op ceilings, and an address allowlist. Constraints are enforced server-side before signing, so the agent cannot exceed its policy regardless of prompt."
+            />
+            <FaqItem
+              q="Is this production-ready?"
+              a="Alpha on testnet today. Mainnet will be ready soon."
+            />
+            <FaqItem
+              q="How is pricing handled?"
+              a="Free testnet, with mainnet pricing announced at GA."
+            />
+            <FaqItem
+              q="Why XRPL and not an EVM chain?"
+              a="XRPL gives us native primitives that don't exist on EVMs: on-chain credentials, permissioned domains, permissioned DEX, delegated permissions. If you need smart contracts, our sister product Multisubs covers EVMs."
+            />
+            <FaqItem
+              q="How do webhooks work?"
+              a="HMAC-SHA256 signed over timestamp + '.' + body, with X-RailForge-Signature, X-RailForge-Timestamp, and X-RailForge-Webhook-Version headers. Receivers should reject deliveries older than 5 minutes."
+            />
+          </div>
+        </section>
       </main>
 
       <footer
@@ -343,5 +399,40 @@ function AudienceCard({
         ))}
       </ul>
     </div>
+  );
+}
+
+function FaqItem({ q, a }: { q: string; a: string }) {
+  return (
+    <details
+      style={{
+        background: '#fff',
+        border: '1px solid #e2e8f0',
+        borderRadius: 10,
+        padding: '14px 18px',
+      }}
+    >
+      <summary
+        style={{
+          fontSize: 14,
+          fontWeight: 500,
+          color: '#0f172a',
+          cursor: 'pointer',
+          listStyle: 'none',
+        }}
+      >
+        {q}
+      </summary>
+      <p
+        style={{
+          margin: '10px 0 0',
+          fontSize: 13,
+          color: '#475569',
+          lineHeight: 1.6,
+        }}
+      >
+        {a}
+      </p>
+    </details>
   );
 }
