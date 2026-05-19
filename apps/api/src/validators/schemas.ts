@@ -551,3 +551,49 @@ export const ammWithdrawSchema = z.object({
   lp_token_in: z.object({ currency: z.string(), issuer: z.string(), value: z.string() }).optional(),
   flags: z.number().int().min(0).optional(),
 });
+
+// ── x402 (SPRINT_10_PLAN.md §4.5) ────────────────────────────────────────────
+
+// Asset reference matches what xrpl-core's parseX402Asset accepts: `XRP`
+// or `mpt:<48-hex>`. IOU explicitly rejected this sprint (the service
+// layer would reject too, but Zod rejects earlier with a cleaner error).
+const x402AssetSchema = z
+  .string()
+  .regex(/^(XRP|mpt:[0-9a-fA-F]{48})$/, 'asset must be "XRP" or "mpt:<48-hex>"');
+
+// Decimal integer in smallest units (drops for XRP, raw units for MPT).
+// Leading zero allowed (a single "0" is rejected — amount must be > 0 —
+// in the service).
+const x402AmountSchema = z
+  .string()
+  .regex(/^[0-9]+$/, 'amount must be a decimal integer string')
+  .refine((v) => v !== '0', 'amount must be > 0');
+
+const x402TxHashSchema = z
+  .string()
+  .regex(/^[0-9A-Fa-f]{64}$/, 'tx_hash must be a 64-character hex string');
+
+// Intent IDs are `x402_intent_<26-base32>` (Crockford alphabet, no I/L/O/U).
+// Loose validation here — the service performs the strict check via
+// xrpl-core's isValidIntentId.
+const x402IntentIdSchema = z
+  .string()
+  .regex(/^x402_intent_[0-9A-HJKMNP-TV-Z]{26}$/, 'invalid x402 intent id');
+
+export const verifyX402Schema = z.object({
+  intent_id: x402IntentIdSchema,
+  tx_hash: x402TxHashSchema,
+});
+
+export const createX402RouteSchema = z.object({
+  path_pattern: z
+    .string()
+    .min(1)
+    .max(512)
+    // Disallow query strings / fragments — pathPattern is matched against
+    // url.pathname only.
+    .regex(/^\/[^\s?#]*$/, 'path_pattern must start with "/" and contain no whitespace or ? #'),
+  payee_address: xrplAddressSchema,
+  asset: x402AssetSchema,
+  amount: x402AmountSchema,
+});

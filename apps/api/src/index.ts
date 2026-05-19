@@ -25,6 +25,8 @@ import paymentsRoute from './routes/payments.ts';
 import permissionsRoute from './routes/permissions.ts';
 import tokensRoute from './routes/tokens.ts';
 import webhooksRoute from './routes/webhooks.ts';
+import x402Route from './routes/x402.ts';
+import x402DemoRoute from './routes/x402Demo.ts';
 import type { AppEnv } from './types.ts';
 
 // Process-level diagnostics. We intentionally do NOT swallow uncaughtException
@@ -157,10 +159,10 @@ if (process.env.X402_DEMO_PAYEE) {
       facilitatorVerifyUrl: process.env.X402_FACILITATOR_VERIFY_URL,
     }),
   );
-  // x402DemoRoute is added in Day 4 — for now the mount exists but has
-  // no handlers, so any path under /v1/x402-demo/* returns the middleware
-  // 402 (or 200 once a route is registered). This is intentional: the
-  // protocol surface goes live the moment the env var flips on.
+  // Echo handler — POST /echo. The x402 middleware above gates every
+  // path under /v1/x402-demo/*, so the handler only fires on a verified
+  // X-PAYMENT.
+  x402DemoRoot.route('/', x402DemoRoute);
   app.route('/v1/x402-demo', x402DemoRoot);
   logger.info('x402 demo route mounted at /v1/x402-demo');
 }
@@ -221,6 +223,10 @@ v1.use('/webhooks/*', requireNotAgent);
 // read-only GETs are blocked too — an agent has no business enumerating
 // the tenant's transactions, credentials, or other agents.
 v1.use('/dashboard/*', requireNotAgent);
+// x402 management surface — verify + routes CRUD. Agent-bound keys have
+// no business managing their tenant's gated routes; payments are the
+// only agent-permitted surface.
+v1.use('/x402/*', requireNotAgent);
 
 v1.route('/accounts', accountsRoute);
 v1.route('/agents', agentsRoute);
@@ -232,6 +238,7 @@ v1.route('/payments', paymentsRoute);
 v1.route('/dex', dexRoute);
 v1.route('/webhooks', webhooksRoute);
 v1.route('/dashboard', dashboardRoute);
+v1.route('/x402', x402Route);
 
 app.route('/v1', v1);
 
