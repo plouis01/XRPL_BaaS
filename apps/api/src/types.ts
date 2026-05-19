@@ -32,6 +32,15 @@ export type AppVariables = {
    * SignerListSet insert).
    */
   skipIdempotencyCache?: boolean;
+  /**
+   * SPRINT_10_PLAN.md §4.4. Set by the x402 middleware after a payment
+   * verifies successfully — the route handler may read `intent.id` /
+   * `intent.consumingTxHash` to emit them in its response (e.g. an
+   * `X-PAYMENT-RESPONSE` header). The opaque `unknown` typing here keeps
+   * `types.ts` free of a circular import from x402Intent.service; the
+   * route reads it via `c.get('x402Intent') as X402Intent`.
+   */
+  x402Intent?: unknown;
 };
 
 export type AppEnv = {

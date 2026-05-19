@@ -12,6 +12,7 @@ import { idempotency } from './middleware/idempotency.ts';
 import { ipRateLimit } from './middleware/ipRateLimit.ts';
 import { rateLimit } from './middleware/rateLimit.ts';
 import { revocationCheck } from './middleware/revocationCheck.ts';
+import { createX402Middleware } from './middleware/x402.ts';
 import accountsRoute from './routes/accounts.ts';
 import agentsRoute from './routes/agents.ts';
 import credentialsRoute from './routes/credentials.ts';
@@ -121,6 +122,47 @@ if (signupEnabled) {
   signupRoot.use('*', ipRateLimit);
   signupRoot.route('/', dashboardSignupRoute);
   app.route('/v1/dashboard/signup', signupRoot);
+}
+
+// SPRINT_10_PLAN.md §4.6 — x402 demo mount. Gated by X402_DEMO_PAYEE so
+// production deploys that don't want the dogfood surface stay off the
+// internet. When the env var is set, mounts an x402-gated sub-app at
+// /v1/x402-demo/* — the actual route handler (POST /echo) lands in Day 4.
+//
+// The middleware chain here intentionally does NOT include `auth`. Per
+// the protocol, payment IS authentication. ipRateLimit still applies as
+// a defense-in-depth IP bucket for the 402-issuance hot path.
+if (process.env.X402_DEMO_PAYEE) {
+  const x402DemoRoot = new Hono<AppEnv>();
+  x402DemoRoot.use(
+    '*',
+    bodyLimit({
+      maxSize: 64 * 1024,
+      onError: (c) => c.json({ error: 'Request body too large' }, 413),
+    }),
+  );
+  x402DemoRoot.use('*', ipRateLimit);
+  x402DemoRoot.use(
+    '*',
+    createX402Middleware({
+      // Mode A: hardcoded quote from env. payee + asset + amount are
+      // operational config, not user input. asset defaults to XRP;
+      // amount to 10000 drops (0.01 XRP) — see SPRINT_10_PLAN §4.6.
+      resolveRoute: async (_path) => ({
+        payeeAddress: process.env.X402_DEMO_PAYEE ?? '',
+        asset: process.env.X402_DEMO_ASSET ?? 'XRP',
+        amount: process.env.X402_DEMO_AMOUNT ?? '10000',
+        clientId: null,
+      }),
+      facilitatorVerifyUrl: process.env.X402_FACILITATOR_VERIFY_URL,
+    }),
+  );
+  // x402DemoRoute is added in Day 4 — for now the mount exists but has
+  // no handlers, so any path under /v1/x402-demo/* returns the middleware
+  // 402 (or 200 once a route is registered). This is intentional: the
+  // protocol surface goes live the moment the env var flips on.
+  app.route('/v1/x402-demo', x402DemoRoot);
+  logger.info('x402 demo route mounted at /v1/x402-demo');
 }
 
 // All /v1/* routes are authenticated, rate-limited, and idempotency-aware.
