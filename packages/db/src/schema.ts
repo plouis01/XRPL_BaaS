@@ -16,6 +16,7 @@ import {
   text,
   timestamp,
   unique,
+  uniqueIndex,
   uuid,
 } from 'drizzle-orm/pg-core';
 
@@ -576,5 +577,66 @@ export const webhookDeliveries = pgTable(
   },
   (t) => ({
     statusIdx: index('idx_webhook_deliveries_status').on(t.status, t.createdAt),
+  }),
+);
+
+// ── x402 (Sprint 10) ─────────────────────────────────────────────────────────
+// HTTP 402 payment-required intents and per-client gated route registry.
+// SPRINT_10_PLAN.md §3. Intent ids follow the format `x402_intent_<26-base32>`.
+// `destination_tag` is XRPL uint32 (CRC32 of intent_id mod 0xFFF00000) — fits
+// outside signed int32 range, hence bigint. Amounts stored as text to mirror
+// every other XRPL amount column (drops for XRP; raw MPT units otherwise).
+
+export const x402Intents = pgTable(
+  'x402_intents',
+  {
+    id: text('id').primaryKey(),
+    // NULL allowed: Mode B clients may issue anonymous intents (no API key
+    // bound to the payer). Mode A always sets this to the RailForge client.
+    clientId: uuid('client_id').references(() => clients.id),
+    resourcePath: text('resource_path').notNull(),
+    payeeAddress: text('payee_address').notNull(),
+    // 'xrp' | 'mpt'. IOU/trust-line settlement is explicitly out of scope
+    // this sprint — verifier rejects unknown kinds (SPRINT_10_PLAN §2).
+    assetKind: text('asset_kind').notNull(),
+    // MPTokenIssuanceID hex for assetKind='mpt'; NULL for XRP.
+    assetKey: text('asset_key'),
+    amount: text('amount').notNull(),
+    destinationTag: bigint('destination_tag', { mode: 'number' }).notNull(),
+    expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+    consumedAt: timestamp('consumed_at', { withTimezone: true }),
+    consumingTxHash: text('consuming_tx_hash'),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => ({
+    // Partial unique index — a single tx hash may not satisfy two intents.
+    // Drizzle supports `.where()` on uniqueIndex for partial constraints.
+    uniqConsumingTx: uniqueIndex('x402_intents_consuming_tx_hash_uq')
+      .on(t.consumingTxHash)
+      .where(sql`consuming_tx_hash IS NOT NULL`),
+    // Hot path: middleware lookup by (payee, tag) on retry.
+    payeeTagIdx: index('x402_intents_payee_tag_idx').on(t.payeeAddress, t.destinationTag),
+    // Reaper job sweeps WHERE expires_at < now() - interval.
+    expiresIdx: index('x402_intents_expires_at_idx').on(t.expiresAt),
+  }),
+);
+
+export const x402Routes = pgTable(
+  'x402_routes',
+  {
+    id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+    clientId: uuid('client_id')
+      .notNull()
+      .references(() => clients.id),
+    pathPattern: text('path_pattern').notNull(),
+    payeeAddress: text('payee_address').notNull(),
+    assetKind: text('asset_kind').notNull(),
+    assetKey: text('asset_key'),
+    priceAmount: text('price_amount').notNull(),
+    isActive: boolean('is_active').notNull().default(true),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => ({
+    uniqClientPath: unique('x402_routes_client_path_uq').on(t.clientId, t.pathPattern),
   }),
 );
