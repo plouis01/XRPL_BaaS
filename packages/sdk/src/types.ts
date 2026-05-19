@@ -484,3 +484,120 @@ export interface RevokeAgentResult {
   /** ID of the SignerListSet tx that strips the delegate. */
   tx_id: string;
 }
+
+// ---------------------------------------------------------------------------
+// x402 (SPRINT_10_PLAN.md §4.9)
+// ---------------------------------------------------------------------------
+
+export type X402AssetKind = 'xrp' | 'mpt';
+
+export interface X402Intent {
+  id: string;
+  resource_path: string;
+  payee_address: string;
+  asset_kind: X402AssetKind;
+  asset_key: string | null;
+  amount: string;
+  destination_tag: number;
+  expires_at: string;
+  consumed_at: string | null;
+  consuming_tx_hash: string | null;
+  created_at: string;
+}
+
+export interface X402Route {
+  id: string;
+  path_pattern: string;
+  payee_address: string;
+  asset_kind: X402AssetKind;
+  asset_key: string | null;
+  price_amount: string;
+  is_active: boolean;
+  created_at: string;
+}
+
+export interface X402RouteList {
+  routes: X402Route[];
+}
+
+export interface CreateX402RouteParams {
+  path_pattern: string;
+  payee_address: string;
+  /** Asset reference: 'XRP' or 'mpt:<48-hex>'. */
+  asset: string;
+  /** Decimal integer string in smallest units (drops for XRP, raw MPT units). */
+  amount: string;
+}
+
+export type X402VerifyResult =
+  | {
+      ok: true;
+      ledger_index: number | null;
+      intent_id: string;
+      consumed_at: string | null;
+    }
+  | { ok: false; reason: string };
+
+/**
+ * Body shape of a 402 response from an x402-gated endpoint. The SDK's
+ * `pay()` flow parses this to drive the signer + retry. Some optional
+ * fields (`facilitator_verify_url`, `reason`) may be absent.
+ */
+export interface X402Quote {
+  x402_version: 1;
+  intent_id: string;
+  resource: string;
+  payee: string;
+  /** Asset reference as `XRP` or `mpt:<hex>`. */
+  asset: string;
+  amount: string;
+  destination_tag: number;
+  expires_at: string;
+  facilitator_verify_url?: string;
+  /** Set on re-quotes after a failed verification — maps to verifier reason. */
+  reason?: string;
+}
+
+/**
+ * Signer contract for `RailForge.x402.pay()`. The user owns the wallet;
+ * the SDK doesn't custody the payer's key. Implementations must:
+ *   1. Build a Payment with `Destination = req.payee` and
+ *      `DestinationTag = req.destinationTag`.
+ *   2. Set the Amount according to `req.asset`:
+ *        - 'XRP'           → drops as a string
+ *        - 'mpt:<hex>'     → { mpt_issuance_id: '<hex>', value: req.amount }
+ *   3. Sign + submit, wait for validation.
+ *   4. Return the validated tx hash (64 hex chars).
+ *
+ * Throwing from the signer aborts the pay() flow — the caller sees the
+ * thrown error verbatim.
+ */
+export interface X402PayRequest {
+  payee: string;
+  /** 'XRP' or 'mpt:<48-hex>'. */
+  asset: string;
+  /** Smallest-unit decimal string. */
+  amount: string;
+  destinationTag: number;
+}
+
+export interface X402Signer {
+  signAndSubmit(req: X402PayRequest): Promise<{ tx_hash: string }>;
+}
+
+/**
+ * Options for `RailForge.x402.pay()`. Mirrors the standard `fetch` init
+ * surface plus a required `signer` and an optional `maxRetries` knob.
+ */
+export interface X402PayOptions extends Omit<RequestInit, 'headers'> {
+  signer: X402Signer;
+  /** Extra headers — merged with the X-PAYMENT header on retry. */
+  headers?: Record<string, string>;
+  /**
+   * Max number of pay-and-retry attempts. Default 1 — one initial 402,
+   * one settled retry. Bump if you expect the server might re-quote a
+   * re-issued 402 (e.g. the first signed tx had `tag_mismatch`). Hard
+   * upper bound 3.
+   */
+  maxRetries?: number;
+}
