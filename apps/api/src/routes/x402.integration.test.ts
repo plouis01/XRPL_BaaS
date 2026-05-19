@@ -25,27 +25,24 @@
 //   bunx --cwd apps/api vitest run --config vitest.integration.config.ts \
 //        src/routes/x402.integration.test.ts
 
-import { createServer, type Server } from "node:http";
-import { db, eq, schema } from "@railforge/db";
-import { buildXrpPayment } from "@railforge/xrpl-core";
-import { Hono } from "hono";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { Client, Wallet } from "xrpl";
-import { RailForge } from "../../../../packages/sdk/src/index.ts";
-import type { X402Signer } from "../../../../packages/sdk/src/types.ts";
-import { createX402Middleware } from "../middleware/x402.ts";
-import type { AppEnv } from "../types.ts";
-import { __setReadClientForTests } from "../xrpl/readClient.ts";
-import x402DemoRoute from "./x402Demo.ts";
+import { type Server, createServer } from 'node:http';
+import { db, eq, schema } from '@railforge/db';
+import { buildXrpPayment } from '@railforge/xrpl-core';
+import { Hono } from 'hono';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { Client, Wallet } from 'xrpl';
+import { RailForge } from '../../../../packages/sdk/src/index.ts';
+import type { X402Signer } from '../../../../packages/sdk/src/types.ts';
+import { createX402Middleware } from '../middleware/x402.ts';
+import type { AppEnv } from '../types.ts';
+import { __setReadClientForTests } from '../xrpl/readClient.ts';
+import x402DemoRoute from './x402Demo.ts';
 
-const SHOULD_RUN =
-  process.env.RAILFORGE_TEST_NETWORK === "testnet" &&
-  !!process.env.DATABASE_URL;
+const SHOULD_RUN = process.env.RAILFORGE_TEST_NETWORK === 'testnet' && !!process.env.DATABASE_URL;
 const describeOrSkip = SHOULD_RUN ? describe : describe.skip;
 
-const TESTNET_WS =
-  process.env.XRPL_WS_URL ?? "wss://s.altnet.rippletest.net:51233";
-const FAUCET_URL = "https://faucet.altnet.rippletest.net/accounts";
+const TESTNET_WS = process.env.XRPL_WS_URL ?? 'wss://s.altnet.rippletest.net:51233';
+const FAUCET_URL = 'https://faucet.altnet.rippletest.net/accounts';
 
 // Hold on to test fixtures across the suite so cleanup can shut them down.
 let payer: Wallet;
@@ -55,12 +52,12 @@ let xrplClient: Client;
 // even when invoked via `bunx vitest`. We bridge Node's req/res to Hono's
 // fetch-style app.fetch(Request) → Response.
 let server: Server | null = null;
-let serverUrl = "";
+let serverUrl = '';
 
 async function faucetFund(): Promise<Wallet> {
   const res = await fetch(FAUCET_URL, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
   });
   if (!res.ok) throw new Error(`faucet failed: ${res.status}`);
   const body = (await res.json()) as {
@@ -68,7 +65,7 @@ async function faucetFund(): Promise<Wallet> {
     seed?: string;
   };
   const seed = body.account.secret ?? body.seed;
-  if (!seed) throw new Error("faucet returned no seed");
+  if (!seed) throw new Error('faucet returned no seed');
   return Wallet.fromSeed(seed);
 }
 
@@ -78,9 +75,9 @@ async function waitForOnLedger(client: Client, address: string): Promise<void> {
   for (let i = 0; i < 15; i++) {
     try {
       await client.request({
-        command: "account_info",
+        command: 'account_info',
         account: address,
-        ledger_index: "current",
+        ledger_index: 'current',
       });
       return;
     } catch {
@@ -90,7 +87,7 @@ async function waitForOnLedger(client: Client, address: string): Promise<void> {
   throw new Error(`account ${address} never appeared on-ledger after faucet`);
 }
 
-describeOrSkip("x402 XRP end-to-end (testnet + real DB + real HTTP)", () => {
+describeOrSkip('x402 XRP end-to-end (testnet + real DB + real HTTP)', () => {
   beforeAll(async () => {
     // 1. Faucet two wallets — one payer, one payee (treasury).
     [payer, treasury] = await Promise.all([faucetFund(), faucetFund()]);
@@ -112,26 +109,25 @@ describeOrSkip("x402 XRP end-to-end (testnet + real DB + real HTTP)", () => {
     // hit the verifier's default 5s connectionTimeout on a cold IP) and
     // keeps the test deterministic.
     __setReadClientForTests({
-      request: (req) =>
-        xrplClient.request(req as Parameters<Client["request"]>[0]),
+      request: (req) => xrplClient.request(req as Parameters<Client['request']>[0]),
     });
 
     // 3. Spin up a minimal Hono app with the real middleware.
     const app = new Hono<AppEnv>();
     app.use(
-      "*",
+      '*',
       createX402Middleware({
         // Static quote — Mode A. 10000 drops = 0.01 XRP.
         resolveRoute: async () => ({
           payeeAddress: treasury.classicAddress,
-          asset: "XRP",
-          amount: "10000",
+          asset: 'XRP',
+          amount: '10000',
           clientId: null,
         }),
         intentsPerMinutePerIp: 1000,
       }),
     );
-    app.route("/v1/x402-demo", x402DemoRoute);
+    app.route('/v1/x402-demo', x402DemoRoute);
 
     // Node http → Hono bridge. Buffers the request body, builds a fetch
     // Request, awaits app.fetch, copies the Response back. Good enough for
@@ -143,18 +139,17 @@ describeOrSkip("x402 XRP end-to-end (testnet + real DB + real HTTP)", () => {
         for await (const chunk of nodeReq) chunks.push(chunk as Buffer);
         const bodyBuf = chunks.length ? Buffer.concat(chunks) : null;
         const host =
-          nodeReq.headers.host ??
-          `localhost:${(server!.address() as { port: number }).port}`;
-        const url = `http://${host}${nodeReq.url ?? "/"}`;
+          nodeReq.headers.host ?? `localhost:${(server!.address() as { port: number }).port}`;
+        const url = `http://${host}${nodeReq.url ?? '/'}`;
         const headers = new Headers();
         for (const [k, v] of Object.entries(nodeReq.headers)) {
           if (Array.isArray(v)) for (const item of v) headers.append(k, item);
-          else if (typeof v === "string") headers.set(k, v);
+          else if (typeof v === 'string') headers.set(k, v);
         }
         const honoReq = new Request(url, {
           method: nodeReq.method,
           headers,
-          body: bodyBuf && bodyBuf.length ? bodyBuf : null,
+          body: bodyBuf?.length ? bodyBuf : null,
         });
         const honoRes = await app.fetch(honoReq);
         nodeRes.statusCode = honoRes.status;
@@ -163,12 +158,10 @@ describeOrSkip("x402 XRP end-to-end (testnet + real DB + real HTTP)", () => {
         nodeRes.end(respBuf);
       })();
     });
-    await new Promise<void>((resolve) =>
-      server!.listen(0, "127.0.0.1", resolve),
-    );
+    await new Promise<void>((resolve) => server!.listen(0, '127.0.0.1', resolve));
     const address = server.address();
-    if (!address || typeof address === "string")
-      throw new Error("server.listen returned no address");
+    if (!address || typeof address === 'string')
+      throw new Error('server.listen returned no address');
     serverUrl = `http://127.0.0.1:${address.port}`;
   }, 60_000);
 
@@ -181,16 +174,16 @@ describeOrSkip("x402 XRP end-to-end (testnet + real DB + real HTTP)", () => {
     } catch {}
   });
 
-  it("SDK pay() → 402 → signed Payment → 200 with consumed intent", async () => {
+  it('SDK pay() → 402 → signed Payment → 200 with consumed intent', async () => {
     // Signer uses xrpl.js end-to-end: build → autofill → sign → submitAndWait.
     // submitAndWait blocks until the tx validates (tesSUCCESS) — that's
     // exactly what the verifier requires before it accepts the X-PAYMENT.
     const signer: X402Signer = {
       async signAndSubmit(req) {
         expect(req.payee).toBe(treasury.classicAddress);
-        expect(req.asset).toBe("XRP");
-        expect(req.amount).toBe("10000");
-        expect(req.destinationTag).toBeTypeOf("number");
+        expect(req.asset).toBe('XRP');
+        expect(req.amount).toBe('10000');
+        expect(req.destinationTag).toBeTypeOf('number');
 
         const tx = buildXrpPayment({
           account: payer.classicAddress,
@@ -204,10 +197,10 @@ describeOrSkip("x402 XRP end-to-end (testnet + real DB + real HTTP)", () => {
         // xrpl.js returns the meta nested under .result.meta.
         const meta = result.result.meta;
         const code =
-          typeof meta === "object" && meta && "TransactionResult" in meta
+          typeof meta === 'object' && meta && 'TransactionResult' in meta
             ? (meta as { TransactionResult: string }).TransactionResult
             : null;
-        if (code !== "tesSUCCESS") {
+        if (code !== 'tesSUCCESS') {
           throw new Error(`testnet rejected the payment: ${code}`);
         }
         return { tx_hash: signed.hash };
@@ -217,14 +210,14 @@ describeOrSkip("x402 XRP end-to-end (testnet + real DB + real HTTP)", () => {
     // The SDK doesn't authenticate the demo path — payment IS the auth —
     // but the constructor still requires an apiKey. Any value works.
     const sdk = new RailForge({
-      apiKey: "rf_test_unused",
+      apiKey: 'rf_test_unused',
       baseUrl: serverUrl,
     });
 
     const res = await sdk.x402.pay(`${serverUrl}/v1/x402-demo/echo`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ ping: "pong" }),
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ ping: 'pong' }),
       signer,
     });
 
@@ -238,9 +231,9 @@ describeOrSkip("x402 XRP end-to-end (testnet + real DB + real HTTP)", () => {
         amount: string;
       };
     };
-    expect(body.echoed).toEqual({ ping: "pong" });
-    expect(body.paid.asset_kind).toBe("xrp");
-    expect(body.paid.amount).toBe("10000");
+    expect(body.echoed).toEqual({ ping: 'pong' });
+    expect(body.paid.asset_kind).toBe('xrp');
+    expect(body.paid.amount).toBe('10000');
     expect(body.paid.intent_id).toMatch(/^x402_intent_[0-9A-HJKMNP-TV-Z]{26}$/);
     expect(body.paid.tx_hash).toMatch(/^[0-9A-F]{64}$/);
 
@@ -255,7 +248,7 @@ describeOrSkip("x402 XRP end-to-end (testnet + real DB + real HTTP)", () => {
     expect(row.consumedAt).toBeInstanceOf(Date);
     expect(row.consumingTxHash).toBe(body.paid.tx_hash);
     expect(row.payeeAddress).toBe(treasury.classicAddress);
-    expect(row.amount).toBe("10000");
-    expect(row.assetKind).toBe("xrp");
+    expect(row.amount).toBe('10000');
+    expect(row.assetKind).toBe('xrp');
   }, 120_000);
 });
