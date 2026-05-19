@@ -7,6 +7,7 @@ import { ORPHAN_RECONCILER_QUEUE, startOrphanReconcilerWorker } from './jobs/orp
 import { startTxConfirmWorker } from './jobs/txConfirmer.ts';
 import { startTxSubmitWorker } from './jobs/txSubmitter.ts';
 import { startWebhookDeliveryWorker } from './jobs/webhookDelivery.ts';
+import { X402_INTENT_REAPER_QUEUE, startX402IntentReaperWorker } from './jobs/x402IntentReaper.ts';
 import { logger } from './logger.ts';
 import { assertMainnetHsmInvariant, disconnectWorker, getSigner } from './queues.ts';
 
@@ -87,6 +88,7 @@ const webhookDeliveryWorker = startWebhookDeliveryWorker(workerRedis);
 const credentialExpiryWorker = startCredentialExpiryWorker(workerRedis);
 const orphanReconcilerWorker = startOrphanReconcilerWorker(workerRedis);
 const accountSetupWorker = startAccountSetupWorker(workerRedis);
+const x402IntentReaperWorker = startX402IntentReaperWorker(workerRedis);
 
 // Orphan reconciler repeat schedule (PLAN.md §9.2 G-1).
 //
@@ -136,6 +138,26 @@ await credentialExpiryScheduleQueue.add(
   },
 );
 
+// x402 intent reaper repeat schedule (SPRINT_10_PLAN §8). Runs every
+// 5 minutes; deletes stale unconsumed x402_intents rows past a 1h
+// grace window. See jobs/x402IntentReaper.ts for the rationale on
+// preserving consumed rows.
+const x402IntentReaperScheduleQueue = new Queue(X402_INTENT_REAPER_QUEUE, {
+  connection: workerRedis,
+  defaultJobOptions: {
+    removeOnComplete: { count: 100 },
+    removeOnFail: { count: 100 },
+  },
+});
+await x402IntentReaperScheduleQueue.add(
+  'sweep',
+  {},
+  {
+    repeat: { every: 5 * 60 * 1000 },
+    jobId: 'x402-intent-reaper-sweep',
+  },
+);
+
 // REVIEW.md LOW-09: log only the Redis host, never the full URL. A
 // `rediss://default:<token>@host:port` (Upstash) landed here verbatim
 // would leak the token into every startup log line. `new URL(...).host`
@@ -156,6 +178,7 @@ logger.info(
       'credential-expiry',
       'orphan-reconciler',
       'account-setup',
+      'x402-intent-reaper',
     ],
     redisHost,
     network: process.env.XRPL_NETWORK ?? 'testnet',
@@ -173,8 +196,10 @@ async function shutdown(signal: string): Promise<void> {
     credentialExpiryWorker.close(),
     orphanReconcilerWorker.close(),
     accountSetupWorker.close(),
+    x402IntentReaperWorker.close(),
     orphanReconcilerScheduleQueue.close(),
     credentialExpiryScheduleQueue.close(),
+    x402IntentReaperScheduleQueue.close(),
   ]);
   await disconnectWorker();
   await workerRedis.quit();

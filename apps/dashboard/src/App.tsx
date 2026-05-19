@@ -10,6 +10,7 @@ import { LoginForm } from './pages/LoginForm.tsx';
 import { QuickStart } from './pages/QuickStart.tsx';
 import { Tokens } from './pages/Tokens.tsx';
 import { Transactions } from './pages/Transactions.tsx';
+import { X402Routes } from './pages/X402Routes.tsx';
 import type { Network } from './types.ts';
 
 type AuthState = 'checking' | 'anon' | 'authed';
@@ -278,7 +279,7 @@ function AuthedShell({
               Domains
             </NavLink>
           </li>
-          <li>
+          <li style={{ marginBottom: 8 }}>
             <NavLink
               to="/agents"
               style={({ isActive }) => ({
@@ -288,6 +289,18 @@ function AuthedShell({
               })}
             >
               Agents
+            </NavLink>
+          </li>
+          <li>
+            <NavLink
+              to="/x402-routes"
+              style={({ isActive }) => ({
+                textDecoration: 'none',
+                color: isActive ? '#2563eb' : '#334155',
+                fontWeight: isActive ? 600 : 400,
+              })}
+            >
+              x402 Routes
             </NavLink>
           </li>
         </ul>
@@ -339,6 +352,7 @@ function AuthedShell({
           <Route path="/credentials" element={<Credentials network={network} />} />
           <Route path="/domains" element={<Domains network={network} />} />
           <Route path="/agents" element={<Agents network={network} />} />
+          <Route path="/x402-routes" element={<X402Routes network={network} />} />
           {/* Default to /quickstart so a freshly-signed-up developer
                 lands on actionable first-tx steps, not an empty key list. */}
           <Route path="*" element={<Navigate to="/quickstart" replace />} />
