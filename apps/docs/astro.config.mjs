@@ -34,6 +34,7 @@ export default defineConfig({
             { label: 'DEX', slug: 'api/dex' },
             { label: 'Webhooks', slug: 'api/webhooks' },
             { label: 'Dashboard', slug: 'api/dashboard' },
+            { label: 'x402', slug: 'api/x402' },
           ],
         },
         {
