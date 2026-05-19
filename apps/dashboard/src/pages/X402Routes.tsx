@@ -22,12 +22,22 @@ export function X402Routes({ network }: { network: Network }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  // Create form state.
+  // Create form state. `assetPreset` is the dropdown selection — XRP and
+  // RLUSD are the curated presets; "custom" reveals a free-text field for
+  // `mpt:<48-hex>` or `iou:<CUR>:<issuer>`. We keep the resolved asset
+  // string in `assetCustom` only when the preset is "custom".
   const [pathPattern, setPathPattern] = useState('');
   const [payeeAddress, setPayeeAddress] = useState('');
-  const [asset, setAsset] = useState('XRP');
+  const [assetPreset, setAssetPreset] = useState<'XRP' | 'RLUSD' | 'custom'>('XRP');
+  const [assetCustom, setAssetCustom] = useState('');
   const [amount, setAmount] = useState('10000');
   const [submitting, setSubmitting] = useState(false);
+
+  // Resolve the asset string the API expects. RLUSD is a server-side alias
+  // (parseX402Asset expands it to the canonical IOU), so we just pass it
+  // through verbatim — the server is the single source of truth for which
+  // issuer the alias resolves to on the current network.
+  const resolvedAsset = assetPreset === 'custom' ? assetCustom : assetPreset;
 
   const fetchRoutes = useCallback(async () => {
     setLoading(true);
@@ -61,14 +71,15 @@ export function X402Routes({ network }: { network: Network }) {
         body: {
           path_pattern: pathPattern,
           payee_address: payeeAddress,
-          asset,
+          asset: resolvedAsset,
           amount,
         },
       });
       setPathPattern('');
       setPayeeAddress('');
       setAmount('10000');
-      setAsset('XRP');
+      setAssetPreset('XRP');
+      setAssetCustom('');
       await fetchRoutes();
     } catch (err) {
       if (err instanceof ApiError) {
@@ -154,13 +165,24 @@ export function X402Routes({ network }: { network: Network }) {
         </label>
         <label style={{ display: 'flex', flexDirection: 'column', fontSize: 12 }}>
           Asset
-          <input
-            value={asset}
-            onChange={(e) => setAsset(e.target.value)}
-            placeholder="XRP or mpt:<48-hex>"
-            required
+          <select
+            value={assetPreset}
+            onChange={(e) => setAssetPreset(e.target.value as 'XRP' | 'RLUSD' | 'custom')}
             style={inputStyle}
-          />
+          >
+            <option value="XRP">XRP (native)</option>
+            <option value="RLUSD">RLUSD (Ripple USD)</option>
+            <option value="custom">Custom (mpt: or iou:)</option>
+          </select>
+          {assetPreset === 'custom' && (
+            <input
+              value={assetCustom}
+              onChange={(e) => setAssetCustom(e.target.value)}
+              placeholder="mpt:<48-hex> or iou:<CUR>:<issuer>"
+              required
+              style={{ ...inputStyle, marginTop: 6 }}
+            />
+          )}
         </label>
         <label style={{ display: 'flex', flexDirection: 'column', fontSize: 12 }}>
           Amount (smallest units)
@@ -222,8 +244,26 @@ export function X402Routes({ network }: { network: Network }) {
                 <td style={{ padding: '8px 12px', fontSize: 13 }}>
                   {r.asset_kind === 'xrp' ? (
                     'XRP'
-                  ) : (
+                  ) : r.asset_kind === 'mpt' ? (
                     <code>mpt:{(r.asset_key ?? '').slice(0, 8)}...</code>
+                  ) : r.asset_kind === 'iou' ? (
+                    // asset_key for iou is "<CUR>:<issuer>". Show currency
+                    // plus a short issuer hash so RLUSD reads as "RLUSD"
+                    // even though it's stored as an IOU. Use safe lookups
+                    // so a malformed key (no `:`) still renders.
+                    (() => {
+                      const parts = (r.asset_key ?? '').split(':');
+                      const cur = parts[0] ?? '';
+                      const iss = parts[1] ?? '';
+                      return (
+                        <code>
+                          {cur}
+                          {iss ? `:${iss.slice(0, 6)}...` : ''}
+                        </code>
+                      );
+                    })()
+                  ) : (
+                    <code>{r.asset_kind}</code>
                   )}
                 </td>
                 <td style={{ padding: '8px 12px', fontSize: 13 }}>{r.price_amount}</td>

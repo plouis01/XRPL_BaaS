@@ -137,7 +137,8 @@ function assetSatisfiesIntent(
     return { ok: true };
   }
 
-  // MPT: post-fixMPTDeliveredAmount shape is `{ mpt_issuance_id, value }`.
+  // Object shapes (MPT + IOU). Reject string/null/array up front so the
+  // narrow casts below are sound.
   if (
     typeof deliveredAmount !== 'object' ||
     deliveredAmount === null ||
@@ -145,14 +146,49 @@ function assetSatisfiesIntent(
   ) {
     return { ok: false, reason: 'asset_mismatch' };
   }
-  const o = deliveredAmount as { mpt_issuance_id?: unknown; value?: unknown };
-  const idOnTx = typeof o.mpt_issuance_id === 'string' ? o.mpt_issuance_id.toUpperCase() : null;
+
+  if (intent.assetKind === 'mpt') {
+    // MPT: post-fixMPTDeliveredAmount shape is `{ mpt_issuance_id, value }`.
+    const o = deliveredAmount as { mpt_issuance_id?: unknown; value?: unknown };
+    const idOnTx = typeof o.mpt_issuance_id === 'string' ? o.mpt_issuance_id.toUpperCase() : null;
+    const valueStr = typeof o.value === 'string' ? o.value : null;
+    if (!idOnTx || !valueStr) return { ok: false, reason: 'asset_mismatch' };
+    // assetKey is upper-cased on the way in (parseX402Asset normalises).
+    if (idOnTx !== intent.assetKey) return { ok: false, reason: 'asset_mismatch' };
+    if (!/^[0-9]+$/.test(valueStr)) return { ok: false, reason: 'asset_mismatch' };
+    if (BigInt(valueStr) < BigInt(intent.amount)) return { ok: false, reason: 'amount_short' };
+    return { ok: true };
+  }
+
+  // IOU: rippled delivered_amount is `{ currency, issuer, value }`. The
+  // `value` field is a token decimal string (e.g. "1.25"), NOT an integer
+  // in smallest units — IOU amounts on XRPL carry 15 digits of precision
+  // and don't have a smallest-unit normalisation. We use Number comparison
+  // (not BigInt) because BigInt('1.25') throws. The 15-digit precision
+  // means Number gives exact behaviour up to ~16 significant digits,
+  // which covers every realistic token amount.
+  const o = deliveredAmount as {
+    currency?: unknown;
+    issuer?: unknown;
+    value?: unknown;
+  };
+  const currencyOnTx = typeof o.currency === 'string' ? o.currency.toUpperCase() : null;
+  const issuerOnTx = typeof o.issuer === 'string' ? o.issuer : null;
   const valueStr = typeof o.value === 'string' ? o.value : null;
-  if (!idOnTx || !valueStr) return { ok: false, reason: 'asset_mismatch' };
-  // assetKey is upper-cased on the way in (parseX402Asset normalises).
-  if (idOnTx !== intent.assetKey) return { ok: false, reason: 'asset_mismatch' };
-  if (!/^[0-9]+$/.test(valueStr)) return { ok: false, reason: 'asset_mismatch' };
-  if (BigInt(valueStr) < BigInt(intent.amount)) return { ok: false, reason: 'amount_short' };
+  if (!currencyOnTx || !issuerOnTx || !valueStr) return { ok: false, reason: 'asset_mismatch' };
+  // assetKey for IOU is the stable `"<CUR>:<issuer>"` form (currency
+  // upper-cased; xrpl-core's parseX402Asset normalises).
+  const txKey = `${currencyOnTx}:${issuerOnTx}`;
+  if (txKey !== intent.assetKey) return { ok: false, reason: 'asset_mismatch' };
+  // Accept decimal or integer string. Reject anything else (NaN, scientific
+  // notation, sign, etc.) — rippled emits canonical decimals.
+  if (!/^[0-9]+(\.[0-9]+)?$/.test(valueStr)) return { ok: false, reason: 'asset_mismatch' };
+  const delivered = Number.parseFloat(valueStr);
+  const required = Number.parseFloat(intent.amount);
+  if (!Number.isFinite(delivered) || !Number.isFinite(required)) {
+    return { ok: false, reason: 'asset_mismatch' };
+  }
+  if (delivered < required) return { ok: false, reason: 'amount_short' };
   return { ok: true };
 }
 

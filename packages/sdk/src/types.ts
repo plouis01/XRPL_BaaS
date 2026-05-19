@@ -489,7 +489,7 @@ export interface RevokeAgentResult {
 // x402 (SPRINT_10_PLAN.md §4.9)
 // ---------------------------------------------------------------------------
 
-export type X402AssetKind = 'xrp' | 'mpt';
+export type X402AssetKind = 'xrp' | 'mpt' | 'iou';
 
 export interface X402Intent {
   id: string;

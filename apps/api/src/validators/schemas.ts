@@ -554,20 +554,32 @@ export const ammWithdrawSchema = z.object({
 
 // ── x402 (SPRINT_10_PLAN.md §4.5) ────────────────────────────────────────────
 
-// Asset reference matches what xrpl-core's parseX402Asset accepts: `XRP`
-// or `mpt:<48-hex>`. IOU explicitly rejected this sprint (the service
-// layer would reject too, but Zod rejects earlier with a cleaner error).
+// Asset reference matches what xrpl-core's parseX402Asset accepts:
+//   - `XRP`                            (native)
+//   - `RLUSD`                          (alias → iou:RLUSD:<canonical issuer>)
+//   - `mpt:<48-hex>`                   (MPT issuance)
+//   - `iou:<CUR>:<issuer>`             (generic trust-line issued currency)
+// `CUR` is either a 3-char ISO-style code (any printable XRPL-allowed
+// glyphs) or a 40-hex non-standard code. The service layer re-validates
+// with xrpl-core's parser; Zod just rejects obviously-wrong shapes early.
 const x402AssetSchema = z
   .string()
-  .regex(/^(XRP|mpt:[0-9a-fA-F]{48})$/, 'asset must be "XRP" or "mpt:<48-hex>"');
+  .regex(
+    /^(XRP|RLUSD|mpt:[0-9a-fA-F]{48}|iou:([A-Za-z0-9?!@#$%^&*<>(){}[\]|]{3}|[0-9A-Fa-f]{40}):r[1-9A-HJ-NP-Za-km-z]{24,34})$/,
+    'asset must be "XRP", "RLUSD", "mpt:<48-hex>", or "iou:<CUR>:<issuer>"',
+  );
 
-// Decimal integer in smallest units (drops for XRP, raw units for MPT).
-// Leading zero allowed (a single "0" is rejected — amount must be > 0 —
-// in the service).
+// Amount string. XRP+MPT are smallest-unit integer strings; IOU amounts
+// are token-decimal strings (e.g. "1.25"). We accept both shapes here and
+// let the service + verifier enforce kind-specific rules — Zod's only job
+// at this layer is to reject obviously-malformed input (signs, NaN, empty).
 const x402AmountSchema = z
   .string()
-  .regex(/^[0-9]+$/, 'amount must be a decimal integer string')
-  .refine((v) => v !== '0', 'amount must be > 0');
+  .regex(
+    /^[0-9]+(\.[0-9]+)?$/,
+    'amount must be a positive decimal string (integer for XRP/MPT, decimal allowed for IOU)',
+  )
+  .refine((v) => Number.parseFloat(v) > 0, 'amount must be > 0');
 
 const x402TxHashSchema = z
   .string()
@@ -585,15 +597,32 @@ export const verifyX402Schema = z.object({
   tx_hash: x402TxHashSchema,
 });
 
-export const createX402RouteSchema = z.object({
-  path_pattern: z
-    .string()
-    .min(1)
-    .max(512)
-    // Disallow query strings / fragments — pathPattern is matched against
-    // url.pathname only.
-    .regex(/^\/[^\s?#]*$/, 'path_pattern must start with "/" and contain no whitespace or ? #'),
-  payee_address: xrplAddressSchema,
-  asset: x402AssetSchema,
-  amount: x402AmountSchema,
-});
+export const createX402RouteSchema = z
+  .object({
+    path_pattern: z
+      .string()
+      .min(1)
+      .max(512)
+      // Disallow query strings / fragments — pathPattern is matched against
+      // url.pathname only.
+      .regex(/^\/[^\s?#]*$/, 'path_pattern must start with "/" and contain no whitespace or ? #'),
+    payee_address: xrplAddressSchema,
+    asset: x402AssetSchema,
+    amount: x402AmountSchema,
+  })
+  // Cross-validate (asset, amount): XRP and MPT amounts are smallest-unit
+  // integers (drops, raw MPT units). IOU amounts are token decimals. The
+  // wire schema allows both shapes; this refine rejects the mismatched
+  // combo (XRP + "1.5") at the boundary instead of letting it reach the
+  // service layer.
+  .refine(
+    (data) => {
+      const isIou = data.asset === 'RLUSD' || data.asset.startsWith('iou:');
+      const hasDecimal = data.amount.includes('.');
+      return isIou || !hasDecimal;
+    },
+    {
+      message: 'amount must be a positive integer for XRP and MPT (smallest unit)',
+      path: ['amount'],
+    },
+  );

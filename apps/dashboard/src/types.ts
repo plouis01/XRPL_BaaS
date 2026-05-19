@@ -152,7 +152,7 @@ export interface X402Route {
   id: string;
   path_pattern: string;
   payee_address: string;
-  asset_kind: 'xrp' | 'mpt';
+  asset_kind: 'xrp' | 'mpt' | 'iou';
   asset_key: string | null;
   price_amount: string;
   is_active: boolean;

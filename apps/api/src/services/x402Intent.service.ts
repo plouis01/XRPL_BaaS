@@ -92,7 +92,7 @@ function rowToIntent(row: typeof schema.x402Intents.$inferSelect): X402Intent {
   // assetKind is `text` in the DB but constrained to `'xrp' | 'mpt'` by the
   // create path. Narrow at the boundary so callers get the union type.
   const kind = row.assetKind;
-  if (kind !== 'xrp' && kind !== 'mpt') {
+  if (kind !== 'xrp' && kind !== 'mpt' && kind !== 'iou') {
     throw new Error(`x402Intent: invalid assetKind in DB row: ${kind}`);
   }
   return {
@@ -113,7 +113,7 @@ function rowToIntent(row: typeof schema.x402Intents.$inferSelect): X402Intent {
 
 function rowToRoute(row: typeof schema.x402Routes.$inferSelect): X402Route {
   const kind = row.assetKind;
-  if (kind !== 'xrp' && kind !== 'mpt') {
+  if (kind !== 'xrp' && kind !== 'mpt' && kind !== 'iou') {
     throw new Error(`x402Route: invalid assetKind in DB row: ${kind}`);
   }
   return {
